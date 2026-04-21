@@ -1,0 +1,2209 @@
+package bot
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/redis/go-redis/v9"
+	"go.uber.org/zap"
+	"golang.org/x/sync/errgroup"
+	tele "gopkg.in/telebot.v3"
+
+	"github.com/openclaw/clawguard/internal/ai"
+	"github.com/openclaw/clawguard/internal/config"
+	"github.com/openclaw/clawguard/internal/store"
+)
+
+type reviewableContent struct {
+	Text     string
+	Kind     string
+	Skip     bool
+	HasImage bool
+}
+
+func (s *Service) handleIncomingMessage(c tele.Context) error {
+	s.MarkUpdateSeen()
+	msg := c.Message()
+	if msg == nil || msg.Chat == nil || msg.Sender == nil || msg.Private() {
+		return nil
+	}
+
+	ctx := context.Background()
+	authorized, err := s.IsAuthorizedGroup(ctx, msg.Chat.ID)
+	if err != nil {
+		s.logger.Warn("authorized group check failed, allow message", zap.Error(err), zap.Int64("chat_id", msg.Chat.ID))
+	} else if !authorized {
+		return nil
+	}
+
+	state, err := s.GetSystemState(ctx)
+	if err != nil {
+		s.logger.Warn("load system state failed, allow message", zap.Error(err), zap.Int64("chat_id", msg.Chat.ID))
+		state = store.SystemState{}
+	}
+	if state.Frozen {
+		s.logger.Info("message ignored because system is frozen", zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID), zap.Int("message_id", msg.ID))
+		return nil
+	}
+
+	policy, err := config.LoadPolicy(ctx, s.queries, msg.Chat.ID)
+	if err != nil {
+		s.logger.Warn("load guard policy failed for message filter, using defaults", zap.Error(err), zap.Int64("chat_id", msg.Chat.ID))
+		policy = config.DefaultPolicy
+	}
+
+	isAdmin := false
+	if policy.Filter.Links.ExemptAdmins {
+		adminStatus, err := s.isChatAdmin(ctx, msg.Chat.ID, msg.Sender.ID)
+		if err != nil {
+			s.logger.Warn("check chat admin failed", zap.Error(err), zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID))
+		}
+		isAdmin = adminStatus
+	}
+
+	// 管理员跳过 filter 检查，但关键词回复对所有人生效
+	if !isAdmin {
+		handled, err := s.applyFilterChecks(ctx, msg, policy)
+		if err != nil {
+			return err
+		}
+		if handled {
+			return nil
+		}
+	}
+
+	matchedReply, err := s.tryKeywordReply(ctx, msg, policy)
+	if err != nil {
+		return err
+	}
+	if matchedReply {
+		return nil
+	}
+
+	content := s.buildReviewableContent(ctx, msg)
+	if content.Skip {
+		return nil
+	}
+	if content.Kind != "text" {
+		switch strings.TrimSpace(strings.ToLower(policy.Filter.NonTextMessages)) {
+		case "", "ai_review":
+		case "off":
+			return nil
+		case "delete":
+			if err := s.deleteMessage(msg); err != nil {
+				s.logger.Warn("delete non-text message failed", zap.Error(err), zap.Int64("chat_id", msg.Chat.ID), zap.Int("message_id", msg.ID))
+			}
+			return nil
+		case "delete_warn":
+			if err := s.deleteMessage(msg); err != nil {
+				s.logger.Warn("delete non-text message failed", zap.Error(err), zap.Int64("chat_id", msg.Chat.ID), zap.Int("message_id", msg.ID))
+				return nil
+			}
+			if _, _, err := s.IncrWarning(ctx, msg.Chat, msg.Sender, "filter_non_text_message", policy); err != nil {
+				s.logger.Warn("warn non-text message failed", zap.Error(err), zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID))
+			}
+			return nil
+		default:
+			s.logger.Warn("unknown non_text_messages policy, fallback to ai_review", zap.String("action", policy.Filter.NonTextMessages), zap.Int64("chat_id", msg.Chat.ID))
+		}
+	}
+
+	if state.AIPaused {
+		return nil
+	}
+
+	return s.applyAIModeration(ctx, msg, policy, isAdmin, content)
+}
+
+func (s *Service) applyAIModeration(ctx context.Context, msg *tele.Message, policy config.GuardPolicy, isAdmin bool, content reviewableContent) error {
+	if msg == nil || msg.Chat == nil || msg.Sender == nil || !policy.AI.Enabled || s.aiModerator == nil {
+		return nil
+	}
+	if isAdmin {
+		return nil
+	}
+
+	trust, err := s.ensureUserTrust(ctx, msg)
+	if err != nil {
+		s.logger.Warn("ensure user trust failed", zap.Error(err), zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID))
+		return nil
+	}
+
+	switch trust.Status {
+	case "trusted":
+		// AI 触发关键词：trusted 用户命中关键词时仍走 AI 审核
+		if policy.AI.Enabled && len(policy.AI.TriggerKeywords) > 0 {
+			if s.matchesTriggerKeywords(msg, policy.AI.TriggerKeywords) {
+				s.logger.Info("trusted user hit AI trigger keyword, sending to AI",
+					zap.Int64("chat_id", msg.Chat.ID),
+					zap.Int64("user_id", msg.Sender.ID),
+					zap.String("text", truncateString(msg.Text, 100)),
+				)
+				break // fall through to AI moderation below
+			}
+		}
+		return nil
+	case "banned":
+		if err := s.deleteMessage(msg); err != nil {
+			s.logger.Warn("delete banned user message failed", zap.Error(err))
+		}
+		if err := s.banUser(msg.Chat, msg.Sender); err != nil {
+			return err
+		}
+		s.sendActionFeedback(msg.Chat, nil, policy.Feedback.Ban, map[string]string{
+			"user":   feedbackUserLabel(msg.Sender, policy.Feedback.Ban.ParseMode),
+			"reason": "已在封禁名单内",
+		})
+		return nil
+	}
+
+	// 未毕业用户（new/suspicious）发言前 bio 审核（开关打开时才做）
+	// 防止用户入群时 bio 干净、之后偷偷改 bio 加广告
+	if policy.AI.CheckProfileOnMessage {
+		if matched, err := s.checkProfileOnMessage(ctx, msg.Chat, msg.Sender, policy); err != nil {
+			s.logger.Warn("on-message profile check failed, fallthrough to AI",
+				zap.Error(err),
+				zap.Int64("chat_id", msg.Chat.ID),
+				zap.Int64("user_id", msg.Sender.ID))
+		} else if matched != "" {
+			// 命中：删消息 + ban + 记 violation，不再进入 AI 消息审核
+			if err := s.deleteMessage(msg); err != nil {
+				s.logger.Warn("delete msg on profile match failed", zap.Error(err))
+			}
+			if err := s.banUser(msg.Chat, msg.Sender); err != nil {
+				s.logger.Error("ban on-message profile match user failed",
+					zap.Error(err),
+					zap.Int64("chat_id", msg.Chat.ID),
+					zap.Int64("user_id", msg.Sender.ID))
+				return err
+			}
+			payload, _ := json.Marshal(map[string]string{"matched": matched, "trigger": "on_message"})
+			if _, err := s.queries.InsertViolation(ctx, store.InsertViolationParams{
+				ChatID:      msg.Chat.ID,
+				UserID:      msg.Sender.ID,
+				Username:    stringPtr(msg.Sender.Username),
+				Rule:        "profile_match_on_message",
+				Matched:     stringPtr(matched),
+				Action:      "ban",
+				MessageText: stringPtr(string(payload)),
+			}); err != nil {
+				s.logger.Warn("insert on-message profile violation failed", zap.Error(err))
+			}
+			s.sendActionFeedback(msg.Chat, nil, policy.Feedback.Ban, map[string]string{
+				"user":   feedbackUserLabel(msg.Sender, policy.Feedback.Ban.ParseMode),
+				"reason": "资料简介违规：" + matched,
+			})
+			return nil
+		}
+	}
+
+	imageBase64 := ""
+	imageHash := ""
+	if content.HasImage && policy.AI.ImageModerationEnabled {
+		imageCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+		defer cancel()
+
+		loadedBase64, loadedHash, err := s.loadPhotoForModeration(imageCtx, msg)
+		if err != nil {
+			s.logger.Warn("download image for moderation failed, fallback to text", zap.Error(err), zap.Int64("chat_id", msg.Chat.ID), zap.Int("message_id", msg.ID))
+		} else {
+			imageBase64 = loadedBase64
+			imageHash = loadedHash
+		}
+	}
+
+	forwardFrom := extractForwardSource(msg)
+
+	output, err := s.aiModerator.CheckMessage(ctx, ai.CheckInput{
+		ChatID:      msg.Chat.ID,
+		UserID:      msg.Sender.ID,
+		Text:        content.Text,
+		SenderName:  displayName(msg.Sender),
+		ForwardFrom: forwardFrom,
+		ImageBase64: imageBase64,
+		ImageHash:   imageHash,
+		Policy:      policy.AI,
+	})
+	if err != nil {
+		s.logger.Warn("ai moderation failed, allow message", zap.Error(err), zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID))
+		if recordErr := s.recordAIDecisionError(ctx, msg, content.Text, err); recordErr != nil {
+			s.logger.Warn("record ai decision error failed", zap.Error(recordErr))
+		}
+		return nil
+	}
+	if output.Skipped {
+		return s.maybeGraduateUser(ctx, trust, policy.AI)
+	}
+
+	action := s.decideAIAction(policy.AI, output)
+	if output.FlagOnly && action != "none" {
+		action = "flag"
+	}
+	if err := s.recordAIDecision(ctx, msg, content.Text, output, action); err != nil {
+		s.logger.Warn("record ai decision failed", zap.Error(err))
+	}
+	if err := s.applyAIAction(ctx, msg, policy, trust, output, action); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Service) applyFilterChecks(ctx context.Context, msg *tele.Message, policy config.GuardPolicy) (bool, error) {
+	result := checkMessage(ctx, msg, policy.Filter)
+	if !result.Hit {
+		var err error
+		result, err = s.checkStatefulFilter(ctx, msg, policy)
+		if err != nil {
+			return false, err
+		}
+	}
+	if !result.Hit {
+		return false, nil
+	}
+	if err := s.applyFilterAction(ctx, msg, policy, result); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (s *Service) checkStatefulFilter(ctx context.Context, msg *tele.Message, policy config.GuardPolicy) (FilterResult, error) {
+	if msg == nil || msg.Chat == nil || msg.Sender == nil {
+		return FilterResult{}, nil
+	}
+	if s.queries == nil {
+		return FilterResult{}, nil
+	}
+
+	trust, err := s.ensureUserTrust(ctx, msg)
+	if err != nil {
+		return FilterResult{}, fmt.Errorf("load user trust for filter: %w", err)
+	}
+
+	if result, err := s.checkNewUserFilter(ctx, msg, trust, policy.Filter.NewUser); err != nil {
+		return FilterResult{}, err
+	} else if result.Hit {
+		return result, nil
+	}
+	if result, err := s.checkRateLimitFilter(ctx, msg, policy.AntiSpam.RateLimit); err != nil {
+		return FilterResult{}, err
+	} else if result.Hit {
+		return result, nil
+	}
+	return FilterResult{}, nil
+}
+
+func (s *Service) checkNewUserFilter(ctx context.Context, msg *tele.Message, trust store.UserTrust, policy config.FilterNewUserPolicy) (FilterResult, error) {
+	if !policy.Enabled || !isRestrictedNewUser(trust, policy.DurationHours) {
+		return FilterResult{}, nil
+	}
+
+	if policy.NoLinks {
+		if links := collectMessageLinks(msg); len(links) > 0 {
+			return FilterResult{
+				Hit:         true,
+				Reason:      "filter_newuser_no_links",
+				MatchedRule: links[0],
+			}, nil
+		}
+	}
+	if policy.NoForwards && extractForwardSource(msg) != "" {
+		return FilterResult{
+			Hit:         true,
+			Reason:      "filter_newuser_no_forwards",
+			MatchedRule: extractForwardSource(msg),
+		}, nil
+	}
+	if policy.NoMedia && messageHasRestrictedMedia(msg) {
+		return FilterResult{
+			Hit:         true,
+			Reason:      "filter_newuser_no_media",
+			MatchedRule: messageMediaKind(msg),
+		}, nil
+	}
+	if policy.MaxMessagesPerMinute > 0 {
+		count, err := s.bumpWindowCounter(ctx, fmt.Sprintf("newuser:ratelimit:%d:%d", msg.Chat.ID, msg.Sender.ID), time.Minute)
+		if err != nil {
+			return FilterResult{}, fmt.Errorf("new user rate limit counter: %w", err)
+		}
+		if count > int64(policy.MaxMessagesPerMinute) {
+			return FilterResult{
+				Hit:         true,
+				Reason:      "filter_newuser_rate_limit",
+				MatchedRule: strconv.FormatInt(count, 10),
+			}, nil
+		}
+	}
+	return FilterResult{}, nil
+}
+
+func (s *Service) checkRateLimitFilter(ctx context.Context, msg *tele.Message, policy config.AntiSpamRatePolicy) (FilterResult, error) {
+	if !policy.Enabled || policy.MessagesPer10s <= 0 || msg == nil || msg.Chat == nil || msg.Sender == nil {
+		return FilterResult{}, nil
+	}
+	count, err := s.bumpWindowCounter(ctx, fmt.Sprintf("ratelimit:%d:%d", msg.Chat.ID, msg.Sender.ID), 10*time.Second)
+	if err != nil {
+		return FilterResult{}, fmt.Errorf("rate limit counter: %w", err)
+	}
+	if count <= int64(policy.MessagesPer10s) {
+		return FilterResult{}, nil
+	}
+	return FilterResult{
+		Hit:         true,
+		Reason:      "filter_rate_limit",
+		MatchedRule: strconv.FormatInt(count, 10),
+		Action:      policy.Action,
+	}, nil
+}
+
+func (s *Service) bumpWindowCounter(ctx context.Context, key string, ttl time.Duration) (int64, error) {
+	if s.redis == nil {
+		return 0, nil
+	}
+	pipe := s.redis.TxPipeline()
+	countCmd := pipe.Incr(ctx, key)
+	pipe.Expire(ctx, key, ttl)
+	if _, err := pipe.Exec(ctx); err != nil {
+		return 0, err
+	}
+	return countCmd.Val(), nil
+}
+
+func isRestrictedNewUser(trust store.UserTrust, durationHours int) bool {
+	switch trust.Status {
+	case "suspicious":
+		return true
+	case "new":
+		if durationHours <= 0 || trust.JoinedAt.IsZero() {
+			return true
+		}
+		return time.Since(trust.JoinedAt) <= time.Duration(durationHours)*time.Hour
+	default:
+		return false
+	}
+}
+
+func messageHasRestrictedMedia(msg *tele.Message) bool {
+	if msg == nil {
+		return false
+	}
+	return msg.Photo != nil ||
+		msg.Video != nil ||
+		msg.Document != nil ||
+		msg.Animation != nil ||
+		msg.Audio != nil ||
+		msg.Voice != nil ||
+		msg.VideoNote != nil ||
+		msg.Sticker != nil
+}
+
+func messageMediaKind(msg *tele.Message) string {
+	if msg == nil {
+		return ""
+	}
+	switch {
+	case msg.Photo != nil:
+		return "photo"
+	case msg.Video != nil:
+		return "video"
+	case msg.Document != nil:
+		return "document"
+	case msg.Animation != nil:
+		return "animation"
+	case msg.Audio != nil:
+		return "audio"
+	case msg.Voice != nil:
+		return "voice"
+	case msg.VideoNote != nil:
+		return "video_note"
+	case msg.Sticker != nil:
+		return "sticker"
+	default:
+		return "media"
+	}
+}
+
+func (s *Service) applyFilterAction(ctx context.Context, msg *tele.Message, policy config.GuardPolicy, result FilterResult) error {
+	action := result.Action
+	if action == "" {
+		action = config.DefaultPolicy.Filter.Keywords.Action
+	}
+
+	actionForViolation := action
+	messageText := truncateString(collectMessageContent(msg), 1000)
+	matched := truncateString(result.MatchedRule, 200)
+
+	switch action {
+	case "delete":
+		if err := s.deleteMessage(msg); err != nil {
+			return err
+		}
+	case "delete_warn":
+		actionForViolation = "delete_warn"
+		if err := s.deleteMessage(msg); err != nil {
+			return err
+		}
+		if _, _, err := s.IncrWarning(ctx, msg.Chat, msg.Sender, result.Reason, policy); err != nil {
+			return err
+		}
+	case "delete_mute":
+		actionForViolation = "delete_mute"
+		if err := s.deleteMessage(msg); err != nil {
+			return err
+		}
+		if err := s.muteUser(msg.Chat, msg.Sender, 600); err != nil {
+			return err
+		}
+	case "delete_ban":
+		actionForViolation = "delete_ban"
+		if err := s.deleteMessage(msg); err != nil {
+			return err
+		}
+		if err := s.banUser(msg.Chat, msg.Sender); err != nil {
+			return err
+		}
+	case "warn":
+		actionForViolation = "warn"
+		if _, _, err := s.IncrWarning(ctx, msg.Chat, msg.Sender, result.Reason, policy); err != nil {
+			return err
+		}
+	case "delete_and_warn":
+		actionForViolation = "delete_warn"
+		if err := s.deleteMessage(msg); err != nil {
+			return err
+		}
+		if _, _, err := s.IncrWarning(ctx, msg.Chat, msg.Sender, result.Reason, policy); err != nil {
+			return err
+		}
+	case "mute":
+		actionForViolation = "mute"
+		if err := s.deleteMessage(msg); err != nil {
+			return err
+		}
+		if err := s.muteUser(msg.Chat, msg.Sender, 600); err != nil {
+			return err
+		}
+	default:
+		s.logger.Warn("unknown filter action, fallback to delete_warn", zap.String("action", action), zap.Int64("chat_id", msg.Chat.ID))
+		actionForViolation = "delete_warn"
+		if err := s.deleteMessage(msg); err != nil {
+			return err
+		}
+		if _, _, err := s.IncrWarning(ctx, msg.Chat, msg.Sender, result.Reason, policy); err != nil {
+			return err
+		}
+	}
+
+	if _, err := s.queries.InsertViolation(ctx, store.InsertViolationParams{
+		ChatID:      msg.Chat.ID,
+		UserID:      msg.Sender.ID,
+		Username:    stringPtr(msg.Sender.Username),
+		Rule:        result.Reason,
+		Matched:     stringPtr(matched),
+		Action:      actionForViolation,
+		MessageText: stringPtr(messageText),
+	}); err != nil {
+		return fmt.Errorf("insert filter violation: %w", err)
+	}
+
+	s.resetTrustAfterViolation(ctx, msg, actionForViolation, stringPtr(result.Reason))
+
+	// 动作反馈（根据 action 派发到不同模板）
+	s.dispatchActionFeedback(msg, policy, actionForViolation, humanReason(result.Reason, matched), matched)
+
+	return nil
+}
+
+// humanReason 把 system 级 reason 翻译成人话
+func humanReason(rawReason, matched string) string {
+	if matched != "" {
+		switch rawReason {
+		case "filter_keyword":
+			return "触发关键词 " + matched
+		case "filter_regex":
+			return "触发正则 " + matched
+		case "filter_link":
+			return "发了不允许的链接 " + matched
+		case "filter_username":
+			return "用户名触发黑名单 " + matched
+		case "filter_rate_limit":
+			return "发言过快"
+		case "filter_newuser_no_links":
+			return "新人不能发链接"
+		case "filter_newuser_no_forwards":
+			return "新人不能转发"
+		case "filter_newuser_no_media":
+			return "新人不能发媒体"
+		case "filter_newuser_rate_limit":
+			return "新人发言过快"
+		case "profile_match":
+			return "资料命中黑名单 " + matched
+		}
+	}
+	switch rawReason {
+	case "filter_keyword":
+		return "触发关键词过滤"
+	case "filter_regex":
+		return "触发正则过滤"
+	case "filter_link":
+		return "链接过滤"
+	case "filter_username":
+		return "用户名过滤"
+	case "filter_rate_limit":
+		return "发言频率限制"
+	case "filter_non_text_message":
+		return "新人不能发此类消息"
+	case "filter_newuser_no_links", "filter_newuser_no_forwards",
+		"filter_newuser_no_media", "filter_newuser_rate_limit":
+		return "新人限制"
+	case "profile_match":
+		return "资料黑名单"
+	case "cas_banned":
+		return "CAS 黑名单"
+	case "verify_timeout":
+		return "验证超时"
+	case "ai_banned":
+		return "AI 审核命中（封禁）"
+	case "ai_suspicious":
+		return "AI 审核可疑"
+	case "ai_error":
+		return "AI 审核异常"
+	case "ai_clean":
+		return "AI 审核通过"
+	}
+	if rawReason == "" {
+		return "违规"
+	}
+	return rawReason
+}
+
+// dispatchActionFeedback 根据 action 名称选择对应的反馈模板并发送
+func (s *Service) dispatchActionFeedback(
+	msg *tele.Message,
+	policy config.GuardPolicy,
+	action string,
+	reason string,
+	matched string,
+) {
+	if msg == nil || msg.Chat == nil || msg.Sender == nil {
+		return
+	}
+	fb := policy.Feedback
+	vars := map[string]string{
+		"user":    feedbackUserLabel(msg.Sender, fb.DeleteMsg.ParseMode),
+		"group":   msg.Chat.Title,
+		"reason":  reason,
+		"rule":    reason,
+		"matched": matched,
+		"keyword": matched,
+	}
+
+	switch action {
+	case "delete":
+		s.sendActionFeedback(msg.Chat, nil, fb.DeleteMsg, vars)
+	case "delete_warn", "warn", "delete_and_warn":
+		// warn 部分在 IncrWarning 内另走 Warn feedback；这里只触发 delete 反馈
+		if action != "warn" {
+			s.sendActionFeedback(msg.Chat, nil, fb.DeleteMsg, vars)
+		}
+	case "delete_mute", "mute":
+		vars["user"] = feedbackUserLabel(msg.Sender, fb.Mute.ParseMode)
+		vars["duration"] = "10分钟"
+		s.sendActionFeedback(msg.Chat, nil, fb.Mute, vars)
+	case "delete_ban", "ban":
+		vars["user"] = feedbackUserLabel(msg.Sender, fb.Ban.ParseMode)
+		s.sendActionFeedback(msg.Chat, nil, fb.Ban, vars)
+	case "kick":
+		vars["user"] = feedbackUserLabel(msg.Sender, fb.Kick.ParseMode)
+		s.sendActionFeedback(msg.Chat, nil, fb.Kick, vars)
+	}
+}
+
+func (s *Service) ensureUserTrust(ctx context.Context, msg *tele.Message) (store.UserTrust, error) {
+	trust, err := s.queries.GetUserTrust(ctx, msg.Chat.ID, msg.Sender.ID)
+	if err == nil {
+		if trust.Status == "archived" {
+			reactivated, reactivateErr := s.queries.ReactivateArchivedUserTrust(ctx, msg.Chat.ID, msg.Sender.ID)
+			if reactivateErr != nil {
+				return store.UserTrust{}, reactivateErr
+			}
+			s.logger.Info("archived user reactivated", zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID))
+			return reactivated, nil
+		}
+		return trust, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return store.UserTrust{}, err
+	}
+	// 没有 trust 记录的用户说明是 bot 部署前就在群里的老成员，直接标记 trusted
+	return s.queries.UpsertUserTrust(ctx, store.UpsertUserTrustParams{
+		ChatID:          msg.Chat.ID,
+		UserID:          msg.Sender.ID,
+		Username:        userFieldPtr(msg.Sender.Username),
+		FirstName:       userFieldPtr(msg.Sender.FirstName),
+		LastName:        userFieldPtr(msg.Sender.LastName),
+		JoinedAt:        time.Now(),
+		Status:          "trusted",
+		Score:           0.5,
+		MessagesChecked: 0,
+		MessagesClean:   0,
+	})
+}
+
+func (s *Service) decideAIAction(policy config.AIPolicy, output ai.CheckOutput) string {
+	// 优先按 verdict（粗分：ad/scam/harass/spam）查映射，再回退 category（细分：引流/刷单/...）
+	verdict := strings.TrimSpace(strings.ToLower(output.Verdict.Verdict))
+	if verdict != "" {
+		if action, ok := policy.ActionsByCategory[verdict]; ok && strings.TrimSpace(action) != "" {
+			return normalizeAIAction(action)
+		}
+	}
+	category := strings.TrimSpace(output.Verdict.Category)
+	if category != "" {
+		if action, ok := policy.ActionsByCategory[category]; ok && strings.TrimSpace(action) != "" {
+			return normalizeAIAction(action)
+		}
+	}
+
+	confidence := output.Verdict.Confidence
+	switch {
+	case confidence >= policy.Thresholds.Ban:
+		return "ban"
+	case confidence >= policy.Thresholds.Mute:
+		return "mute"
+	case confidence >= policy.Thresholds.Warn:
+		return "warn"
+	case confidence >= policy.Thresholds.Flag:
+		return "flag"
+	default:
+		return "none"
+	}
+}
+
+func normalizeAIAction(action string) string {
+	switch strings.TrimSpace(strings.ToLower(action)) {
+	case "delete_and_warn", "delete_warn":
+		return "warn"
+	case "delete_ban", "ban":
+		return "ban"
+	case "delete_mute", "mute":
+		return "mute"
+	case "delete":
+		return "delete"
+	case "flag":
+		return "flag"
+	case "warn":
+		return "warn"
+	default:
+		return "none"
+	}
+}
+
+func (s *Service) recordAIDecision(ctx context.Context, msg *tele.Message, messageText string, output ai.CheckOutput, action string) error {
+	_, err := s.queries.InsertAIDecision(ctx, store.InsertAIDecisionParams{
+		ChatID:        msg.Chat.ID,
+		UserID:        msg.Sender.ID,
+		MessageID:     int64(msg.ID),
+		MessageText:   stringPtr(truncateString(messageText, 2000)),
+		ProviderID:    int64PtrIfPositive(output.ProviderID),
+		ModelID:       int64PtrIfPositive(output.ModelID),
+		Model:         output.Model,
+		PromptVersion: output.PromptVersion,
+		Verdict:       output.Verdict.Verdict,
+		Confidence:    output.Verdict.Confidence,
+		Category:      output.Verdict.Category,
+		Reason:        stringPtr(output.Verdict.Reason),
+		ActionTaken:   normalizeAIAction(action),
+		LatencyMs:     int32(output.LatencyMs),
+		CostCents:     output.CostCents,
+	})
+	return err
+}
+
+func (s *Service) recordAIDecisionError(ctx context.Context, msg *tele.Message, messageText string, callErr error) error {
+	if msg == nil || msg.Chat == nil || msg.Sender == nil {
+		return nil
+	}
+	reason := ""
+	if callErr != nil {
+		reason = truncateString(callErr.Error(), 2000)
+	}
+	_, err := s.queries.InsertAIDecision(ctx, store.InsertAIDecisionParams{
+		ChatID:        msg.Chat.ID,
+		UserID:        msg.Sender.ID,
+		MessageID:     int64(msg.ID),
+		MessageText:   stringPtr(truncateString(messageText, 2000)),
+		ProviderID:    nil,
+		ModelID:       nil,
+		Model:         "",
+		PromptVersion: "",
+		Verdict:       "error",
+		Confidence:    0,
+		Category:      "system",
+		Reason:        stringPtr(reason),
+		ActionTaken:   "none",
+		LatencyMs:     0,
+		CostCents:     0,
+	})
+	return err
+}
+
+func int64PtrIfPositive(v int64) *int64 {
+	if v <= 0 {
+		return nil
+	}
+	return &v
+}
+
+func buildReviewableContent(msg *tele.Message) reviewableContent {
+	return buildReviewableContentWithOptions(context.Background(), msg, nil, fetchTmeLinkPreview)
+}
+
+func (s *Service) buildReviewableContent(ctx context.Context, msg *tele.Message) reviewableContent {
+	var redisClient *redis.Client
+	if typed, ok := s.redis.(*redis.Client); ok {
+		redisClient = typed
+	}
+	return buildReviewableContentWithOptions(ctx, msg, redisClient, fetchTmeLinkPreview)
+}
+
+func buildReviewableContentWithOptions(
+	ctx context.Context,
+	msg *tele.Message,
+	redisClient *redis.Client,
+	fetchPreview func(context.Context, string, *redis.Client) (*LinkPreview, error),
+) reviewableContent {
+	current := extractReviewableContent(msg)
+
+	// 跨聊天引用回复（Reply from another chat）: msg.ExternalReplyInfo + msg.Quote
+	// 广告号常用这个绕审：自己只发单字或空，把色情/引流频道的消息作为跨群引用挂上。
+	// 必须把引用内容提升为审核主体，哪怕 current.Skip == true。
+	if msg != nil && msg.ExternalReplyInfo != nil {
+		return buildExternalReplyReviewable(msg, current)
+	}
+
+	if previewed, ok := buildTmePreviewReviewable(ctx, msg, current, redisClient, fetchPreview); ok {
+		return previewed
+	}
+
+	if current.Skip {
+		return current
+	}
+
+	// 本群引用片段（msg.Quote 非空、msg.ReplyTo 为 nil）：把 Quote 文本拼进去作为补充上下文
+	if msg != nil && msg.ReplyTo == nil && msg.Quote != nil && strings.TrimSpace(msg.Quote.Text) != "" {
+		return reviewableContent{
+			Text:     fmt.Sprintf("【引用片段】%s\n【本次消息】%s", strings.TrimSpace(msg.Quote.Text), current.Text),
+			Kind:     current.Kind,
+			Skip:     false,
+			HasImage: current.HasImage,
+		}
+	}
+
+	if msg == nil || msg.ReplyTo == nil {
+		return current
+	}
+
+	quoted := extractReviewableContent(msg.ReplyTo)
+	if quoted.Skip {
+		return current
+	}
+
+	source := quotedMessageSource(msg.ReplyTo)
+	return reviewableContent{
+		Text:     fmt.Sprintf("【引用回复】原消息(来自 %s): %s\n【本次消息】%s", source, quoted.Text, current.Text),
+		Kind:     current.Kind,
+		Skip:     false,
+		HasImage: current.HasImage,
+	}
+}
+
+func buildTmePreviewReviewable(
+	ctx context.Context,
+	msg *tele.Message,
+	current reviewableContent,
+	redisClient *redis.Client,
+	fetchPreview func(context.Context, string, *redis.Client) (*LinkPreview, error),
+) (reviewableContent, bool) {
+	urls := extractTmeURLs(msg)
+	if len(urls) == 0 {
+		return reviewableContent{}, false
+	}
+	if len(urls) > maxTmePreviewFetch {
+		urls = urls[:maxTmePreviewFetch]
+	}
+
+	timeoutCtx, cancel := context.WithTimeout(ctx, tmePreviewTimeout)
+	defer cancel()
+
+	previews := make([]*LinkPreview, len(urls))
+	group, groupCtx := errgroup.WithContext(timeoutCtx)
+	for index, rawURL := range urls {
+		index := index
+		rawURL := rawURL
+		group.Go(func() error {
+			preview, err := fetchPreview(groupCtx, rawURL, redisClient)
+			if err != nil {
+				return err
+			}
+			previews[index] = preview
+			return nil
+		})
+	}
+	_ = group.Wait()
+
+	blocks := make([]string, 0, len(previews))
+	for _, preview := range previews {
+		if preview == nil {
+			continue
+		}
+		lines := []string{
+			fmt.Sprintf("【链接预览 %s】", preview.Source),
+		}
+		if preview.Title != "" {
+			lines = append(lines, "标题: "+preview.Title)
+		}
+		if preview.Description != "" {
+			lines = append(lines, "描述: "+preview.Description)
+		}
+		if preview.ImageURL != "" {
+			lines = append(lines, "[含预览图]")
+		}
+		blocks = append(blocks, strings.Join(lines, "\n"))
+	}
+
+	currentText := strings.TrimSpace(current.Text)
+	if currentText == "" {
+		currentText = strings.TrimSpace(collectMessageContent(msg))
+	}
+
+	if len(blocks) == 0 {
+		return reviewableContent{
+			Text:     fmt.Sprintf("【无法展开的 Telegram 链接】%s\n【本次消息】%s", strings.Join(urls, ", "), currentText),
+			Kind:     current.Kind,
+			Skip:     false,
+			HasImage: current.HasImage,
+		}, true
+	}
+
+	return reviewableContent{
+		Text:     strings.Join(blocks, tmePreviewSeparator) + fmt.Sprintf("\n\n【本次消息】%s", currentText),
+		Kind:     current.Kind,
+		Skip:     false,
+		HasImage: current.HasImage,
+	}, true
+}
+
+// buildExternalReplyReviewable 把 Telegram 的“跨聊天引用回复”（ExternalReplyInfo）
+// 和用户引用的片段（Quote）组合成可送 AI 审核的内容。
+// 即便用户本次消息为空/单字（current.Skip=true），也强制返回 Skip=false，
+// 把引用内容作为审核主体。
+func buildExternalReplyReviewable(msg *tele.Message, current reviewableContent) reviewableContent {
+	ext := msg.ExternalReplyInfo
+	source := externalReplySource(ext)
+	kind, hasImage := externalReplyKind(ext)
+
+	quoteText := ""
+	if msg.Quote != nil {
+		quoteText = strings.TrimSpace(msg.Quote.Text)
+	}
+	if quoteText == "" {
+		quoteText = "[无文字]"
+	}
+
+	currentText := strings.TrimSpace(current.Text)
+	if current.Skip || currentText == "" {
+		currentText = "[无文字]"
+	}
+
+	combinedHasImage := current.HasImage || hasImage
+	finalKind := current.Kind
+	if finalKind == "" {
+		finalKind = "external_reply"
+	}
+
+	return reviewableContent{
+		Text: fmt.Sprintf(
+			"【跨聊天引用】原消息(来自 %s, 类型: %s): %s\n【本次消息】%s",
+			source, kind, quoteText, currentText,
+		),
+		Kind:     finalKind,
+		Skip:     false,
+		HasImage: combinedHasImage,
+	}
+}
+
+// externalReplySource 从 ExternalReplyInfo.Origin / Chat 里挑个最可读的来源名
+func externalReplySource(ext *tele.ExternalReplyInfo) string {
+	if ext == nil {
+		return "unknown"
+	}
+	if ext.Chat != nil {
+		if v := strings.TrimSpace(ext.Chat.Title); v != "" {
+			if u := strings.TrimSpace(ext.Chat.Username); u != "" {
+				return fmt.Sprintf("%s (@%s)", v, u)
+			}
+			return v
+		}
+		if v := strings.TrimSpace(ext.Chat.Username); v != "" {
+			return "@" + v
+		}
+	}
+	if ext.Origin != nil {
+		o := ext.Origin
+		if o.SenderChat != nil {
+			if v := strings.TrimSpace(o.SenderChat.Title); v != "" {
+				if u := strings.TrimSpace(o.SenderChat.Username); u != "" {
+					return fmt.Sprintf("%s (@%s)", v, u)
+				}
+				return v
+			}
+			if v := strings.TrimSpace(o.SenderChat.Username); v != "" {
+				return "@" + v
+			}
+		}
+		if o.Chat != nil {
+			if v := strings.TrimSpace(o.Chat.Title); v != "" {
+				return v
+			}
+			if v := strings.TrimSpace(o.Chat.Username); v != "" {
+				return "@" + v
+			}
+		}
+		if o.Sender != nil {
+			if v := strings.TrimSpace(o.Sender.Username); v != "" {
+				return "@" + v
+			}
+			name := strings.TrimSpace(o.Sender.FirstName + " " + o.Sender.LastName)
+			if name != "" {
+				return name
+			}
+		}
+		if v := strings.TrimSpace(o.SenderUsername); v != "" {
+			return v
+		}
+	}
+	return "unknown"
+}
+
+// externalReplyKind 返回被引用消息的媒体类型标签 + 是否含图
+func externalReplyKind(ext *tele.ExternalReplyInfo) (string, bool) {
+	if ext == nil {
+		return "text", false
+	}
+	switch {
+	case len(ext.Photo) > 0:
+		return "photo", true
+	case ext.Video != nil:
+		return "video", false
+	case ext.Animation != nil:
+		return "gif", false
+	case ext.Document != nil:
+		return "document", false
+	case ext.Sticker != nil:
+		return "sticker", false
+	case ext.Voice != nil:
+		return "voice", false
+	case ext.Audio != nil:
+		return "audio", false
+	case ext.Note != nil:
+		return "video_note", false
+	case ext.Contact != nil:
+		return "contact", false
+	case ext.Story != nil:
+		return "story", false
+	case ext.Poll != nil:
+		return "poll", false
+	case ext.Location != nil:
+		return "location", false
+	case ext.Venue != nil:
+		return "venue", false
+	case ext.Game != nil:
+		return "game", false
+	case ext.Dice != nil:
+		return "dice", false
+	}
+	return "text", false
+}
+
+func extractReviewableContent(msg *tele.Message) reviewableContent {
+	if msg == nil {
+		return reviewableContent{Skip: true}
+	}
+	// 转发消息：拼上转发来源信息
+	forwardPrefix := ""
+	if fwd := extractForwardSource(msg); fwd != "" {
+		forwardPrefix = "[转发自: " + fwd + "] "
+	}
+	if strings.TrimSpace(msg.Text) != "" {
+		return reviewableContent{Text: forwardPrefix + strings.TrimSpace(msg.Text), Kind: "text"}
+	}
+	if strings.TrimSpace(msg.Caption) != "" {
+		switch {
+		case msg.Photo != nil || msg.Video != nil || msg.Document != nil:
+			return reviewableContent{Text: forwardPrefix + strings.TrimSpace(msg.Caption), Kind: "media_caption", HasImage: msg.Photo != nil}
+		case msg.Animation != nil:
+			return reviewableContent{Text: forwardPrefix + "[GIF] " + strings.TrimSpace(msg.Caption), Kind: "animation"}
+		case msg.Voice != nil:
+			return reviewableContent{Text: forwardPrefix + strings.TrimSpace(msg.Caption), Kind: "voice"}
+		case msg.Audio != nil:
+			return reviewableContent{Text: forwardPrefix + strings.TrimSpace(msg.Caption), Kind: "audio"}
+		case msg.VideoNote != nil:
+			return reviewableContent{Text: forwardPrefix + strings.TrimSpace(msg.Caption), Kind: "video_note"}
+		}
+	}
+	switch {
+	case msg.Contact != nil:
+		parts := []string{"[名片]"}
+		name := strings.TrimSpace(strings.TrimSpace(msg.Contact.FirstName + " " + msg.Contact.LastName))
+		if name != "" {
+			parts = append(parts, "姓名="+name)
+		}
+		if value := strings.TrimSpace(msg.Contact.PhoneNumber); value != "" {
+			parts = append(parts, "电话="+value)
+		}
+		if value := contactTelegramIdentity(msg.Contact); value != "" {
+			parts = append(parts, "Telegram用户="+value)
+		}
+		return reviewableContent{Text: strings.Join(parts, " "), Kind: "contact"}
+	case msg.Sticker != nil:
+		parts := []string{"[贴纸]"}
+		if value := strings.TrimSpace(msg.Sticker.Emoji); value != "" {
+			parts = append(parts, "emoji="+value)
+		}
+		if value := strings.TrimSpace(msg.Sticker.SetName); value != "" {
+			parts = append(parts, "包="+value)
+		}
+		return reviewableContent{Text: strings.Join(parts, " "), Kind: "sticker"}
+	case msg.Animation != nil:
+		text := "[GIF]"
+		if value := strings.TrimSpace(msg.Animation.FileName); value != "" {
+			text += " " + value
+		}
+		return reviewableContent{Text: text, Kind: "animation"}
+	case msg.Voice != nil:
+		return reviewableContent{Text: "[语音]", Kind: "voice"}
+	case msg.Audio != nil:
+		return reviewableContent{Text: "[音频]", Kind: "audio"}
+	case msg.VideoNote != nil:
+		return reviewableContent{Text: "[语音短片]", Kind: "video_note"}
+	case msg.Photo != nil || msg.Video != nil:
+		if msg.Photo != nil {
+			return reviewableContent{Text: "[图片]", Kind: "photo", HasImage: true}
+		}
+		return reviewableContent{Skip: true}
+	case msg.Document != nil:
+		return reviewableContent{Skip: true}
+	default:
+		return reviewableContent{Skip: true}
+	}
+}
+
+func contactTelegramIdentity(contact *tele.Contact) string {
+	if contact == nil {
+		return ""
+	}
+	if contact.UserID != 0 {
+		return strconv.FormatInt(contact.UserID, 10)
+	}
+	return ""
+}
+
+func quotedMessageSource(msg *tele.Message) string {
+	if msg == nil || msg.Sender == nil {
+		return "unknown"
+	}
+	if value := strings.TrimSpace(msg.Sender.Username); value != "" {
+		return "@" + value
+	}
+	return strconv.FormatInt(msg.Sender.ID, 10)
+}
+
+func (s *Service) applyAIAction(ctx context.Context, msg *tele.Message, policy config.GuardPolicy, trust store.UserTrust, output ai.CheckOutput, action string) error {
+	checkedDelta := int32(1)
+	cleanDelta := int32(0)
+	nextStatus := trust.Status
+	score := trust.Score
+
+	switch action {
+	case "ban":
+		if err := s.deleteMessage(msg); err != nil {
+			return err
+		}
+		if err := s.banUser(msg.Chat, msg.Sender); err != nil {
+			return err
+		}
+		nextStatus = "banned"
+		score = 0
+	case "mute":
+		if err := s.deleteMessage(msg); err != nil {
+			return err
+		}
+		if err := s.muteUser(msg.Chat, msg.Sender, 600); err != nil {
+			return err
+		}
+		nextStatus = "suspicious"
+		score = 0.2
+	case "warn":
+		if err := s.deleteMessage(msg); err != nil {
+			s.logger.Warn("delete message on warn failed", zap.Error(err))
+		}
+		if _, _, err := s.IncrWarning(ctx, msg.Chat, msg.Sender, "ai_"+output.Verdict.Verdict, policy); err != nil {
+			return err
+		}
+		nextStatus = "suspicious"
+		score = 0.3
+	case "flag":
+		nextStatus = "suspicious"
+		score = 0.4
+	case "delete":
+		if err := s.deleteMessage(msg); err != nil {
+			return err
+		}
+		nextStatus = "suspicious"
+		score = 0.3
+	default:
+		cleanDelta = 1
+		score = minFloat64(1, trust.Score+0.05)
+	}
+
+	updated, err := s.queries.IncrementUserTrustCounters(ctx, store.IncrementUserTrustCountersParams{
+		ChatID:       msg.Chat.ID,
+		UserID:       msg.Sender.ID,
+		CheckedDelta: checkedDelta,
+		CleanDelta:   cleanDelta,
+		Score:        score,
+	})
+	if err != nil {
+		return err
+	}
+
+	if nextStatus != "" && nextStatus != updated.Status {
+		now := time.Now()
+		var graduatedAt *time.Time
+		if nextStatus == "trusted" {
+			graduatedAt = &now
+		}
+		updated, err = s.queries.UpdateUserTrustStatus(ctx, store.UpdateUserTrustStatusParams{
+			ChatID:      msg.Chat.ID,
+			UserID:      msg.Sender.ID,
+			Status:      nextStatus,
+			Score:       score,
+			GraduatedAt: graduatedAt,
+			Notes:       stringPtr(output.Verdict.Reason),
+		})
+		if err != nil {
+			return err
+		}
+	}
+
+	if action == "none" {
+		return s.maybeGraduateUser(ctx, updated, policy.AI)
+	}
+
+	// AI 动作反馈
+	s.dispatchAIActionFeedback(msg, policy, action, output)
+
+	s.resetTrustAfterViolation(ctx, msg, action, stringPtr(output.Verdict.Reason))
+	return nil
+}
+
+// dispatchAIActionFeedback 为 AI 触发的动作发送群内反馈
+func (s *Service) dispatchAIActionFeedback(
+	msg *tele.Message,
+	policy config.GuardPolicy,
+	action string,
+	output ai.CheckOutput,
+) {
+	if msg == nil || msg.Chat == nil || msg.Sender == nil {
+		return
+	}
+	category := output.Verdict.Verdict
+	reason := output.Verdict.Reason
+	if reason == "" {
+		reason = "AI 判定为 " + category
+	}
+
+	fb := policy.Feedback
+	vars := map[string]string{
+		"user":     feedbackUserLabel(msg.Sender, fb.DeleteMsg.ParseMode),
+		"group":    msg.Chat.Title,
+		"reason":   reason,
+		"category": category,
+		"matched":  category,
+		"keyword":  category,
+	}
+	switch action {
+	case "delete":
+		s.sendActionFeedback(msg.Chat, nil, fb.DeleteMsg, vars)
+	case "mute":
+		vars["user"] = feedbackUserLabel(msg.Sender, fb.Mute.ParseMode)
+		vars["duration"] = "10分钟"
+		s.sendActionFeedback(msg.Chat, nil, fb.Mute, vars)
+	case "ban":
+		vars["user"] = feedbackUserLabel(msg.Sender, fb.Ban.ParseMode)
+		s.sendActionFeedback(msg.Chat, nil, fb.Ban, vars)
+		// warn 走 IncrWarning，里面已经发了 Warn feedback
+	}
+}
+
+func (s *Service) resetTrustAfterViolation(ctx context.Context, msg *tele.Message, action string, notes *string) {
+	if msg == nil || msg.Chat == nil || msg.Sender == nil {
+		return
+	}
+	if !isViolationAction(action) {
+		return
+	}
+
+	trust, err := s.queries.GetUserTrust(ctx, msg.Chat.ID, msg.Sender.ID)
+	if err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			s.logger.Warn("load user trust before reset failed", zap.Error(err), zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID))
+			return
+		}
+		trust, err = s.queries.UpsertUserTrust(ctx, store.UpsertUserTrustParams{
+			ChatID:          msg.Chat.ID,
+			UserID:          msg.Sender.ID,
+			Username:        userFieldPtr(msg.Sender.Username),
+			FirstName:       userFieldPtr(msg.Sender.FirstName),
+			LastName:        userFieldPtr(msg.Sender.LastName),
+			JoinedAt:        time.Now(),
+			Status:          "new",
+			Score:           0.5,
+			MessagesChecked: 0,
+			MessagesClean:   0,
+		})
+		if err != nil {
+			s.logger.Warn("create user trust before reset failed", zap.Error(err), zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID))
+			return
+		}
+	}
+
+	score := trust.Score
+	nextStatus := trust.Status
+	switch normalizeTrustPenaltyAction(action) {
+	case "ban":
+		nextStatus = "banned"
+		score = 0
+	case "warn", "mute":
+		nextStatus = "suspicious"
+		score = minFloat64(score, 0.3)
+	case "delete":
+		score = minFloat64(score, 0.3)
+	}
+
+	if _, err := s.queries.ResetUserTrustClean(ctx, store.ResetUserTrustCleanParams{
+		ChatID: msg.Chat.ID,
+		UserID: msg.Sender.ID,
+		Score:  score,
+	}); err != nil {
+		s.logger.Warn("reset user trust clean count failed", zap.Error(err), zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID), zap.String("action", action))
+	}
+
+	if nextStatus != trust.Status || score != trust.Score {
+		var graduatedAt *time.Time
+		if nextStatus == "trusted" {
+			now := time.Now()
+			graduatedAt = &now
+		}
+		if _, err := s.queries.UpdateUserTrustStatus(ctx, store.UpdateUserTrustStatusParams{
+			ChatID:      msg.Chat.ID,
+			UserID:      msg.Sender.ID,
+			Status:      nextStatus,
+			Score:       score,
+			GraduatedAt: graduatedAt,
+			Notes:       notes,
+		}); err != nil {
+			s.logger.Warn("update user trust after violation failed", zap.Error(err), zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID), zap.String("action", action))
+		}
+	}
+}
+
+func isViolationAction(action string) bool {
+	switch normalizeTrustPenaltyAction(action) {
+	case "delete", "warn", "mute", "ban":
+		return true
+	default:
+		return false
+	}
+}
+
+func normalizeTrustPenaltyAction(action string) string {
+	switch strings.TrimSpace(strings.ToLower(action)) {
+	case "delete_warn", "delete_and_warn", "warn":
+		return "warn"
+	case "delete_mute", "mute":
+		return "mute"
+	case "delete_ban", "ban":
+		return "ban"
+	case "delete":
+		return "delete"
+	default:
+		return strings.TrimSpace(strings.ToLower(action))
+	}
+}
+
+func (s *Service) maybeGraduateUser(ctx context.Context, trust store.UserTrust, policy config.AIPolicy) error {
+	if trust.Status == "trusted" || trust.Status == "banned" || trust.Status == "suspicious" {
+		return nil
+	}
+	if int(trust.MessagesClean) < policy.GraduateAfterMessages && time.Since(trust.JoinedAt) < time.Duration(policy.GraduateAfterDays)*24*time.Hour {
+		return nil
+	}
+	now := time.Now()
+	_, err := s.queries.UpdateUserTrustStatus(ctx, store.UpdateUserTrustStatusParams{
+		ChatID:      trust.ChatID,
+		UserID:      trust.UserID,
+		Status:      "trusted",
+		Score:       maxFloat64(trust.Score, 0.95),
+		GraduatedAt: &now,
+		Notes:       stringPtr("graduated by ai trust policy"),
+	})
+	if err == nil {
+		if pol, e := config.LoadPolicy(ctx, s.queries, trust.ChatID); e == nil {
+			chat := &tele.Chat{ID: trust.ChatID}
+			user := &tele.User{ID: trust.UserID}
+			days := int(time.Since(trust.JoinedAt).Hours() / 24)
+			s.sendActionFeedback(chat, nil, pol.Feedback.TrustGraduated, map[string]string{
+				"user":     feedbackUserLabel(user, pol.Feedback.TrustGraduated.ParseMode),
+				"days":     strFormatInt(int64(days)),
+				"messages": strFormatInt(int64(trust.MessagesClean)),
+			})
+		}
+	}
+	return err
+}
+
+func minFloat64(a, b float64) float64 {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func maxFloat64(a, b float64) float64 {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func (s *Service) IncrWarning(ctx context.Context, chat *tele.Chat, user *tele.User, reason string, policy config.GuardPolicy) (int, bool, error) {
+	if chat == nil || user == nil {
+		return 0, false, nil
+	}
+	if paused, err := s.actionsPaused(ctx); err == nil && paused {
+		s.logger.Info("skip warning because actions are paused", zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID), zap.String("reason", reason))
+		return 0, false, nil
+	} else if err != nil {
+		s.logger.Warn("load system state failed before warning", zap.Error(err), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
+	}
+
+	if _, err := s.queries.InsertWarning(ctx, store.InsertWarningParams{
+		ChatID: chat.ID,
+		UserID: user.ID,
+		Reason: stringPtr(truncateString(reason, 200)),
+	}); err != nil {
+		return 0, false, fmt.Errorf("insert warning: %w", err)
+	}
+
+	activeWarnings, err := s.queries.GetActiveWarnings(ctx, store.GetActiveWarningsParams{
+		ChatID:       chat.ID,
+		UserID:       user.ID,
+		DecaySeconds: int64(policy.Warnings.DecayDays * 86400),
+	})
+	if err != nil {
+		return 0, false, fmt.Errorf("list active warnings: %w", err)
+	}
+
+	count := len(activeWarnings)
+
+	// Warn feedback
+	s.sendActionFeedback(chat, nil, policy.Feedback.Warn, map[string]string{
+		"user":    feedbackUserLabel(user, policy.Feedback.Warn.ParseMode),
+		"reason":  humanReason(reason, ""),
+		"current": strFormatInt(int64(count)),
+		"limit":   strFormatInt(int64(policy.Warnings.MaxWarns)),
+	})
+
+	if !policy.Warnings.Enabled || count < policy.Warnings.MaxWarns {
+		return count, false, nil
+	}
+
+	if err := s.escalateWarnings(ctx, chat, user, policy); err != nil {
+		return count, false, err
+	}
+
+	if err := s.queries.MarkWarningsConsumed(ctx, store.MarkWarningsConsumedParams{
+		ChatID:       chat.ID,
+		UserID:       user.ID,
+		DecaySeconds: int64(policy.Warnings.DecayDays * 86400),
+	}); err != nil {
+		return count, false, fmt.Errorf("consume warnings: %w", err)
+	}
+
+	return count, true, nil
+}
+
+func (s *Service) escalateWarnings(ctx context.Context, chat *tele.Chat, user *tele.User, policy config.GuardPolicy) error {
+	action := policy.Warnings.ActionAtMax
+	if action == "" {
+		action = config.DefaultPolicy.Warnings.ActionAtMax
+	}
+
+	switch action {
+	case "mute":
+		if err := s.muteUser(chat, user, 3600); err != nil {
+			return fmt.Errorf("mute warned user: %w", err)
+		}
+	case "mute_5m":
+		if err := s.muteUser(chat, user, 300); err != nil {
+			return fmt.Errorf("mute warned user: %w", err)
+		}
+	case "mute_1h":
+		if err := s.muteUser(chat, user, 3600); err != nil {
+			return fmt.Errorf("mute warned user: %w", err)
+		}
+	case "kick":
+		if err := s.kickUser(chat, user); err != nil {
+			return fmt.Errorf("kick warned user: %w", err)
+		}
+	case "ban":
+		if err := s.banUser(chat, user); err != nil {
+			return fmt.Errorf("ban warned user: %w", err)
+		}
+	default:
+		return fmt.Errorf("unknown warnings escalate action %q", action)
+	}
+
+	// 升级动作反馈
+	vars := map[string]string{
+		"user":   feedbackUserLabel(user, policy.Feedback.Mute.ParseMode),
+		"reason": "达到警告上限",
+	}
+	switch action {
+	case "mute", "mute_1h":
+		vars["duration"] = "1小时"
+		s.sendActionFeedback(chat, nil, policy.Feedback.Mute, vars)
+	case "mute_5m":
+		vars["duration"] = "5分钟"
+		s.sendActionFeedback(chat, nil, policy.Feedback.Mute, vars)
+	case "kick":
+		vars["user"] = feedbackUserLabel(user, policy.Feedback.Kick.ParseMode)
+		s.sendActionFeedback(chat, nil, policy.Feedback.Kick, vars)
+	case "ban":
+		vars["user"] = feedbackUserLabel(user, policy.Feedback.Ban.ParseMode)
+		s.sendActionFeedback(chat, nil, policy.Feedback.Ban, vars)
+	}
+
+	payload, _ := json.Marshal(map[string]any{
+		"warnings": policy.Warnings.MaxWarns,
+		"action":   action,
+	})
+
+	if _, err := s.queries.InsertViolation(ctx, store.InsertViolationParams{
+		ChatID:      chat.ID,
+		UserID:      user.ID,
+		Username:    stringPtr(user.Username),
+		Rule:        "warnings_threshold",
+		Action:      action,
+		MessageText: stringPtr(string(payload)),
+	}); err != nil {
+		return fmt.Errorf("insert warnings threshold violation: %w", err)
+	}
+
+	return nil
+}
+
+func (s *Service) isChatAdmin(ctx context.Context, chatID, userID int64) (bool, error) {
+	cacheKey := "chat_admin:" + strconv.FormatInt(chatID, 10) + ":" + strconv.FormatInt(userID, 10)
+	if s.redis != nil {
+		cached, err := s.redis.Get(ctx, cacheKey).Result()
+		if err == nil {
+			return cached == "1", nil
+		}
+		if err != nil && !errors.Is(err, redis.Nil) {
+			s.logger.Debug("load admin cache failed", zap.Error(err), zap.String("key", cacheKey))
+		}
+	}
+
+	member, err := s.bot.ChatMemberOf(&tele.Chat{ID: chatID}, &tele.User{ID: userID})
+	if err != nil {
+		return false, err
+	}
+
+	isAdmin := member != nil && (member.Role == tele.Creator || member.Role == tele.Administrator)
+	if s.redis != nil {
+		value := "0"
+		ttl := 10 * time.Second
+		if isAdmin {
+			value = "1"
+			ttl = 5 * time.Minute
+		}
+		_ = s.redis.Set(ctx, cacheKey, value, ttl).Err()
+	}
+
+	return isAdmin, nil
+}
+
+func (s *Service) deleteMessage(msg *tele.Message) error {
+	if msg == nil {
+		return nil
+	}
+	if paused, err := s.actionsPaused(context.Background()); err == nil && paused {
+		s.logger.Info("skip delete because actions are paused", zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID), zap.Int("message_id", msg.ID))
+		return nil
+	} else if err != nil {
+		s.logger.Warn("load system state failed before delete", zap.Error(err))
+	}
+	if err := s.bot.Delete(msg); err != nil {
+		return fmt.Errorf("delete message: %w", err)
+	}
+	return nil
+}
+
+func (s *Service) muteUser(chat *tele.Chat, user *tele.User, seconds int) error {
+	if chat == nil || user == nil {
+		return nil
+	}
+	if paused, err := s.actionsPaused(context.Background()); err == nil && paused {
+		s.logger.Info("skip mute because actions are paused", zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
+		return nil
+	} else if err != nil {
+		s.logger.Warn("load system state failed before mute", zap.Error(err))
+	}
+	if seconds <= 0 {
+		seconds = 600
+	}
+	member := &tele.ChatMember{
+		User:            user,
+		Rights:          tele.NoRights(),
+		RestrictedUntil: time.Now().Add(time.Duration(seconds) * time.Second).Unix(),
+	}
+	return s.bot.Restrict(chat, member)
+}
+
+func (s *Service) kickUser(chat *tele.Chat, user *tele.User) error {
+	if chat == nil || user == nil {
+		return nil
+	}
+	if paused, err := s.actionsPaused(context.Background()); err == nil && paused {
+		s.logger.Info("skip kick because actions are paused", zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
+		return nil
+	} else if err != nil {
+		s.logger.Warn("load system state failed before kick", zap.Error(err))
+	}
+	member := &tele.ChatMember{User: user}
+	if err := s.bot.Ban(chat, member); err != nil {
+		return err
+	}
+	return s.bot.Unban(chat, user)
+}
+
+func (s *Service) banUser(chat *tele.Chat, user *tele.User) error {
+	if chat == nil || user == nil {
+		return nil
+	}
+	if paused, err := s.actionsPaused(context.Background()); err == nil && paused {
+		s.logger.Info("skip ban because actions are paused", zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
+		return nil
+	} else if err != nil {
+		s.logger.Warn("load system state failed before ban", zap.Error(err))
+	}
+	return s.bot.Ban(chat, &tele.ChatMember{User: user})
+}
+
+func (s *Service) actionsPaused(ctx context.Context) (bool, error) {
+	state, err := s.GetSystemState(ctx)
+	if err != nil {
+		return false, err
+	}
+	return state.ActionsPaused, nil
+}
+
+func (s *Service) enqueueProfileCheckLog(chatID int64, user *tele.User, bio string, mode string, result string, matchedRule *string, aiConfidence *float32, aiVerdict *string) {
+	if s == nil || s.queries == nil || chatID == 0 || user == nil {
+		return
+	}
+
+	displayName := strings.TrimSpace(strings.TrimSpace(user.FirstName) + " " + strings.TrimSpace(user.LastName))
+	var userName *string
+	if displayName != "" {
+		userName = &displayName
+	}
+
+	username := strings.TrimSpace(user.Username)
+	var usernamePtr *string
+	if username != "" {
+		if !strings.HasPrefix(username, "@") {
+			username = "@" + username
+		}
+		usernamePtr = &username
+	}
+
+	bio = strings.TrimSpace(bio)
+	var bioPtr *string
+	if bio != "" {
+		bioPtr = &bio
+	}
+
+	params := store.InsertProfileCheckLogParams{
+		ChatID:       chatID,
+		UserID:       user.ID,
+		UserName:     userName,
+		Username:     usernamePtr,
+		Bio:          bioPtr,
+		CheckMode:    mode,
+		Result:       result,
+		MatchedRule:  matchedRule,
+		AiConfidence: aiConfidence,
+		AiVerdict:    aiVerdict,
+	}
+
+	go func(arg store.InsertProfileCheckLogParams) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		if _, err := s.queries.InsertProfileCheckLog(ctx, arg); err != nil {
+			s.logger.Warn("write profile check log failed", zap.Error(err), zap.Int64("chat_id", arg.ChatID), zap.Int64("user_id", arg.UserID), zap.String("check_mode", arg.CheckMode), zap.String("result", arg.Result))
+		}
+	}(params)
+}
+
+func (s *Service) checkProfile(ctx context.Context, chat *tele.Chat, user *tele.User, policy config.GuardPolicy) (string, error) {
+	if user == nil || !policy.Verify.CheckProfile {
+		return "", nil
+	}
+	mode := strings.ToLower(strings.TrimSpace(policy.Verify.ProfileCheckMode))
+	if mode == "" {
+		mode = "keyword"
+	}
+
+	// off: skip checking
+	if mode == "off" {
+		return "", nil
+	}
+
+	logMode := mode
+	if logMode != "ai" {
+		logMode = "keyword"
+	}
+	chatID := int64(0)
+	if chat != nil {
+		chatID = chat.ID
+	}
+
+	// gather profile text — only check bio
+	privateChat, err := s.bot.ChatByID(user.ID)
+	if err != nil {
+		if !strings.Contains(strings.ToLower(err.Error()), "user not found") {
+			s.logger.Warn("load user chat for profile check failed", zap.Error(err), zap.Int64("user_id", user.ID))
+		}
+		// cannot fetch bio, skip profile check
+		s.enqueueProfileCheckLog(chatID, user, "", logMode, "skip", nil, nil, nil)
+		return "", nil
+	}
+	var candidates []string
+	if privateChat != nil && strings.TrimSpace(privateChat.Bio) != "" {
+		candidates = []string{privateChat.Bio}
+	} else {
+		// no bio, nothing to check
+		s.enqueueProfileCheckLog(chatID, user, "", logMode, "skip", nil, nil, nil)
+		return "", nil
+	}
+	bio := strings.TrimSpace(privateChat.Bio)
+
+	// keyword mode: existing behavior
+	if logMode == "keyword" {
+		for _, blacklisted := range policy.Verify.ProfileBlacklist {
+			needle := strings.TrimSpace(blacklisted)
+			if needle == "" {
+				continue
+			}
+			lowerNeedle := strings.ToLower(needle)
+			for _, candidate := range candidates {
+				if strings.Contains(strings.ToLower(candidate), lowerNeedle) {
+					s.enqueueProfileCheckLog(chatID, user, bio, "keyword", "hit", &needle, nil, nil)
+					return needle, nil
+				}
+			}
+		}
+		s.enqueueProfileCheckLog(chatID, user, bio, "keyword", "pass", nil, nil, nil)
+		return "", nil
+	}
+
+	// ai mode: call ai moderator to check a constructed profile text
+	if mode == "ai" {
+		if s.aiModerator == nil {
+			s.logger.Warn("ai moderator not available, allow profile", zap.Int64("user_id", user.ID))
+			s.enqueueProfileCheckLog(chatID, user, bio, "ai", "error", nil, nil, nil)
+			return "", nil
+		}
+
+		text := "[新用户简介审核] 简介=" + strings.TrimSpace(privateChat.Bio)
+
+		output, err := s.aiModerator.CheckMessage(ctx, ai.CheckInput{
+			ChatID:     chatID,
+			UserID:     user.ID,
+			Text:       text,
+			SenderName: displayName(user),
+			Policy:     policy.AI,
+			SkipCache:  true,
+		})
+		if err != nil {
+			s.logger.Warn("ai profile check failed, allow profile", zap.Error(err), zap.Int64("user_id", user.ID))
+			s.enqueueProfileCheckLog(chatID, user, bio, "ai", "error", nil, nil, nil)
+			return "", nil
+		}
+		if output.Skipped {
+			s.enqueueProfileCheckLog(chatID, user, bio, "ai", "skip", nil, nil, nil)
+			return "", nil
+		}
+		verdict := strings.TrimSpace(strings.ToLower(output.Verdict.Verdict))
+		conf := output.Verdict.Confidence
+		aiConfidence := float32(conf)
+		aiVerdict := output.Verdict.Verdict
+		// if not clean and confidence >= warn threshold => matched
+		// 只接受已知危险 verdict，避免模型返回奇怪值（如 suspicious/other）误伤用户
+		validVerdicts := map[string]bool{"ad": true, "scam": true, "spam": true, "harass": true, "porn": true, "violence": true}
+		if validVerdicts[verdict] && conf >= policy.AI.Thresholds.Warn {
+			category := strings.TrimSpace(output.Verdict.Category)
+			aiCategory := category
+			if aiCategory == "" {
+				aiCategory = verdict
+			}
+			matched := verdict + "@" + aiCategory
+			s.enqueueProfileCheckLog(chatID, user, bio, "ai", "hit", &matched, &aiConfidence, &aiVerdict)
+			return matched, nil
+		}
+		s.enqueueProfileCheckLog(chatID, user, bio, "ai", "pass", nil, &aiConfidence, &aiVerdict)
+		return "", nil
+	}
+
+	// unknown mode: fallback to keyword
+	s.logger.Warn("unknown profile_check_mode, fallback to keyword", zap.String("mode", mode), zap.Int64("user_id", user.ID))
+	for _, blacklisted := range policy.Verify.ProfileBlacklist {
+		needle := strings.TrimSpace(blacklisted)
+		if needle == "" {
+			continue
+		}
+		lowerNeedle := strings.ToLower(needle)
+		for _, candidate := range candidates {
+			if strings.Contains(strings.ToLower(candidate), lowerNeedle) {
+				s.enqueueProfileCheckLog(chatID, user, bio, "keyword", "hit", &needle, nil, nil)
+				return needle, nil
+			}
+		}
+	}
+	s.enqueueProfileCheckLog(chatID, user, bio, "keyword", "pass", nil, nil, nil)
+	return "", nil
+}
+
+// checkProfileOnMessage 供未毕业用户每条消息前复用的 bio 审核。
+// 带 Redis 缓存（bio_cache_ttl_minutes 控制），节流 Telegram getChat 调用。
+// 返回 matched=="" 表示干净；matched!="" 表示命中（关键词或 AI 判定违规）。
+func (s *Service) checkProfileOnMessage(ctx context.Context, chat *tele.Chat, user *tele.User, policy config.GuardPolicy) (string, error) {
+	if user == nil || chat == nil {
+		return "", nil
+	}
+
+	mode := strings.ToLower(strings.TrimSpace(policy.AI.ProfileOnMessageMode))
+	if mode != "keyword" && mode != "ai" {
+		mode = "ai"
+	}
+
+	chatID := chat.ID
+
+	// 读 bio（带缓存）
+	bio, fromCache, err := s.fetchUserBioCached(ctx, user.ID, policy.AI.BioCacheTTLMinutes)
+	if err != nil {
+		return "", nil
+	}
+	if strings.TrimSpace(bio) == "" {
+		s.enqueueProfileCheckLog(chatID, user, "", "on_message_"+mode, "skip", nil, nil, nil)
+		return "", nil
+	}
+	_ = fromCache
+
+	// 关键词模式：复用 Verify.ProfileBlacklist
+	if mode == "keyword" {
+		for _, blacklisted := range policy.Verify.ProfileBlacklist {
+			needle := strings.TrimSpace(blacklisted)
+			if needle == "" {
+				continue
+			}
+			if strings.Contains(strings.ToLower(bio), strings.ToLower(needle)) {
+				s.enqueueProfileCheckLog(chatID, user, bio, "on_message_keyword", "hit", &needle, nil, nil)
+				return needle, nil
+			}
+		}
+		s.enqueueProfileCheckLog(chatID, user, bio, "on_message_keyword", "pass", nil, nil, nil)
+		return "", nil
+	}
+
+	// AI 模式
+	if s.aiModerator == nil {
+		s.enqueueProfileCheckLog(chatID, user, bio, "on_message_ai", "error", nil, nil, nil)
+		return "", nil
+	}
+	text := "[未毕业用户发言前 bio 审核] 简介=" + bio
+	output, err := s.aiModerator.CheckMessage(ctx, ai.CheckInput{
+		ChatID:     chatID,
+		UserID:     user.ID,
+		Text:       text,
+		SenderName: displayName(user),
+		Policy:     policy.AI,
+	})
+	if err != nil {
+		s.enqueueProfileCheckLog(chatID, user, bio, "on_message_ai", "error", nil, nil, nil)
+		return "", nil
+	}
+	if output.Skipped {
+		s.enqueueProfileCheckLog(chatID, user, bio, "on_message_ai", "skip", nil, nil, nil)
+		return "", nil
+	}
+	verdict := strings.TrimSpace(strings.ToLower(output.Verdict.Verdict))
+	conf := output.Verdict.Confidence
+	aiConf := float32(conf)
+	aiVerdict := output.Verdict.Verdict
+	validVerdicts := map[string]bool{"ad": true, "scam": true, "spam": true, "harass": true, "porn": true, "violence": true}
+	if validVerdicts[verdict] && conf >= policy.AI.Thresholds.Warn {
+		category := strings.TrimSpace(output.Verdict.Category)
+		if category == "" {
+			category = verdict
+		}
+		s.enqueueProfileCheckLog(chatID, user, bio, "on_message_ai", "hit", &category, &aiConf, &aiVerdict)
+		return "bio违规:" + category, nil
+	}
+	s.enqueueProfileCheckLog(chatID, user, bio, "on_message_ai", "pass", nil, &aiConf, &aiVerdict)
+	return "", nil
+}
+
+// fetchUserBioCached 读取用户 bio，带 Redis 缓存。
+// ttlMinutes<=0 时表示不缓存，每次直接查 getChat。
+// 返回 (bio, fromCache, err)
+func (s *Service) fetchUserBioCached(ctx context.Context, userID int64, ttlMinutes int) (string, bool, error) {
+	cacheKey := "bio:" + strconv.FormatInt(userID, 10)
+
+	// 读缓存
+	if ttlMinutes > 0 && s.redis != nil {
+		if v, err := s.redis.Get(ctx, cacheKey).Result(); err == nil {
+			// 约定：缓存里用 "__EMPTY__" 表示"查过、没 bio"
+			if v == "__EMPTY__" {
+				return "", true, nil
+			}
+			return v, true, nil
+		} else if !errors.Is(err, redis.Nil) {
+			s.logger.Debug("bio cache read failed", zap.Error(err), zap.String("key", cacheKey))
+		}
+	}
+
+	// 查 Telegram
+	privateChat, err := s.bot.ChatByID(userID)
+	if err != nil {
+		if !strings.Contains(strings.ToLower(err.Error()), "user not found") {
+			s.logger.Warn("load user chat for bio failed", zap.Error(err), zap.Int64("user_id", userID))
+		}
+		return "", false, err
+	}
+	bio := ""
+	if privateChat != nil {
+		bio = strings.TrimSpace(privateChat.Bio)
+	}
+
+	// 写缓存
+	if ttlMinutes > 0 && s.redis != nil {
+		value := bio
+		if value == "" {
+			value = "__EMPTY__"
+		}
+		_ = s.redis.Set(ctx, cacheKey, value, time.Duration(ttlMinutes)*time.Minute).Err()
+	}
+
+	return bio, false, nil
+}
+
+func (s *Service) sendWelcomeMessage(ctx context.Context, chat *tele.Chat, user *tele.User) {
+	if chat == nil || user == nil {
+		return
+	}
+
+	policy, err := config.LoadPolicy(ctx, s.queries, chat.ID)
+	if err != nil {
+		s.logger.Warn("load guard policy failed for welcome message", zap.Error(err), zap.Int64("chat_id", chat.ID))
+		return
+	}
+	welcome := policy.Verify.WelcomeMessage
+	if !welcome.Enabled || welcome.Template == nil || strings.TrimSpace(*welcome.Template) == "" {
+		return
+	}
+
+	group, err := s.queries.GetGroupByChatID(ctx, chat.ID)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		s.logger.Warn("load group failed for welcome message", zap.Error(err), zap.Int64("chat_id", chat.ID))
+	}
+
+	admins, err := s.queries.ListAdmins(ctx)
+	if err != nil {
+		s.logger.Warn("list admins failed for welcome message", zap.Error(err), zap.Int64("chat_id", chat.ID))
+		admins = []store.Admin{}
+	}
+
+	text := renderWelcomeMessage(*welcome.Template, welcomeTemplateData{
+		User:       user,
+		Chat:       chat,
+		Group:      group,
+		RulesLink:  welcome.RulesLink,
+		AdminList:  buildWelcomeAdminList(admins, chat.ID),
+		RenderedAt: time.Now(),
+	}, welcome.ParseMode)
+
+	if strings.TrimSpace(text) == "" {
+		return
+	}
+
+	parseMode := resolveParseMode(welcome.ParseMode)
+
+	message, err := s.bot.Send(chat, text, &tele.SendOptions{
+		ParseMode:             parseMode,
+		DisableWebPagePreview: true,
+	})
+	if err != nil {
+		s.logger.Warn("send welcome message failed", zap.Error(err), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
+		return
+	}
+
+	if welcome.DeleteAfterSeconds <= 0 {
+		return
+	}
+
+	time.AfterFunc(time.Duration(welcome.DeleteAfterSeconds)*time.Second, func() {
+		if err := s.bot.Delete(message); err != nil {
+			s.logger.Warn("delete welcome message failed", zap.Error(err), zap.Int64("chat_id", chat.ID), zap.Int("message_id", message.ID))
+		}
+	})
+}
+
+type welcomeTemplateData struct {
+	User       *tele.User
+	Chat       *tele.Chat
+	Group      store.Group
+	RulesLink  string
+	AdminList  string
+	RenderedAt time.Time
+}
+
+func renderWelcomeMessage(template string, data welcomeTemplateData, parseMode string) string {
+	groupTitle := ""
+	memberCount := int32(0)
+	if data.Chat != nil {
+		groupTitle = data.Chat.Title
+	}
+	if groupTitle == "" {
+		groupTitle = data.Group.Title
+	}
+	memberCount = data.Group.MemberCount
+
+	var userMention string
+	switch resolveParseMode(parseMode) {
+	case tele.ModeMarkdownV2:
+		userMention = mentionMarkdownV2(data.User)
+	case tele.ModeMarkdown:
+		userMention = mentionMarkdownLegacy(data.User)
+	default:
+		userMention = mentionHTML(data.User)
+	}
+
+	rendered := RenderMessageTemplate(template, parseMode, map[string]string{
+		"{user_mention}": userMention,
+	}, map[string]string{
+		"{user_id}":      strconv.FormatInt(data.User.ID, 10),
+		"{user_name}":    displayName(data.User),
+		"{group_title}":  groupTitle,
+		"{group_id}":     strconv.FormatInt(data.Chat.ID, 10),
+		"{member_count}": strconv.FormatInt(int64(memberCount), 10),
+		"{rules_link}":   strings.TrimSpace(data.RulesLink),
+		"{admin_list}":   data.AdminList,
+		"{date}":         data.RenderedAt.Format("2006-01-02"),
+		"{time}":         data.RenderedAt.Format("15:04"),
+	})
+	return rendered.Text
+}
+
+// mentionMarkdownV2 returns a MarkdownV2-compatible user mention link
+func mentionMarkdownV2(user *tele.User) string {
+	if user == nil {
+		return "该用户"
+	}
+	if username := strings.TrimSpace(user.Username); username != "" {
+		return mdv2EscapeChars("@" + username)
+	}
+	name := mdv2EscapeChars(displayName(user))
+	return fmt.Sprintf("[%s](%s)", name, escapeMarkdownV2LinkTarget("tg://user?id="+itoa64(user.ID)))
+}
+
+// mentionMarkdownLegacy returns a Markdown legacy mention.
+func mentionMarkdownLegacy(user *tele.User) string {
+	if user == nil {
+		return "该用户"
+	}
+	if username := strings.TrimSpace(user.Username); username != "" {
+		return "@" + username
+	}
+	return "[" + escapeMarkdownLinkText(displayName(user)) + "](tg://user?id=" + itoa64(user.ID) + ")"
+}
+
+func escapeMarkdownLinkText(s string) string {
+	replacer := strings.NewReplacer(
+		`\\`, `\\\\`,
+		`[`, `\[`,
+		`]`, `\]`,
+	)
+	return replacer.Replace(s)
+}
+
+func buildWelcomeAdminList(admins []store.Admin, chatID int64) string {
+	mentions := make([]string, 0)
+	for _, admin := range admins {
+		if admin.Role != "owner" && !adminHasScopeForChat(admin.GroupScope, chatID) {
+			continue
+		}
+		if admin.Username != nil && strings.TrimSpace(*admin.Username) != "" {
+			mentions = append(mentions, "@"+strings.TrimSpace(*admin.Username))
+			continue
+		}
+		if admin.FirstName != nil && strings.TrimSpace(*admin.FirstName) != "" {
+			mentions = append(mentions, strings.TrimSpace(*admin.FirstName))
+		}
+	}
+	if len(mentions) == 0 {
+		return "暂无"
+	}
+	return strings.Join(mentions, " ")
+}
+
+func adminHasScopeForChat(raw []byte, chatID int64) bool {
+	if len(raw) == 0 {
+		return true
+	}
+	var scope []int64
+	if err := json.Unmarshal(raw, &scope); err != nil {
+		return false
+	}
+	if len(scope) == 0 {
+		return true
+	}
+	for _, item := range scope {
+		if item == chatID {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Service) notifyGroup(chat *tele.Chat, format string, args ...any) {
+	if chat == nil {
+		return
+	}
+	if _, err := s.bot.Send(chat, fmt.Sprintf(format, args...), &tele.SendOptions{
+		ParseMode:             tele.ModeHTML,
+		DisableWebPagePreview: true,
+	}); err != nil {
+		s.logger.Warn("send moderation notice failed", zap.Error(err), zap.Int64("chat_id", chat.ID))
+	}
+}
+
+func mentionHTML(user *tele.User) string {
+	if user == nil {
+		return "该用户"
+	}
+	if username := strings.TrimSpace(user.Username); username != "" {
+		return htmlEscape("@" + username)
+	}
+	return fmt.Sprintf(`<a href="tg://user?id=%d">%s</a>`, user.ID, htmlEscape(displayName(user)))
+}
+
+func escapeMarkdownV2LinkTarget(s string) string {
+	replacer := strings.NewReplacer(`\`, `\\`, `)`, `\)`)
+	return replacer.Replace(s)
+}
+
+// extractForwardSource returns the display name of the forward source (channel title / user name).
+func extractForwardSource(msg *tele.Message) string {
+	if msg == nil {
+		return ""
+	}
+	// 转发自频道
+	if msg.OriginalChat != nil && msg.OriginalChat.Title != "" {
+		return msg.OriginalChat.Title
+	}
+	// 转发自用户
+	if msg.OriginalSender != nil {
+		return displayName(msg.OriginalSender)
+	}
+	// 隐私设置隐藏的转发来源
+	if msg.OriginalSenderName != "" {
+		return msg.OriginalSenderName
+	}
+	return ""
+}
+
+// matchesTriggerKeywords checks if a message text/caption/forward source contains any of the trigger keywords (case-insensitive fuzzy match).
+func (s *Service) matchesTriggerKeywords(msg *tele.Message, keywords []string) bool {
+	text := strings.ToLower(strings.TrimSpace(msg.Text))
+	if text == "" {
+		text = strings.ToLower(strings.TrimSpace(msg.Caption))
+	}
+	// Also include forward source name for matching
+	forwardSrc := strings.ToLower(extractForwardSource(msg))
+	combined := text + " " + forwardSrc
+	if strings.TrimSpace(combined) == "" {
+		return false
+	}
+	for _, kw := range keywords {
+		kw = strings.ToLower(strings.TrimSpace(kw))
+		if kw != "" && strings.Contains(combined, kw) {
+			return true
+		}
+	}
+	return false
+}
+
+func truncateString(value string, max int) string {
+	if max <= 0 || len(value) <= max {
+		return value
+	}
+	return value[:max]
+}
+
+func stringifyCASResult(result any) *string {
+	if result == nil {
+		return nil
+	}
+	raw, err := json.Marshal(result)
+	if err != nil {
+		return nil
+	}
+	return stringPtr(string(raw))
+}
+
+func (s *Service) requirePrivateAdmin(c tele.Context) (*tele.Message, error) {
+	msg := c.Message()
+	if msg == nil || !msg.Private() {
+		return msg, c.Send("该命令仅限管理员私聊使用", &tele.SendOptions{ParseMode: tele.ModeHTML})
+	}
+
+	if _, err := s.queries.GetAdminByTelegramID(context.Background(), c.Sender().ID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return msg, c.Send("你不在管理员列表中", &tele.SendOptions{ParseMode: tele.ModeHTML})
+		}
+		return msg, err
+	}
+
+	return msg, nil
+}

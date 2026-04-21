@@ -1,0 +1,17 @@
+:80 {
+    handle /webhook/* {
+        reverse_proxy bot:8080
+    }
+
+    handle /api/* {
+        reverse_proxy bot:8080
+    }
+
+    handle /verify/* {
+        reverse_proxy web:3000
+    }
+
+    handle {
+        reverse_proxy web:3000
+    }
+}

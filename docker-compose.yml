@@ -1,0 +1,89 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    env_file:
+      - .env
+    command: ["sh", "-c", "redis-server --requirepass \"$${REDIS_PASSWORD}\""]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$${REDIS_PASSWORD}\" ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  bot:
+    build:
+      context: ./bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      APP_ENV: production
+      HTTP_PORT: 8080
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8080:8080"
+
+  web:
+    build:
+      context: ./web
+      args:
+        NEXT_PUBLIC_BOT_USERNAME: ${BOT_USERNAME}
+        NEXT_PUBLIC_TURNSTILE_SITE_KEY: ${TURNSTILE_SITE_KEY}
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      PORT: 3000
+      INTERNAL_API: http://bot:8080
+      NEXT_PUBLIC_BOT_USERNAME: ${BOT_USERNAME}
+      NEXT_PUBLIC_TURNSTILE_SITE_KEY: ${TURNSTILE_SITE_KEY}
+    depends_on:
+      bot:
+        condition: service_started
+    ports:
+      - "127.0.0.1:3000:3000"
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      bot:
+        condition: service_started
+      web:
+        condition: service_started
+    ports:
+      - "127.0.0.1:8090:80"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddydata:/data
+      - caddyconfig:/config
+
+volumes:
+  pgdata:
+  redisdata:
+  caddydata:
+  caddyconfig:

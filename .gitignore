@@ -1,0 +1,8 @@
+.env
+node_modules/
+.next/
+dist/
+bot/clawguard
+*.log
+caddy_data/
+pgdata/
