@@ -4,6 +4,8 @@
 
 ClawGuard provides a complete management suite for Telegram groups (currently serving the RFC IDC group with ~5k members): from join verification and keyword/link filtering to LLM-powered intelligent moderation, all configurable through a visual web panel.
 
+> 🇨🇳 [中文版本](./README.md)
+
 ---
 
 ## ✨ Core Features
