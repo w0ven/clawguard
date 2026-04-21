@@ -4,6 +4,8 @@
 
 ClawGuard 为 Telegram 群组（当前服务 RFC IDC 群 ~5k 人）提供全套管理能力：从入群验证、关键词/链接过滤到 LLM 驱动的智能审核，所有功能均可通过 Web 面板可视化配置。
 
+> 🇺🇸 [English version](./en_README.md)
+
 ---
 
 ## ✨ 核心功能
