@@ -67,3 +67,28 @@ func TestCheckMessageUsernameBlacklistHit(t *testing.T) {
 		t.Fatalf("reason = %q, want filter_username", result.Reason)
 	}
 }
+
+func TestNormalizeBioAICategory(t *testing.T) {
+	tests := []struct {
+		name     string
+		verdict  string
+		category string
+		want     string
+	}{
+		{name: "empty category falls back", verdict: "scam", category: "", want: "scam"},
+		{name: "normal chinese falls back", verdict: "scam", category: "正常", want: "scam"},
+		{name: "normal english falls back case insensitive", verdict: "ad", category: " Normal ", want: "ad"},
+		{name: "safe synonym falls back", verdict: "spam", category: "SAFE", want: "spam"},
+		{name: "none synonym falls back", verdict: "harass", category: " none ", want: "harass"},
+		{name: "real category preserved", verdict: "scam", category: "博彩诈骗", want: "博彩诈骗"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := normalizeBioAICategory(tt.verdict, tt.category)
+			if got != tt.want {
+				t.Fatalf("normalizeBioAICategory(%q, %q) = %q, want %q", tt.verdict, tt.category, got, tt.want)
+			}
+		})
+	}
+}

@@ -1675,6 +1675,20 @@ func (s *Service) enqueueProfileCheckLog(chatID int64, user *tele.User, bio stri
 	}(params)
 }
 
+func normalizeBioAICategory(verdict, category string) string {
+	category = strings.TrimSpace(category)
+	if category == "" {
+		return verdict
+	}
+
+	switch strings.ToLower(category) {
+	case "正常", "normal", "clean", "safe", "无", "none", "n/a", "null":
+		return verdict
+	default:
+		return category
+	}
+}
+
 func (s *Service) checkProfile(ctx context.Context, chat *tele.Chat, user *tele.User, policy config.GuardPolicy) (string, error) {
 	if user == nil || !policy.Verify.CheckProfile {
 		return "", nil
@@ -1772,11 +1786,8 @@ func (s *Service) checkProfile(ctx context.Context, chat *tele.Chat, user *tele.
 		// 只接受已知危险 verdict，避免模型返回奇怪值（如 suspicious/other）误伤用户
 		validVerdicts := map[string]bool{"ad": true, "scam": true, "spam": true, "harass": true, "porn": true, "violence": true}
 		if validVerdicts[verdict] && conf >= policy.AI.Thresholds.Warn {
-			category := strings.TrimSpace(output.Verdict.Category)
+			category := normalizeBioAICategory(verdict, output.Verdict.Category)
 			aiCategory := category
-			if aiCategory == "" {
-				aiCategory = verdict
-			}
 			matched := verdict + "@" + aiCategory
 			s.enqueueProfileCheckLog(chatID, user, bio, "ai", "hit", &matched, &aiConfidence, &aiVerdict)
 			return matched, nil
@@ -1873,10 +1884,7 @@ func (s *Service) checkProfileOnMessage(ctx context.Context, chat *tele.Chat, us
 	aiVerdict := output.Verdict.Verdict
 	validVerdicts := map[string]bool{"ad": true, "scam": true, "spam": true, "harass": true, "porn": true, "violence": true}
 	if validVerdicts[verdict] && conf >= policy.AI.Thresholds.Warn {
-		category := strings.TrimSpace(output.Verdict.Category)
-		if category == "" {
-			category = verdict
-		}
+		category := normalizeBioAICategory(verdict, output.Verdict.Category)
 		s.enqueueProfileCheckLog(chatID, user, bio, "on_message_ai", "hit", &category, &aiConf, &aiVerdict)
 		return "bio违规:" + category, nil
 	}
