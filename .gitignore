@@ -3,6 +3,10 @@ node_modules/
 .next/
 dist/
 bot/clawguard
+bot/migrate
 *.log
+*.tsbuildinfo
 caddy_data/
 pgdata/
+backups/
+.codex-write-test
