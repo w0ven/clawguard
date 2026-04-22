@@ -61,6 +61,34 @@ type verifyCallbackPayload struct {
 	Value  string
 }
 
+// computeProfileCheckTimeout gives the AI fallback chain enough budget to complete
+// one full pass: per-model timeout * (primary + fallbacks), capped at 25s.
+func computeProfileCheckTimeout(policy config.GuardPolicy) time.Duration {
+	const (
+		minTimeout = 5 * time.Second
+		maxTimeout = 25 * time.Second
+	)
+
+	perCall := time.Duration(policy.AI.TimeoutMs) * time.Millisecond
+	if perCall <= 0 {
+		perCall = 10 * time.Second
+	}
+
+	fallbackCount := len(policy.AI.FallbackModelRefs)
+	if fallbackCount == 0 {
+		fallbackCount = len(policy.AI.FallbackChain)
+	}
+
+	total := perCall * time.Duration(fallbackCount+1)
+	if total < minTimeout {
+		return minTimeout
+	}
+	if total > maxTimeout {
+		return maxTimeout
+	}
+	return total
+}
+
 func New(cfg config.Config, logger *zap.Logger, queries *store.Queries, rdb redis.Cmdable, providers ai.ProviderRegistry, models ai.ModelRegistry, resolver *ai.Resolver) (*Service, error) {
 	verifyBtn := tele.Btn{Unique: "verify_human"}
 	verifyMathBtn := tele.Btn{Unique: "verify_math"}
@@ -471,7 +499,7 @@ func (s *Service) startAsyncVerificationChecks(chat *tele.Chat, user *tele.User,
 		}
 
 		profileStartedAt := time.Now()
-		profileCtx, profileCancel := context.WithTimeout(ctx, 5*time.Second)
+		profileCtx, profileCancel := context.WithTimeout(ctx, computeProfileCheckTimeout(policy))
 		matched, err := s.checkProfile(profileCtx, chat, user, policy)
 		profileCancel()
 		s.logger.Info("verification step completed",
