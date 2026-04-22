@@ -224,6 +224,7 @@ func (s *Service) applyAIModeration(ctx context.Context, msg *tele.Message, poli
 		ChatID:      msg.Chat.ID,
 		UserID:      msg.Sender.ID,
 		Text:        content.Text,
+		Scene:       "message",
 		SenderName:  displayName(msg.Sender),
 		ForwardFrom: forwardFrom,
 		ImageBase64: imageBase64,
@@ -1765,6 +1766,7 @@ func (s *Service) checkProfile(ctx context.Context, chat *tele.Chat, user *tele.
 			ChatID:     chatID,
 			UserID:     user.ID,
 			Text:       text,
+			Scene:      "bio",
 			SenderName: displayName(user),
 			Policy:     policy.AI,
 			SkipCache:  true,
@@ -1867,6 +1869,7 @@ func (s *Service) checkProfileOnMessage(ctx context.Context, chat *tele.Chat, us
 		ChatID:     chatID,
 		UserID:     user.ID,
 		Text:       text,
+		Scene:      "bio",
 		SenderName: displayName(user),
 		Policy:     policy.AI,
 	})

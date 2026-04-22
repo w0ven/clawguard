@@ -20,7 +20,7 @@ import (
 	"github.com/openclaw/clawguard/internal/store"
 )
 
-const basePrompt = `你是一个中文群聊反垃圾审核员。判断下面的消息属于哪类：
+const messageBasePrompt = `你是一个中文群聊反垃圾审核员。判断下面的消息属于哪类：
 - clean（正常对话）
 - ad（商业广告、引流、招聘、交友、币圈、刷单等）
 - scam（诈骗）
@@ -45,6 +45,30 @@ const basePrompt = `你是一个中文群聊反垃圾审核员。判断下面的
 消息：
 %s`
 
+const bioBasePrompt = `你是一个中文 Telegram 用户资料简介审核员。判断下面的用户简介属于哪类：
+- clean（正常简介）
+- ad（商业广告、引流、招聘、交友、币圈、刷单等）
+- scam（诈骗）
+- spam（堆砌关键词、无意义刷屏式简介）
+- harass（骚扰辱骂、攻击性内容）
+- porn（色情引流）
+- violence（暴力、血腥、极端内容）
+
+输出 JSON：
+{"items":[{"verdict":"...","confidence":0.0-1.0,"category":"招聘/交友/币圈/刷单/引流/政治/色情/暴力/正常","reason":"简短中文解释"}]}
+
+管理员自定义规则（如无则忽略）：
+%s
+
+判定要点：
+- 简介为空、或仅是普通自我介绍（职业、爱好、所在地、兴趣标签等）一律 clean。
+- 留 Telegram/WhatsApp 链接、TG 频道/群组邀请、@用户名引流、加 vx/微信、TRC20/USDT/收款方式、境外博彩、刷单兼职，按对应 verdict 判，置信度通常 >= 0.7。
+- verdict 与 category 不允许矛盾：clean 必须搭配"正常"，其他 verdict 不允许搭配"正常"。
+- 没有"消息列表"概念，每次只判一条简介。
+
+简介：
+%s`
+
 type Moderator struct {
 	logger    *zap.Logger
 	redis     redis.Cmdable
@@ -65,6 +89,7 @@ type CheckInput struct {
 	ChatID      int64
 	UserID      int64
 	Text        string
+	Scene       string
 	SenderName  string
 	ForwardFrom string // 转发来源（频道名/用户名）
 	ImageBase64 string
@@ -94,6 +119,14 @@ type pendingBatch struct {
 type batchResult struct {
 	output CheckOutput
 	err    error
+}
+
+func normalizeScene(scene string) string {
+	scene = strings.TrimSpace(strings.ToLower(scene))
+	if scene == "bio" {
+		return "bio"
+	}
+	return "message"
 }
 
 func NewModerator(logger *zap.Logger, redis redis.Cmdable, queries *store.Queries, providers ProviderRegistry, models ModelRegistry, resolver *Resolver, status interface {
@@ -145,7 +178,7 @@ func (m *Moderator) CheckMessage(ctx context.Context, input CheckInput) (CheckOu
 		return CheckOutput{Skipped: true}, nil
 	}
 
-	key := strconv.FormatInt(input.ChatID, 10) + ":" + strconv.FormatInt(input.UserID, 10)
+	key := strconv.FormatInt(input.ChatID, 10) + ":" + strconv.FormatInt(input.UserID, 10) + ":" + normalizeScene(input.Scene)
 	waiter := make(chan batchResult, 1)
 	m.mu.Lock()
 	batch := m.batches[key]
@@ -201,7 +234,12 @@ func (m *Moderator) checkBatch(ctx context.Context, inputs []CheckInput) ([]Chec
 
 	policy := inputs[0].Policy
 	promptVersion := "m5-v1"
-	prompt := buildPrompt(policy.CustomRules, inputs)
+	scene := normalizeScene(inputs[0].Scene)
+	rules := policy.MessageRules
+	if scene == "bio" {
+		rules = policy.BioRules
+	}
+	prompt := buildPrompt(scene, rules, inputs)
 	flagOnly, _ := m.overBudget(ctx, inputs[0].ChatID, policy)
 	modelChain, _ := m.resolver.BuildChain(policy, []string{"moderation"})
 
@@ -291,7 +329,12 @@ func (m *Moderator) checkIndividually(ctx context.Context, inputs []CheckInput) 
 func (m *Moderator) checkSingle(ctx context.Context, input CheckInput) (CheckOutput, error) {
 	policy := input.Policy
 	promptVersion := "m5-v1"
-	prompt := buildPrompt(policy.CustomRules, []CheckInput{input})
+	scene := normalizeScene(input.Scene)
+	rules := policy.MessageRules
+	if scene == "bio" {
+		rules = policy.BioRules
+	}
+	prompt := buildPrompt(scene, rules, []CheckInput{input})
 	flagOnly, _ := m.overBudget(ctx, input.ChatID, policy)
 	// Include vision capability when this message carries an image so the
 	// resolver filters out moderation-only text models that cannot read
@@ -372,7 +415,11 @@ func (m *Moderator) checkSingle(ctx context.Context, input CheckInput) (CheckOut
 	return CheckOutput{}, lastErr
 }
 
-func buildPrompt(customRules string, inputs []CheckInput) string {
+func buildPrompt(scene string, customRules string, inputs []CheckInput) string {
+	base := messageBasePrompt
+	if normalizeScene(scene) == "bio" {
+		base = bioBasePrompt
+	}
 	lines := make([]string, 0, len(inputs))
 	for index, input := range inputs {
 		msgLine := strings.TrimSpace(input.Text)
@@ -381,7 +428,15 @@ func buildPrompt(customRules string, inputs []CheckInput) string {
 		}
 		lines = append(lines, fmt.Sprintf("%d. %s", index+1, msgLine))
 	}
-	return fmt.Sprintf(basePrompt, strings.TrimSpace(customRules), strings.Join(lines, "\n"))
+	return fmt.Sprintf(base, strings.TrimSpace(customRules), strings.Join(lines, "\n"))
+}
+
+// BuildPromptPreview renders the full prompt for the requested scene.
+func BuildPromptPreview(scene, customRules, sampleText string) string {
+	if strings.TrimSpace(sampleText) == "" {
+		sampleText = "<示例文本>"
+	}
+	return buildPrompt(scene, customRules, []CheckInput{{Text: sampleText}})
 }
 
 func normalizeVerdict(verdict Verdict) Verdict {
@@ -440,17 +495,24 @@ func trimJSON(raw string) string {
 }
 
 func (m *Moderator) cacheKey(input CheckInput) string {
-	policyHash := m.policyFingerprint(input.Policy)
+	scene := normalizeScene(input.Scene)
+	policyHash := m.policyFingerprint(scene, input.Policy)
+	prefix := "ai:cache:" + strconv.FormatInt(input.ChatID, 10) + ":" + scene + ":" + policyHash
 	if strings.TrimSpace(input.ImageHash) != "" {
-		return "ai:cache:" + strconv.FormatInt(input.ChatID, 10) + ":" + policyHash + ":image:" + strings.TrimSpace(input.ImageHash)
+		return prefix + ":image:" + strings.TrimSpace(input.ImageHash)
 	}
 	sum := sha256.Sum256([]byte(strings.ToLower(strings.TrimSpace(input.Text))))
-	return "ai:cache:" + strconv.FormatInt(input.ChatID, 10) + ":" + policyHash + ":text:" + hex.EncodeToString(sum[:])
+	return prefix + ":text:" + hex.EncodeToString(sum[:])
 }
 
-func (m *Moderator) policyFingerprint(policy config.AIPolicy) string {
+func (m *Moderator) policyFingerprint(scene string, policy config.AIPolicy) string {
+	rules := policy.MessageRules
+	if normalizeScene(scene) == "bio" {
+		rules = policy.BioRules
+	}
 	payload, err := json.Marshal(struct {
-		CustomRules       string              `json:"custom_rules"`
+		Scene             string              `json:"scene"`
+		Rules             string              `json:"rules"`
 		PrimaryProvider   string              `json:"primary_provider"`
 		PrimaryModel      string              `json:"primary_model"`
 		PrimaryModelRef   string              `json:"primary_model_ref"`
@@ -459,7 +521,8 @@ func (m *Moderator) policyFingerprint(policy config.AIPolicy) string {
 		ActionsByCategory map[string]string   `json:"actions_by_category"`
 		Thresholds        config.AIThresholds `json:"thresholds"`
 	}{
-		CustomRules:       strings.TrimSpace(policy.CustomRules),
+		Scene:             normalizeScene(scene),
+		Rules:             strings.TrimSpace(rules),
 		PrimaryProvider:   strings.TrimSpace(policy.PrimaryProvider),
 		PrimaryModel:      strings.TrimSpace(policy.PrimaryModel),
 		PrimaryModelRef:   strings.TrimSpace(policy.PrimaryModelRef),
@@ -469,7 +532,7 @@ func (m *Moderator) policyFingerprint(policy config.AIPolicy) string {
 		Thresholds:        policy.Thresholds,
 	})
 	if err != nil {
-		sum := sha256.Sum256([]byte(strings.TrimSpace(policy.CustomRules) + "|" + strings.TrimSpace(policy.PrimaryModel)))
+		sum := sha256.Sum256([]byte(normalizeScene(scene) + "|" + strings.TrimSpace(rules) + "|" + strings.TrimSpace(policy.PrimaryModel)))
 		return hex.EncodeToString(sum[:])
 	}
 	sum := sha256.Sum256(payload)

@@ -50,7 +50,9 @@ func (s *Server) registerAdminRoutes() {
 	admin.PUT("/admins/:id", s.requireOwner(s.handleUpdateAdmin))
 	admin.DELETE("/admins/:id", s.requireOwner(s.handleDeleteAdmin))
 	admin.GET("/ai-models", s.handleListAIModels)
+	admin.GET("/ai-providers", s.handleListAIModels)
 	admin.POST("/ai-test", s.handleAITest)
+	admin.POST("/ai-prompt-preview", s.handleAIPromptPreview)
 	admin.GET("/ai-decisions", s.handleListAIDecisions)
 	admin.PUT("/ai-decisions/:id", s.handleUpdateAIDecision)
 	admin.GET("/ai-cache-stats", s.handleGetAICacheStats)
@@ -954,8 +956,11 @@ func (s *Server) handleListAIModels(c echo.Context) error {
 func (s *Server) handleAITest(c echo.Context) error {
 	admin, _ := currentAdmin(c)
 	var payload struct {
-		ChatID *int64 `json:"chat_id"`
-		Text   string `json:"text"`
+		ChatID        *int64 `json:"chat_id"`
+		Text          string `json:"text"`
+		Scene         string `json:"scene"`
+		ModelRef      string `json:"model_ref"`
+		RulesOverride string `json:"rules_override"`
 	}
 	if err := c.Bind(&payload); err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid json body"})
@@ -977,19 +982,72 @@ func (s *Server) handleAITest(c echo.Context) error {
 		policy = config.DefaultPolicy
 	}
 
+	scene := "message"
+	if strings.TrimSpace(strings.ToLower(payload.Scene)) == "bio" {
+		scene = "bio"
+	}
+
 	// 实时测试不走 batch，立即 flush
 	testPolicy := policy.AI
+	if rulesOverride := strings.TrimSpace(payload.RulesOverride); rulesOverride != "" {
+		if scene == "bio" {
+			testPolicy.BioRules = rulesOverride
+		} else {
+			testPolicy.MessageRules = rulesOverride
+		}
+	}
+	if modelRef := strings.TrimSpace(payload.ModelRef); modelRef != "" {
+		testPolicy.PrimaryModelRef = modelRef
+		testPolicy.FallbackModelRefs = nil
+		testPolicy.PrimaryProvider = ""
+		testPolicy.PrimaryModel = ""
+	}
 	testPolicy.BatchWindowMs = 1
 	output, callErr := s.botService.AIModerator().CheckMessage(c.Request().Context(), ai.CheckInput{
-		ChatID: chatID,
-		UserID: admin.TelegramID,
-		Text:   payload.Text,
-		Policy: testPolicy,
+		ChatID:    chatID,
+		UserID:    admin.TelegramID,
+		Text:      payload.Text,
+		Scene:     scene,
+		Policy:    testPolicy,
+		SkipCache: true,
 	})
 	if callErr != nil {
 		return c.JSON(http.StatusBadGateway, map[string]string{"error": callErr.Error()})
 	}
 	return c.JSON(http.StatusOK, map[string]any{"result": output})
+}
+
+func (s *Server) handleAIPromptPreview(c echo.Context) error {
+	var payload struct {
+		Scene         string `json:"scene"`
+		RulesOverride string `json:"rules_override"`
+		SampleText    string `json:"sample_text"`
+	}
+	if err := c.Bind(&payload); err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid json body"})
+	}
+
+	scene := "message"
+	if strings.TrimSpace(strings.ToLower(payload.Scene)) == "bio" {
+		scene = "bio"
+	}
+
+	policy, err := config.LoadPolicy(c.Request().Context(), s.botService.Queries(), 0)
+	if err != nil {
+		policy = config.DefaultPolicy
+	}
+
+	rules := policy.AI.MessageRules
+	if scene == "bio" {
+		rules = policy.AI.BioRules
+	}
+	if override := strings.TrimSpace(payload.RulesOverride); override != "" {
+		rules = override
+	}
+
+	return c.JSON(http.StatusOK, map[string]any{
+		"prompt": ai.BuildPromptPreview(scene, rules, payload.SampleText),
+	})
 }
 
 func (s *Server) handleListAIDecisions(c echo.Context) error {

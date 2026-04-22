@@ -13,14 +13,14 @@ import (
 )
 
 type GuardPolicy struct {
-	Verify   VerifyPolicy           `json:"verify"`
-	Filter   FilterConfig           `json:"filter"`
-	Messages MessagesPolicy         `json:"messages"`
-	AntiSpam AntiSpamPolicy         `json:"anti_spam"`
-	Warnings WarningsConfig         `json:"warnings"`
-	Logging  LoggingConfig          `json:"logging"`
-	AI       AIPolicy               `json:"ai"`
-	Feedback ActionFeedbackPolicy   `json:"feedback"`
+	Verify   VerifyPolicy         `json:"verify"`
+	Filter   FilterConfig         `json:"filter"`
+	Messages MessagesPolicy       `json:"messages"`
+	AntiSpam AntiSpamPolicy       `json:"anti_spam"`
+	Warnings WarningsConfig       `json:"warnings"`
+	Logging  LoggingConfig        `json:"logging"`
+	AI       AIPolicy             `json:"ai"`
+	Feedback ActionFeedbackPolicy `json:"feedback"`
 }
 
 // ActionFeedback 单个动作的群内反馈配置
@@ -208,14 +208,16 @@ type AIPolicy struct {
 	SkipMessagesShorterThan int               `json:"skip_messages_shorter_than"`
 	BatchWindowMs           int               `json:"batch_window_ms"`
 	CacheTTLHours           int               `json:"cache_ttl_hours"`
-	CustomRules             string            `json:"custom_rules"`
+	CustomRules             string            `json:"custom_rules,omitempty"`
+	MessageRules            string            `json:"message_rules"`
+	BioRules                string            `json:"bio_rules"`
 	Thresholds              AIThresholds      `json:"thresholds"`
 	ActionsByCategory       map[string]string `json:"actions_by_category"`
 	TriggerKeywords         []string          `json:"trigger_keywords"`
 	// 未毕业用户（new/suspicious）发言前，针对其 bio 做一次审核
-	CheckProfileOnMessage   bool              `json:"check_profile_on_message"`
-	ProfileOnMessageMode    string            `json:"profile_on_message_mode"` // "keyword" | "ai"
-	BioCacheTTLMinutes      int               `json:"bio_cache_ttl_minutes"`   // 0 表示不缓存
+	CheckProfileOnMessage bool   `json:"check_profile_on_message"`
+	ProfileOnMessageMode  string `json:"profile_on_message_mode"` // "keyword" | "ai"
+	BioCacheTTLMinutes    int    `json:"bio_cache_ttl_minutes"`   // 0 表示不缓存
 }
 
 type AIThresholds struct {
@@ -318,9 +320,9 @@ var DefaultPolicy = GuardPolicy{
 			Warn: 0.5,
 			Flag: 0.3,
 		},
-		CheckProfileOnMessage:   false,
-		ProfileOnMessageMode:    "ai",
-		BioCacheTTLMinutes:      10,
+		CheckProfileOnMessage: false,
+		ProfileOnMessageMode:  "ai",
+		BioCacheTTLMinutes:    10,
 		ActionsByCategory: map[string]string{
 			"招聘": "warn",
 			"交友": "mute",
@@ -575,6 +577,12 @@ func applyAIDefaults(policy *AIPolicy) {
 	applyAIThresholdDefaults(&policy.Thresholds)
 	if len(policy.ActionsByCategory) == 0 {
 		policy.ActionsByCategory = cloneStringMap(DefaultPolicy.AI.ActionsByCategory)
+	}
+	if strings.TrimSpace(policy.MessageRules) == "" && strings.TrimSpace(policy.CustomRules) != "" {
+		policy.MessageRules = policy.CustomRules
+	}
+	if strings.TrimSpace(policy.BioRules) == "" && strings.TrimSpace(policy.CustomRules) != "" {
+		policy.BioRules = policy.CustomRules
 	}
 }
 
