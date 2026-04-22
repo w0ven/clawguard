@@ -194,6 +194,7 @@ function AIReviewPageInner() {
               <TableRow>
                 <TableHeaderCell className="w-10" />
                 <TableHeaderCell className="w-10" />
+                <TableHeaderCell className="w-36">时间</TableHeaderCell>
                 <TableHeaderCell>消息</TableHeaderCell>
                 <TableHeaderCell>AI 判定</TableHeaderCell>
                 <TableHeaderCell>已执行</TableHeaderCell>
@@ -237,6 +238,17 @@ function AIReviewPageInner() {
                         ) : (
                           <ChevronRight className="h-4 w-4 text-[var(--text-muted)]" />
                         )}
+                      </TableCell>
+                      <TableCell className="whitespace-nowrap text-xs tabular-nums text-[var(--text-muted)]">
+                        {new Date(item.created_at).toLocaleString("zh-CN", {
+                          year: "numeric",
+                          month: "2-digit",
+                          day: "2-digit",
+                          hour: "2-digit",
+                          minute: "2-digit",
+                          second: "2-digit",
+                          hour12: false,
+                        })}
                       </TableCell>
                       <TableCell className="max-w-[360px]">
                         <p className="text-sm line-clamp-2">
@@ -324,7 +336,7 @@ function AIReviewPageInner() {
                     </TableRow>
                     {expandedId === item.id ? (
                       <TableRow className="bg-[var(--surface-2)]/40">
-                          <TableCell colSpan={7}>
+                          <TableCell colSpan={8}>
                             <MessageTextBlock text={item.message_text} />
                           </TableCell>
                       </TableRow>

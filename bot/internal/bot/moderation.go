@@ -166,7 +166,7 @@ func (s *Service) applyAIModeration(ctx context.Context, msg *tele.Message, poli
 	// 未毕业用户（new/suspicious）发言前 bio 审核（开关打开时才做）
 	// 防止用户入群时 bio 干净、之后偷偷改 bio 加广告
 	if policy.AI.CheckProfileOnMessage {
-		if matched, err := s.checkProfileOnMessage(ctx, msg.Chat, msg.Sender, policy); err != nil {
+		if matched, aiOutput, err := s.checkProfileOnMessage(ctx, msg.Chat, msg.Sender, policy); err != nil {
 			s.logger.Warn("on-message profile check failed, fallthrough to AI",
 				zap.Error(err),
 				zap.Int64("chat_id", msg.Chat.ID),
@@ -183,7 +183,6 @@ func (s *Service) applyAIModeration(ctx context.Context, msg *tele.Message, poli
 					zap.Int64("user_id", msg.Sender.ID))
 				return err
 			}
-			payload, _ := json.Marshal(map[string]string{"matched": matched, "trigger": "on_message"})
 			if _, err := s.queries.InsertViolation(ctx, store.InsertViolationParams{
 				ChatID:      msg.Chat.ID,
 				UserID:      msg.Sender.ID,
@@ -191,10 +190,18 @@ func (s *Service) applyAIModeration(ctx context.Context, msg *tele.Message, poli
 				Rule:        "profile_match_on_message",
 				Matched:     stringPtr(matched),
 				Action:      "ban",
-				MessageText: stringPtr(string(payload)),
+				MessageText: stringPtr(truncateString(msg.Text, 2000)),
 			}); err != nil {
 				s.logger.Warn("insert on-message profile violation failed", zap.Error(err))
 			}
+			decisionMode := "on_message_ai"
+			if strings.EqualFold(strings.TrimSpace(policy.AI.ProfileOnMessageMode), "keyword") {
+				decisionMode = "on_message_keyword"
+			}
+			if err := s.recordProfileViolationDecision(ctx, msg.Chat, msg.Sender, msg, matched, decisionMode, aiOutput); err != nil {
+				s.logger.Warn("record profile violation ai_decision failed", zap.Error(err))
+			}
+			s.resetTrustAfterViolation(ctx, msg, "ban", stringPtr("profile_match_on_message: "+matched))
 			s.sendActionFeedback(msg.Chat, nil, policy.Feedback.Ban, map[string]string{
 				"user":   feedbackUserLabel(msg.Sender, policy.Feedback.Ban.ParseMode),
 				"reason": "资料简介违规：" + matched,
@@ -722,6 +729,82 @@ func (s *Service) recordAIDecision(ctx context.Context, msg *tele.Message, messa
 		ActionTaken:   normalizeAIAction(action),
 		LatencyMs:     int32(output.LatencyMs),
 		CostCents:     output.CostCents,
+	})
+	return err
+}
+
+func (s *Service) recordProfileViolationDecision(
+	ctx context.Context,
+	chat *tele.Chat,
+	user *tele.User,
+	triggerMsg *tele.Message,
+	matched string,
+	mode string,
+	aiOutput *ai.CheckOutput,
+) error {
+	if chat == nil || user == nil {
+		return nil
+	}
+
+	verdict := "profile_violation"
+	category := "bio_match"
+	confidence := 1.0
+	reason := "profile check hit: " + matched
+	model := "profile_check:" + mode
+	promptVersion := ""
+	var providerID *int64
+	var modelID *int64
+	var latencyMs int32
+	var costCents float64
+
+	if aiOutput != nil {
+		if value := strings.TrimSpace(strings.ToLower(aiOutput.Verdict.Verdict)); value != "" {
+			verdict = value
+		}
+		if value := strings.TrimSpace(aiOutput.Verdict.Category); value != "" || verdict != "profile_violation" {
+			category = normalizeBioAICategory(verdict, aiOutput.Verdict.Category)
+		}
+		if aiOutput.Verdict.Confidence > 0 {
+			confidence = aiOutput.Verdict.Confidence
+		}
+		if value := strings.TrimSpace(aiOutput.Verdict.Reason); value != "" {
+			reason = value
+		}
+		providerID = int64PtrIfPositive(aiOutput.ProviderID)
+		modelID = int64PtrIfPositive(aiOutput.ModelID)
+		if value := strings.TrimSpace(aiOutput.Model); value != "" {
+			model = value
+		}
+		promptVersion = aiOutput.PromptVersion
+		latencyMs = int32(aiOutput.LatencyMs)
+		costCents = aiOutput.CostCents
+	}
+
+	messageID := int64(0)
+	var messageText *string
+	if triggerMsg != nil {
+		messageID = int64(triggerMsg.ID)
+		if value := strings.TrimSpace(triggerMsg.Text); value != "" {
+			messageText = stringPtr(truncateString(value, 2000))
+		}
+	}
+
+	_, err := s.queries.InsertAIDecision(ctx, store.InsertAIDecisionParams{
+		ChatID:        chat.ID,
+		UserID:        user.ID,
+		MessageID:     messageID,
+		MessageText:   messageText,
+		ProviderID:    providerID,
+		ModelID:       modelID,
+		Model:         model,
+		PromptVersion: promptVersion,
+		Verdict:       verdict,
+		Confidence:    confidence,
+		Category:      category,
+		Reason:        stringPtr(reason),
+		ActionTaken:   "ban",
+		LatencyMs:     latencyMs,
+		CostCents:     costCents,
 	})
 	return err
 }
@@ -1690,9 +1773,9 @@ func normalizeBioAICategory(verdict, category string) string {
 	}
 }
 
-func (s *Service) checkProfile(ctx context.Context, chat *tele.Chat, user *tele.User, policy config.GuardPolicy) (string, error) {
+func (s *Service) checkProfile(ctx context.Context, chat *tele.Chat, user *tele.User, policy config.GuardPolicy) (string, *ai.CheckOutput, error) {
 	if user == nil || !policy.Verify.CheckProfile {
-		return "", nil
+		return "", nil, nil
 	}
 	mode := strings.ToLower(strings.TrimSpace(policy.Verify.ProfileCheckMode))
 	if mode == "" {
@@ -1701,7 +1784,7 @@ func (s *Service) checkProfile(ctx context.Context, chat *tele.Chat, user *tele.
 
 	// off: skip checking
 	if mode == "off" {
-		return "", nil
+		return "", nil, nil
 	}
 
 	logMode := mode
@@ -1721,7 +1804,7 @@ func (s *Service) checkProfile(ctx context.Context, chat *tele.Chat, user *tele.
 		}
 		// cannot fetch bio, skip profile check
 		s.enqueueProfileCheckLog(chatID, user, "", logMode, "skip", nil, nil, nil)
-		return "", nil
+		return "", nil, nil
 	}
 	var candidates []string
 	if privateChat != nil && strings.TrimSpace(privateChat.Bio) != "" {
@@ -1729,7 +1812,7 @@ func (s *Service) checkProfile(ctx context.Context, chat *tele.Chat, user *tele.
 	} else {
 		// no bio, nothing to check
 		s.enqueueProfileCheckLog(chatID, user, "", logMode, "skip", nil, nil, nil)
-		return "", nil
+		return "", nil, nil
 	}
 	bio := strings.TrimSpace(privateChat.Bio)
 
@@ -1744,12 +1827,12 @@ func (s *Service) checkProfile(ctx context.Context, chat *tele.Chat, user *tele.
 			for _, candidate := range candidates {
 				if strings.Contains(strings.ToLower(candidate), lowerNeedle) {
 					s.enqueueProfileCheckLog(chatID, user, bio, "keyword", "hit", &needle, nil, nil)
-					return needle, nil
+					return needle, nil, nil
 				}
 			}
 		}
 		s.enqueueProfileCheckLog(chatID, user, bio, "keyword", "pass", nil, nil, nil)
-		return "", nil
+		return "", nil, nil
 	}
 
 	// ai mode: call ai moderator to check a constructed profile text
@@ -1757,7 +1840,7 @@ func (s *Service) checkProfile(ctx context.Context, chat *tele.Chat, user *tele.
 		if s.aiModerator == nil {
 			s.logger.Warn("ai moderator not available, allow profile", zap.Int64("user_id", user.ID))
 			s.enqueueProfileCheckLog(chatID, user, bio, "ai", "error", nil, nil, nil)
-			return "", nil
+			return "", nil, nil
 		}
 
 		text := "[新用户简介审核] 简介=" + strings.TrimSpace(privateChat.Bio)
@@ -1774,11 +1857,11 @@ func (s *Service) checkProfile(ctx context.Context, chat *tele.Chat, user *tele.
 		if err != nil {
 			s.logger.Warn("ai profile check failed, allow profile", zap.Error(err), zap.Int64("user_id", user.ID))
 			s.enqueueProfileCheckLog(chatID, user, bio, "ai", "error", nil, nil, nil)
-			return "", nil
+			return "", nil, nil
 		}
 		if output.Skipped {
 			s.enqueueProfileCheckLog(chatID, user, bio, "ai", "skip", nil, nil, nil)
-			return "", nil
+			return "", nil, nil
 		}
 		verdict := strings.TrimSpace(strings.ToLower(output.Verdict.Verdict))
 		conf := output.Verdict.Confidence
@@ -1792,10 +1875,10 @@ func (s *Service) checkProfile(ctx context.Context, chat *tele.Chat, user *tele.
 			aiCategory := category
 			matched := verdict + "@" + aiCategory
 			s.enqueueProfileCheckLog(chatID, user, bio, "ai", "hit", &matched, &aiConfidence, &aiVerdict)
-			return matched, nil
+			return matched, &output, nil
 		}
 		s.enqueueProfileCheckLog(chatID, user, bio, "ai", "pass", nil, &aiConfidence, &aiVerdict)
-		return "", nil
+		return "", &output, nil
 	}
 
 	// unknown mode: fallback to keyword
@@ -1809,20 +1892,20 @@ func (s *Service) checkProfile(ctx context.Context, chat *tele.Chat, user *tele.
 		for _, candidate := range candidates {
 			if strings.Contains(strings.ToLower(candidate), lowerNeedle) {
 				s.enqueueProfileCheckLog(chatID, user, bio, "keyword", "hit", &needle, nil, nil)
-				return needle, nil
+				return needle, nil, nil
 			}
 		}
 	}
 	s.enqueueProfileCheckLog(chatID, user, bio, "keyword", "pass", nil, nil, nil)
-	return "", nil
+	return "", nil, nil
 }
 
 // checkProfileOnMessage 供未毕业用户每条消息前复用的 bio 审核。
 // 带 Redis 缓存（bio_cache_ttl_minutes 控制），节流 Telegram getChat 调用。
 // 返回 matched=="" 表示干净；matched!="" 表示命中（关键词或 AI 判定违规）。
-func (s *Service) checkProfileOnMessage(ctx context.Context, chat *tele.Chat, user *tele.User, policy config.GuardPolicy) (string, error) {
+func (s *Service) checkProfileOnMessage(ctx context.Context, chat *tele.Chat, user *tele.User, policy config.GuardPolicy) (string, *ai.CheckOutput, error) {
 	if user == nil || chat == nil {
-		return "", nil
+		return "", nil, nil
 	}
 
 	mode := strings.ToLower(strings.TrimSpace(policy.AI.ProfileOnMessageMode))
@@ -1835,11 +1918,11 @@ func (s *Service) checkProfileOnMessage(ctx context.Context, chat *tele.Chat, us
 	// 读 bio（带缓存）
 	bio, fromCache, err := s.fetchUserBioCached(ctx, user.ID, policy.AI.BioCacheTTLMinutes)
 	if err != nil {
-		return "", nil
+		return "", nil, nil
 	}
 	if strings.TrimSpace(bio) == "" {
 		s.enqueueProfileCheckLog(chatID, user, "", "on_message_"+mode, "skip", nil, nil, nil)
-		return "", nil
+		return "", nil, nil
 	}
 	_ = fromCache
 
@@ -1852,17 +1935,17 @@ func (s *Service) checkProfileOnMessage(ctx context.Context, chat *tele.Chat, us
 			}
 			if strings.Contains(strings.ToLower(bio), strings.ToLower(needle)) {
 				s.enqueueProfileCheckLog(chatID, user, bio, "on_message_keyword", "hit", &needle, nil, nil)
-				return needle, nil
+				return needle, nil, nil
 			}
 		}
 		s.enqueueProfileCheckLog(chatID, user, bio, "on_message_keyword", "pass", nil, nil, nil)
-		return "", nil
+		return "", nil, nil
 	}
 
 	// AI 模式
 	if s.aiModerator == nil {
 		s.enqueueProfileCheckLog(chatID, user, bio, "on_message_ai", "error", nil, nil, nil)
-		return "", nil
+		return "", nil, nil
 	}
 	text := "[未毕业用户发言前 bio 审核] 简介=" + bio
 	output, err := s.aiModerator.CheckMessage(ctx, ai.CheckInput{
@@ -1875,11 +1958,11 @@ func (s *Service) checkProfileOnMessage(ctx context.Context, chat *tele.Chat, us
 	})
 	if err != nil {
 		s.enqueueProfileCheckLog(chatID, user, bio, "on_message_ai", "error", nil, nil, nil)
-		return "", nil
+		return "", nil, nil
 	}
 	if output.Skipped {
 		s.enqueueProfileCheckLog(chatID, user, bio, "on_message_ai", "skip", nil, nil, nil)
-		return "", nil
+		return "", nil, nil
 	}
 	verdict := strings.TrimSpace(strings.ToLower(output.Verdict.Verdict))
 	conf := output.Verdict.Confidence
@@ -1889,10 +1972,10 @@ func (s *Service) checkProfileOnMessage(ctx context.Context, chat *tele.Chat, us
 	if validVerdicts[verdict] && conf >= policy.AI.Thresholds.Warn {
 		category := normalizeBioAICategory(verdict, output.Verdict.Category)
 		s.enqueueProfileCheckLog(chatID, user, bio, "on_message_ai", "hit", &category, &aiConf, &aiVerdict)
-		return "bio违规:" + category, nil
+		return "bio违规:" + category, &output, nil
 	}
 	s.enqueueProfileCheckLog(chatID, user, bio, "on_message_ai", "pass", nil, &aiConf, &aiVerdict)
-	return "", nil
+	return "", &output, nil
 }
 
 // fetchUserBioCached 读取用户 bio，带 Redis 缓存。

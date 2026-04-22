@@ -486,6 +486,7 @@ func (s *Service) startAsyncVerificationChecks(chat *tele.Chat, user *tele.User,
 					feedbackText: "CAS 黑名单",
 					feedbackKind: "cas",
 					logLabel:     "cas matched user",
+					decisionMode: "cas",
 				}); err != nil {
 					s.logger.Error("handle cas match failed", zap.Error(err), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
 				}
@@ -500,7 +501,7 @@ func (s *Service) startAsyncVerificationChecks(chat *tele.Chat, user *tele.User,
 
 		profileStartedAt := time.Now()
 		profileCtx, profileCancel := context.WithTimeout(ctx, computeProfileCheckTimeout(policy))
-		matched, err := s.checkProfile(profileCtx, chat, user, policy)
+		matched, aiOutput, err := s.checkProfile(profileCtx, chat, user, policy)
 		profileCancel()
 		s.logger.Info("verification step completed",
 			zap.Int64("chat_id", chat.ID),
@@ -512,6 +513,10 @@ func (s *Service) startAsyncVerificationChecks(chat *tele.Chat, user *tele.User,
 			s.logger.Warn("profile check failed, skip", zap.Error(err), zap.Int64("user_id", user.ID))
 		} else if matched != "" {
 			payload, _ := json.Marshal(map[string]string{"matched": matched})
+			decisionMode := "join_keyword"
+			if strings.EqualFold(strings.TrimSpace(policy.Verify.ProfileCheckMode), "ai") {
+				decisionMode = "join_ai"
+			}
 			if err := s.handleAsyncVerificationMatch(ctx, asyncVerificationMatch{
 				chat:         chat,
 				user:         user,
@@ -522,6 +527,8 @@ func (s *Service) startAsyncVerificationChecks(chat *tele.Chat, user *tele.User,
 				feedbackText: "个人简介违规：" + matched,
 				feedbackKind: "profile",
 				logLabel:     "profile matched user",
+				aiOutput:     aiOutput,
+				decisionMode: decisionMode,
 			}); err != nil {
 				s.logger.Error("handle profile match failed", zap.Error(err), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
 			}
@@ -599,6 +606,8 @@ type asyncVerificationMatch struct {
 	feedbackText string
 	feedbackKind string
 	logLabel     string
+	aiOutput     *ai.CheckOutput
+	decisionMode string
 }
 
 type asyncVerificationMatchOps struct {
@@ -609,10 +618,18 @@ type asyncVerificationMatchOps struct {
 	insertViolation           func(context.Context, store.InsertViolationParams) error
 	sendCASFeedback           func()
 	sendProfileFeedback       func()
+	recordAIDecision          func(context.Context, *tele.Chat, *tele.User, string, string, *ai.CheckOutput) error
+	updateTrustBanned         func(context.Context, int64, int64, string)
 	logger                    *zap.Logger
 }
 
 func (s *Service) handleAsyncVerificationMatch(ctx context.Context, match asyncVerificationMatch) error {
+	if match.feedbackKind == "profile" && match.decisionMode == "" {
+		match.decisionMode = "join_keyword"
+		if strings.EqualFold(strings.TrimSpace(match.policy.Verify.ProfileCheckMode), "ai") {
+			match.decisionMode = "join_ai"
+		}
+	}
 	return performAsyncVerificationMatch(ctx, asyncVerificationMatchOps{
 		banUser:                  s.banUser,
 		awaitPendingVerification: s.awaitPendingVerification,
@@ -641,6 +658,16 @@ func (s *Service) handleAsyncVerificationMatch(ctx context.Context, match asyncV
 				"user":   feedbackUserLabel(match.user, match.policy.Feedback.VerifyFail.ParseMode),
 				"reason": match.feedbackText,
 			})
+		},
+		recordAIDecision: func(ctx context.Context, chat *tele.Chat, user *tele.User, matched string, mode string, aiOutput *ai.CheckOutput) error {
+			return s.recordProfileViolationDecision(ctx, chat, user, nil, matched, mode, aiOutput)
+		},
+		updateTrustBanned: func(ctx context.Context, chatID, userID int64, notes string) {
+			fakeMsg := &tele.Message{
+				Chat:   match.chat,
+				Sender: match.user,
+			}
+			s.resetTrustAfterViolation(ctx, fakeMsg, "ban", stringPtr(notes))
 		},
 		logger: s.logger,
 	}, match)
@@ -673,6 +700,18 @@ func performAsyncVerificationMatch(ctx context.Context, ops asyncVerificationMat
 		MessageText: match.messageText,
 	}); err != nil {
 		ops.logger.Warn("insert async verification violation failed", zap.Error(err), zap.Int64("chat_id", match.chat.ID), zap.Int64("user_id", match.user.ID), zap.String("rule", match.rule))
+	}
+	if ops.recordAIDecision != nil && match.decisionMode != "" && match.decisionMode != "cas" && match.matched != nil {
+		if err := ops.recordAIDecision(ctx, match.chat, match.user, *match.matched, match.decisionMode, match.aiOutput); err != nil {
+			ops.logger.Warn("record profile violation ai_decision failed", zap.Error(err), zap.Int64("chat_id", match.chat.ID), zap.Int64("user_id", match.user.ID))
+		}
+	}
+	if ops.updateTrustBanned != nil {
+		reason := match.rule
+		if match.matched != nil {
+			reason = match.rule + ": " + *match.matched
+		}
+		ops.updateTrustBanned(ctx, match.chat.ID, match.user.ID, reason)
 	}
 
 	switch match.feedbackKind {
