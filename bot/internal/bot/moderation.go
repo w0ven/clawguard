@@ -1481,7 +1481,7 @@ func (s *Service) maybeGraduateUser(ctx context.Context, trust store.UserTrust, 
 	if err == nil {
 		if pol, e := config.LoadPolicy(ctx, s.queries, trust.ChatID); e == nil {
 			chat := &tele.Chat{ID: trust.ChatID}
-			user := &tele.User{ID: trust.UserID}
+			user := userFromTrust(trust)
 			days := int(time.Since(trust.JoinedAt).Hours() / 24)
 			s.sendActionFeedback(chat, nil, pol.Feedback.TrustGraduated, map[string]string{
 				"user":         feedbackUserLabel(user, pol.Feedback.TrustGraduated.ParseMode),
@@ -1492,6 +1492,22 @@ func (s *Service) maybeGraduateUser(ctx context.Context, trust store.UserTrust, 
 		}
 	}
 	return err
+}
+
+// userFromTrust 把 store.UserTrust 还原成 *tele.User，带上 Username/FirstName/LastName，
+// 便于下游 displayName / mention / feedback 变量渲染。用于只有 trust 记录的路径（比如毕业通知）。
+func userFromTrust(trust store.UserTrust) *tele.User {
+	u := &tele.User{ID: trust.UserID}
+	if trust.Username != nil {
+		u.Username = *trust.Username
+	}
+	if trust.FirstName != nil {
+		u.FirstName = *trust.FirstName
+	}
+	if trust.LastName != nil {
+		u.LastName = *trust.LastName
+	}
+	return u
 }
 
 func minFloat64(a, b float64) float64 {
