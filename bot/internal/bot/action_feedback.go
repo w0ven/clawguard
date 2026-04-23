@@ -76,7 +76,7 @@ func renderFeedbackTemplate(tpl string, vars map[string]string, parseMode string
 	for k, v := range vars {
 		placeholder := "{" + k + "}"
 		switch k {
-		case "user", "admin":
+		case "user", "admin", "user_mention", "admin_mention":
 			structuralVars[placeholder] = v
 		default:
 			plainVars[placeholder] = v
@@ -94,9 +94,30 @@ func feedbackUserLabel(user *tele.User, parseMode string) string {
 	return itoa64(user.ID)
 }
 
+// feedbackUserMention 返回动作反馈里用于 {user_mention} 的可点击 mention，
+// 规则与欢迎语 {user_mention} 一致：有 username 用 @username，否则用 mention link。
+func feedbackUserMention(user *tele.User, parseMode string) string {
+	if user == nil {
+		return "该用户"
+	}
+	switch resolveParseMode(parseMode) {
+	case tele.ModeMarkdownV2:
+		return mentionMarkdownV2(user)
+	case tele.ModeMarkdown:
+		return mentionMarkdownLegacy(user)
+	default:
+		return mentionHTML(user)
+	}
+}
+
 // feedbackAdminLabel 返回动作反馈里用于 {admin} 的纯数字 ID。
 func feedbackAdminLabel(user *tele.User, parseMode string) string {
 	return feedbackUserLabel(user, parseMode)
+}
+
+// feedbackAdminMention 同上，用于 {admin_mention}
+func feedbackAdminMention(user *tele.User, parseMode string) string {
+	return feedbackUserMention(user, parseMode)
 }
 
 // formatDuration 把秒数格式化成人类可读

@@ -650,15 +650,17 @@ func (s *Service) handleAsyncVerificationMatch(ctx context.Context, match asyncV
 		},
 		sendCASFeedback: func() {
 			s.sendActionFeedback(match.chat, nil, match.policy.Feedback.CASHit, map[string]string{
-				"user":   feedbackUserLabel(match.user, match.policy.Feedback.CASHit.ParseMode),
-				"group":  match.chat.Title,
-				"reason": match.feedbackText,
+				"user":         feedbackUserLabel(match.user, match.policy.Feedback.CASHit.ParseMode),
+				"user_mention": feedbackUserMention(match.user, match.policy.Feedback.CASHit.ParseMode),
+				"group":        match.chat.Title,
+				"reason":       match.feedbackText,
 			})
 		},
 		sendProfileFeedback: func() {
 			s.sendActionFeedback(match.chat, nil, match.policy.Feedback.VerifyFail, map[string]string{
-				"user":   feedbackUserLabel(match.user, match.policy.Feedback.VerifyFail.ParseMode),
-				"reason": match.feedbackText,
+				"user":         feedbackUserLabel(match.user, match.policy.Feedback.VerifyFail.ParseMode),
+				"user_mention": feedbackUserMention(match.user, match.policy.Feedback.VerifyFail.ParseMode),
+				"reason":       match.feedbackText,
 			})
 		},
 		recordAIDecision: func(ctx context.Context, chat *tele.Chat, user *tele.User, matched string, mode string, aiOutput *ai.CheckOutput) error {
@@ -998,8 +1000,9 @@ func (s *Service) handleVerifyMath(c tele.Context) error {
 			return c.Respond(&tele.CallbackResponse{Text: "处理失败，请联系管理员", ShowAlert: true})
 		}
 		s.sendActionFeedback(chat, nil, policy.Feedback.VerifyFail, map[string]string{
-			"user":   feedbackUserLabel(sender, policy.Feedback.VerifyFail.ParseMode),
-			"reason": "答题错误",
+			"user":         feedbackUserLabel(sender, policy.Feedback.VerifyFail.ParseMode),
+			"user_mention": feedbackUserMention(sender, policy.Feedback.VerifyFail.ParseMode),
+			"reason":       "答题错误",
 		})
 		return c.Respond(&tele.CallbackResponse{Text: "答错了，已移出群组", ShowAlert: true})
 	}
@@ -1065,8 +1068,9 @@ func (s *Service) handleVerifyRandom(c tele.Context) error {
 			return c.Respond(&tele.CallbackResponse{Text: "处理失败，请联系管理员", ShowAlert: true})
 		}
 		s.sendActionFeedback(chat, nil, policy.Feedback.VerifyFail, map[string]string{
-			"user":   feedbackUserLabel(sender, policy.Feedback.VerifyFail.ParseMode),
-			"reason": "答题错误",
+			"user":         feedbackUserLabel(sender, policy.Feedback.VerifyFail.ParseMode),
+			"user_mention": feedbackUserMention(sender, policy.Feedback.VerifyFail.ParseMode),
+			"reason":       "答题错误",
 		})
 		return c.Respond(&tele.CallbackResponse{Text: "答错了，已移出群组", ShowAlert: true})
 	}
@@ -1103,8 +1107,9 @@ func (s *Service) completeVerification(ctx context.Context, chat *tele.Chat, use
 	// 验证通过反馈（默认关）
 	if policy, polErr := config.LoadPolicy(context.Background(), s.queries, chat.ID); polErr == nil {
 		s.sendActionFeedback(chat, nil, policy.Feedback.VerifyPass, map[string]string{
-			"user":  feedbackUserLabel(user, policy.Feedback.VerifyPass.ParseMode),
-			"group": chat.Title,
+			"user":         feedbackUserLabel(user, policy.Feedback.VerifyPass.ParseMode),
+			"user_mention": feedbackUserMention(user, policy.Feedback.VerifyPass.ParseMode),
+			"group":        chat.Title,
 		})
 	}
 
@@ -1150,8 +1155,9 @@ func (s *Service) HandleVerificationExpiry(ctx context.Context, pending store.Pe
 	}
 
 	s.sendActionFeedback(chat, nil, policy.Feedback.VerifyFail, map[string]string{
-		"user":   feedbackUserLabel(user, policy.Feedback.VerifyFail.ParseMode),
-		"reason": "验证超时",
+		"user":         feedbackUserLabel(user, policy.Feedback.VerifyFail.ParseMode),
+		"user_mention": feedbackUserMention(user, policy.Feedback.VerifyFail.ParseMode),
+		"reason":       "验证超时",
 	})
 
 	s.logger.Info(
@@ -1555,10 +1561,12 @@ func (s *Service) handleWarnCommand(c tele.Context) error {
 			FirstName: target.Display,
 		}
 		s.sendActionFeedback(chat, nil, policy.Feedback.AdminAction, map[string]string{
-			"admin":  feedbackAdminLabel(c.Sender(), policy.Feedback.AdminAction.ParseMode),
-			"user":   feedbackUserLabel(targetUser, policy.Feedback.AdminAction.ParseMode),
-			"action": "警告",
-			"reason": reason,
+			"admin":         feedbackAdminLabel(c.Sender(), policy.Feedback.AdminAction.ParseMode),
+			"admin_mention": feedbackAdminMention(c.Sender(), policy.Feedback.AdminAction.ParseMode),
+			"user":          feedbackUserLabel(targetUser, policy.Feedback.AdminAction.ParseMode),
+			"user_mention":  feedbackUserMention(targetUser, policy.Feedback.AdminAction.ParseMode),
+			"action":        "警告",
+			"reason":        reason,
 		})
 	}
 
@@ -1686,8 +1694,9 @@ func (s *Service) handleSpamCommand(c tele.Context) error {
 			FirstName: target.Display,
 		}
 		s.sendActionFeedback(chat, nil, policy.Feedback.Ban, map[string]string{
-			"user":   feedbackUserLabel(targetUser, policy.Feedback.Ban.ParseMode),
-			"reason": "spam",
+			"user":         feedbackUserLabel(targetUser, policy.Feedback.Ban.ParseMode),
+			"user_mention": feedbackUserMention(targetUser, policy.Feedback.Ban.ParseMode),
+			"reason":       "spam",
 		})
 	}
 

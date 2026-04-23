@@ -198,8 +198,9 @@ func (s *Service) applyAIModeration(ctx context.Context, msg *tele.Message, poli
 			return err
 		}
 		s.sendActionFeedback(msg.Chat, nil, policy.Feedback.Ban, map[string]string{
-			"user":   feedbackUserLabel(msg.Sender, policy.Feedback.Ban.ParseMode),
-			"reason": "已在封禁名单内",
+			"user":         feedbackUserLabel(msg.Sender, policy.Feedback.Ban.ParseMode),
+			"user_mention": feedbackUserMention(msg.Sender, policy.Feedback.Ban.ParseMode),
+			"reason":       "已在封禁名单内",
 		})
 		return nil
 	}
@@ -603,12 +604,13 @@ func (s *Service) dispatchActionFeedback(
 	}
 	fb := policy.Feedback
 	vars := map[string]string{
-		"user":    feedbackUserLabel(msg.Sender, fb.DeleteMsg.ParseMode),
-		"group":   msg.Chat.Title,
-		"reason":  reason,
-		"rule":    reason,
-		"matched": matched,
-		"keyword": matched,
+		"user":         feedbackUserLabel(msg.Sender, fb.DeleteMsg.ParseMode),
+		"user_mention": feedbackUserMention(msg.Sender, fb.DeleteMsg.ParseMode),
+		"group":        msg.Chat.Title,
+		"reason":       reason,
+		"rule":         reason,
+		"matched":      matched,
+		"keyword":      matched,
 	}
 
 	switch action {
@@ -621,13 +623,16 @@ func (s *Service) dispatchActionFeedback(
 		}
 	case "delete_mute", "mute":
 		vars["user"] = feedbackUserLabel(msg.Sender, fb.Mute.ParseMode)
+		vars["user_mention"] = feedbackUserMention(msg.Sender, fb.Mute.ParseMode)
 		vars["duration"] = "10分钟"
 		s.sendActionFeedback(msg.Chat, nil, fb.Mute, vars)
 	case "delete_ban", "ban":
 		vars["user"] = feedbackUserLabel(msg.Sender, fb.Ban.ParseMode)
+		vars["user_mention"] = feedbackUserMention(msg.Sender, fb.Ban.ParseMode)
 		s.sendActionFeedback(msg.Chat, nil, fb.Ban, vars)
 	case "kick":
 		vars["user"] = feedbackUserLabel(msg.Sender, fb.Kick.ParseMode)
+		vars["user_mention"] = feedbackUserMention(msg.Sender, fb.Kick.ParseMode)
 		s.sendActionFeedback(msg.Chat, nil, fb.Kick, vars)
 	}
 }
@@ -1327,22 +1332,25 @@ func (s *Service) dispatchAIActionFeedback(
 
 	fb := policy.Feedback
 	vars := map[string]string{
-		"user":     feedbackUserLabel(msg.Sender, fb.DeleteMsg.ParseMode),
-		"group":    msg.Chat.Title,
-		"reason":   reason,
-		"category": category,
-		"matched":  category,
-		"keyword":  category,
+		"user":         feedbackUserLabel(msg.Sender, fb.DeleteMsg.ParseMode),
+		"user_mention": feedbackUserMention(msg.Sender, fb.DeleteMsg.ParseMode),
+		"group":        msg.Chat.Title,
+		"reason":       reason,
+		"category":     category,
+		"matched":      category,
+		"keyword":      category,
 	}
 	switch action {
 	case "delete":
 		s.sendActionFeedback(msg.Chat, nil, fb.DeleteMsg, vars)
 	case "mute":
 		vars["user"] = feedbackUserLabel(msg.Sender, fb.Mute.ParseMode)
+		vars["user_mention"] = feedbackUserMention(msg.Sender, fb.Mute.ParseMode)
 		vars["duration"] = "10分钟"
 		s.sendActionFeedback(msg.Chat, nil, fb.Mute, vars)
 	case "ban":
 		vars["user"] = feedbackUserLabel(msg.Sender, fb.Ban.ParseMode)
+		vars["user_mention"] = feedbackUserMention(msg.Sender, fb.Ban.ParseMode)
 		s.sendActionFeedback(msg.Chat, nil, fb.Ban, vars)
 		// warn 走 IncrWarning，里面已经发了 Warn feedback
 	}
@@ -1476,9 +1484,10 @@ func (s *Service) maybeGraduateUser(ctx context.Context, trust store.UserTrust, 
 			user := &tele.User{ID: trust.UserID}
 			days := int(time.Since(trust.JoinedAt).Hours() / 24)
 			s.sendActionFeedback(chat, nil, pol.Feedback.TrustGraduated, map[string]string{
-				"user":     feedbackUserLabel(user, pol.Feedback.TrustGraduated.ParseMode),
-				"days":     strFormatInt(int64(days)),
-				"messages": strFormatInt(int64(trust.MessagesClean)),
+				"user":         feedbackUserLabel(user, pol.Feedback.TrustGraduated.ParseMode),
+				"user_mention": feedbackUserMention(user, pol.Feedback.TrustGraduated.ParseMode),
+				"days":         strFormatInt(int64(days)),
+				"messages":     strFormatInt(int64(trust.MessagesClean)),
 			})
 		}
 	}
@@ -1531,10 +1540,11 @@ func (s *Service) IncrWarning(ctx context.Context, chat *tele.Chat, user *tele.U
 
 	// Warn feedback
 	s.sendActionFeedback(chat, nil, policy.Feedback.Warn, map[string]string{
-		"user":    feedbackUserLabel(user, policy.Feedback.Warn.ParseMode),
-		"reason":  humanReason(reason, ""),
-		"current": strFormatInt(int64(count)),
-		"limit":   strFormatInt(int64(policy.Warnings.MaxWarns)),
+		"user":         feedbackUserLabel(user, policy.Feedback.Warn.ParseMode),
+		"user_mention": feedbackUserMention(user, policy.Feedback.Warn.ParseMode),
+		"reason":       humanReason(reason, ""),
+		"current":      strFormatInt(int64(count)),
+		"limit":        strFormatInt(int64(policy.Warnings.MaxWarns)),
 	})
 
 	if !policy.Warnings.Enabled || count < policy.Warnings.MaxWarns {
@@ -1589,8 +1599,9 @@ func (s *Service) escalateWarnings(ctx context.Context, chat *tele.Chat, user *t
 
 	// 升级动作反馈
 	vars := map[string]string{
-		"user":   feedbackUserLabel(user, policy.Feedback.Mute.ParseMode),
-		"reason": "达到警告上限",
+		"user":         feedbackUserLabel(user, policy.Feedback.Mute.ParseMode),
+		"user_mention": feedbackUserMention(user, policy.Feedback.Mute.ParseMode),
+		"reason":       "达到警告上限",
 	}
 	switch action {
 	case "mute", "mute_1h":
@@ -1601,9 +1612,11 @@ func (s *Service) escalateWarnings(ctx context.Context, chat *tele.Chat, user *t
 		s.sendActionFeedback(chat, nil, policy.Feedback.Mute, vars)
 	case "kick":
 		vars["user"] = feedbackUserLabel(user, policy.Feedback.Kick.ParseMode)
+		vars["user_mention"] = feedbackUserMention(user, policy.Feedback.Kick.ParseMode)
 		s.sendActionFeedback(chat, nil, policy.Feedback.Kick, vars)
 	case "ban":
 		vars["user"] = feedbackUserLabel(user, policy.Feedback.Ban.ParseMode)
+		vars["user_mention"] = feedbackUserMention(user, policy.Feedback.Ban.ParseMode)
 		s.sendActionFeedback(chat, nil, policy.Feedback.Ban, vars)
 	}
 
@@ -2108,8 +2121,9 @@ func (s *Service) handleProfileOnMessageViolation(
 	// 方案 C：bio 审核改为异步后，不回溯删除触发消息，正文仍由消息 AI 正常审核。
 	s.resetTrustAfterViolation(ctx, msg, "ban", stringPtr("profile_match_on_message: "+matched))
 	s.sendActionFeedback(msg.Chat, nil, policy.Feedback.Ban, map[string]string{
-		"user":   feedbackUserLabel(msg.Sender, policy.Feedback.Ban.ParseMode),
-		"reason": "资料简介违规：" + matched,
+		"user":         feedbackUserLabel(msg.Sender, policy.Feedback.Ban.ParseMode),
+		"user_mention": feedbackUserMention(msg.Sender, policy.Feedback.Ban.ParseMode),
+		"reason":       "资料简介违规：" + matched,
 	})
 	return nil
 }

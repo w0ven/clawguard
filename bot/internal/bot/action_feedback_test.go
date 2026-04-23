@@ -76,3 +76,43 @@ func TestRenderFeedbackTemplateUserLabelAcrossParseModes(t *testing.T) {
 		}
 	}
 }
+
+func TestRenderFeedbackTemplateUserMentionAcrossParseModes(t *testing.T) {
+	cases := []struct {
+		name      string
+		parseMode string
+		user      *tele.User
+		want      string
+	}{
+		{
+			name:      "html with username",
+			parseMode: tele.ModeHTML,
+			user:      &tele.User{ID: 42, Username: "my_name", FirstName: "可乐"},
+			want:      "@my_name 违规",
+		},
+		{
+			name:      "markdownv2 without username",
+			parseMode: tele.ModeMarkdownV2,
+			user:      &tele.User{ID: 42, FirstName: "可乐"},
+			want:      "[可乐](tg://user?id=42) 违规",
+		},
+		{
+			name:      "default nil user",
+			parseMode: "",
+			user:      nil,
+			want:      "该用户 违规",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rendered := renderFeedbackTemplate("{user_mention} 违规", map[string]string{
+				"user_mention": feedbackUserMention(tc.user, tc.parseMode),
+			}, tc.parseMode)
+
+			if rendered != tc.want {
+				t.Fatalf("rendered = %q, want %q", rendered, tc.want)
+			}
+		})
+	}
+}
