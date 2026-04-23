@@ -22,10 +22,27 @@ const mathImageFontPath = "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf"
 
 const maxMathImageChallengeAttempts = 50
 
+const (
+	fallbackMathImageExpression = "5 + 3 + 2"
+	fallbackMathImageAnswer     = 10
+)
+
 type mathImageChallenge struct {
 	Expression string
 	Answer     int
 	Options    []int
+}
+
+func fallbackMathImageChallenge(r *rand.Rand) mathImageChallenge {
+	options := []int{fallbackMathImageAnswer, 8, 9, 11}
+	r.Shuffle(len(options), func(i, j int) {
+		options[i], options[j] = options[j], options[i]
+	})
+	return mathImageChallenge{
+		Expression: fallbackMathImageExpression,
+		Answer:     fallbackMathImageAnswer,
+		Options:    options,
+	}
 }
 
 // renderMathImage 渲染算式图，返回 PNG bytes。
@@ -217,20 +234,49 @@ func (s *Service) sendMathImageChallenge(ctx context.Context, chat *tele.Chat, u
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 			s.logger.Warn(
-				"math image challenge generation timed out, fallback to text",
+				"math image challenge generation timed out, use fallback image challenge",
 				zap.Int64("chat_id", chat.ID),
 				zap.Int64("user_id", user.ID),
+				zap.String("event", "math_image_generation_fallback"),
 				zap.Error(err),
 			)
-			return s.startMathVerification(ctx, chat, user, policy)
+			challenge = fallbackMathImageChallenge(r)
+		} else {
+			return err
 		}
-		return err
 	}
 
 	png, err := renderMathImage(challenge.Expression)
 	if err != nil {
-		s.logger.Warn("render math image failed, fallback to text", zap.Error(err))
-		return s.startMathVerification(ctx, chat, user, policy)
+		s.logger.Error(
+			"render math image failed",
+			zap.Int64("chat_id", chat.ID),
+			zap.Int64("user_id", user.ID),
+			zap.String("event", "math_image_render_failed"),
+			zap.Error(err),
+		)
+		notice := fmt.Sprintf("🤖 %s 验证系统暂时故障，请稍后重试入群", mentionHTML(user))
+		sent, sendErr := s.bot.Send(chat, notice, tele.ModeHTML)
+		if sendErr != nil {
+			s.logger.Warn(
+				"send math image failure notice failed",
+				zap.Int64("chat_id", chat.ID),
+				zap.Int64("user_id", user.ID),
+				zap.Error(sendErr),
+			)
+		} else if sent != nil {
+			go func() {
+				time.Sleep(30 * time.Second)
+				if err := s.bot.Delete(sent); err != nil {
+					s.logger.Debug(
+						"delete math image failure notice failed",
+						zap.Int64("chat_id", chat.ID),
+						zap.Error(err),
+					)
+				}
+			}()
+		}
+		return err
 	}
 
 	markup := &tele.ReplyMarkup{}
@@ -312,17 +358,7 @@ func buildMathImageChallenge(ctx context.Context, r *rand.Rand, maxAttempts int)
 		}, nil
 	}
 
-	fallbackAnswer := 10
-	fallbackOptions := []int{fallbackAnswer, 8, 9, 11}
-	r.Shuffle(len(fallbackOptions), func(i, j int) {
-		fallbackOptions[i], fallbackOptions[j] = fallbackOptions[j], fallbackOptions[i]
-	})
-
-	return mathImageChallenge{
-		Expression: "5 + 3 + 2",
-		Answer:     fallbackAnswer,
-		Options:    fallbackOptions,
-	}, nil
+	return fallbackMathImageChallenge(r), nil
 }
 
 func applyOp(x int, op string, y int) int {
