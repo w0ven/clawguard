@@ -35,12 +35,13 @@ SET joined_at = LEAST(user_trust.joined_at, EXCLUDED.joined_at),
     first_name = COALESCE(EXCLUDED.first_name, user_trust.first_name),
     last_name = COALESCE(EXCLUDED.last_name, user_trust.last_name),
     updated_at = NOW(),
-    status = EXCLUDED.status,
-    score = EXCLUDED.score,
-    messages_checked = EXCLUDED.messages_checked,
-    messages_clean = EXCLUDED.messages_clean,
-    graduated_at = EXCLUDED.graduated_at,
-    notes = EXCLUDED.notes
+    -- banned 是终态，不允许被入群/老成员回迁等路径覆盖
+    status = CASE WHEN user_trust.status = 'banned' THEN user_trust.status ELSE EXCLUDED.status END,
+    score = CASE WHEN user_trust.status = 'banned' THEN user_trust.score ELSE EXCLUDED.score END,
+    messages_checked = CASE WHEN user_trust.status = 'banned' THEN user_trust.messages_checked ELSE EXCLUDED.messages_checked END,
+    messages_clean = CASE WHEN user_trust.status = 'banned' THEN user_trust.messages_clean ELSE EXCLUDED.messages_clean END,
+    graduated_at = CASE WHEN user_trust.status = 'banned' THEN user_trust.graduated_at ELSE EXCLUDED.graduated_at END,
+    notes = CASE WHEN user_trust.status = 'banned' THEN user_trust.notes ELSE EXCLUDED.notes END
 RETURNING chat_id, user_id, username, first_name, last_name, joined_at, updated_at, status, score, messages_checked, messages_clean, graduated_at, notes;
 
 -- name: IncrementUserTrustCounters :one
@@ -107,7 +108,7 @@ WHERE ($1::BIGINT IS NULL OR chat_id = $1)
     OR COALESCE(last_name, '') ILIKE '%' || $4 || '%'
   )
   AND ($5::TIMESTAMPTZ IS NULL OR joined_at >= $5::TIMESTAMPTZ)
-  AND ($6::TIMESTAMPTZ IS NULL OR joined_at <= $6::TIMESTAMPTZ)
+  AND ($6::TIMESTAMPTZ IS NULL OR joined_at <= $6::TIMESTAMPTZ);
 
 -- name: ListUserTrustPaginated :many
 SELECT chat_id, user_id, username, first_name, last_name, joined_at, updated_at, status, score, messages_checked, messages_clean, graduated_at, notes

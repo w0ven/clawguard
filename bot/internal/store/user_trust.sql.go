@@ -44,12 +44,12 @@ SET joined_at = LEAST(user_trust.joined_at, EXCLUDED.joined_at),
     first_name = COALESCE(EXCLUDED.first_name, user_trust.first_name),
     last_name = COALESCE(EXCLUDED.last_name, user_trust.last_name),
     updated_at = NOW(),
-    status = EXCLUDED.status,
-    score = EXCLUDED.score,
-    messages_checked = EXCLUDED.messages_checked,
-    messages_clean = EXCLUDED.messages_clean,
-    graduated_at = EXCLUDED.graduated_at,
-    notes = EXCLUDED.notes
+    status = CASE WHEN user_trust.status = 'banned' THEN user_trust.status ELSE EXCLUDED.status END,
+    score = CASE WHEN user_trust.status = 'banned' THEN user_trust.score ELSE EXCLUDED.score END,
+    messages_checked = CASE WHEN user_trust.status = 'banned' THEN user_trust.messages_checked ELSE EXCLUDED.messages_checked END,
+    messages_clean = CASE WHEN user_trust.status = 'banned' THEN user_trust.messages_clean ELSE EXCLUDED.messages_clean END,
+    graduated_at = CASE WHEN user_trust.status = 'banned' THEN user_trust.graduated_at ELSE EXCLUDED.graduated_at END,
+    notes = CASE WHEN user_trust.status = 'banned' THEN user_trust.notes ELSE EXCLUDED.notes END
 RETURNING chat_id, user_id, username, first_name, last_name, joined_at, updated_at, status, score, messages_checked, messages_clean, graduated_at, notes
 `
 
