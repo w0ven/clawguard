@@ -186,13 +186,22 @@ curl -F "url=https://your-domain.com/webhook/YOUR_SECRET" \
 
 ### 部署到生产服务器
 
-```bash
-# 同步代码
-rsync -avz --delete ./ root@YOUR_SERVER:/root/clawguard/
+本项目已迁移到 **CI/CD 自动构建镜像** 流程，不再使用 rsync 同步源码：
 
-# 远程构建并启动
-ssh root@YOUR_SERVER 'cd /root/clawguard && docker compose up -d --build'
+```bash
+# 1. 本地改完代码，push 到 main
+git push origin main
+
+# 2. GitHub Actions 自动构建 bot/web 镜像并推送到 Docker Hub
+#    - kelework/clawguard-bot:latest
+#    - kelework/clawguard-web:latest
+gh run watch --repo <owner>/<repo> --exit-status
+
+# 3. 远程拉新镜像重启（只动改动的服务，不动 postgres/redis）
+ssh root@YOUR_SERVER "cd /root/clawguard && docker compose pull bot web && docker compose up -d --no-deps bot web"
 ```
+
+**前端环境变量**（`NEXT_PUBLIC_*`）必须在 GitHub Repository Variables 配置，因为 Next.js 会在 build 时把它们编进 bundle；远程 `.env` 只作用于后端 runtime。
 
 ### Cloudflare Tunnel 配置
 
@@ -275,6 +284,11 @@ Bot 启动后运行多个后台任务：
 
 ### 近期更新
 
+- **2026-04-24** 数学图片验证题死循环修复 + 降级路径重构
+  - 根因：`sendMathImageChallenge` 的 `for answer < 0` 循环只 re-roll `a`，当 `op1='-' op2='-' b+c>29` 时永久死循环，两个入群用户把 bot CPU 烧到 220%
+  - 修复：整体重 roll + 50 次上限 + 3 秒 context timeout + 1000 seed 回归测试
+  - 降级策略改为"同形态降级"：异常时仍然走图片题（保底 `5 + 3 + 2`），不再退到更弱的纯文本题
+  - 图片渲染真失败时：Error 日志 + @用户发故障提示（30 秒自删）+ 用户保持 restricted
 - **2026-04** 反馈模板新增 `{user_mention}` / `{admin_mention}` 可点击变量
 - **2026-04** Banned 状态终态保护 + 封禁元数据（banned_at/banned_reason）+ 后台 UI 展示
 - **2026-04** CPU 热路径优化：flushBatch 30s 超时、bio 审核异步、t.me 预览限速

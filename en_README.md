@@ -186,13 +186,22 @@ curl -F "url=https://your-domain.com/webhook/YOUR_SECRET" \
 
 ### Deploy to Production
 
-```bash
-# Sync code
-rsync -avz --delete ./ root@YOUR_SERVER:/root/clawguard/
+This project has migrated to **CI/CD-built images** — rsync-based source sync is no longer used:
 
-# Build and start on remote
-ssh root@YOUR_SERVER 'cd /root/clawguard && docker compose up -d --build'
+```bash
+# 1. Commit and push to main
+git push origin main
+
+# 2. GitHub Actions builds bot/web images and pushes to Docker Hub
+#    - kelework/clawguard-bot:latest
+#    - kelework/clawguard-web:latest
+gh run watch --repo <owner>/<repo> --exit-status
+
+# 3. Pull new images on the production host and restart only the touched services
+ssh root@YOUR_SERVER "cd /root/clawguard && docker compose pull bot web && docker compose up -d --no-deps bot web"
 ```
+
+**Frontend env vars** (`NEXT_PUBLIC_*`) must be set as GitHub Repository Variables — Next.js inlines them into the bundle at build time; the remote `.env` only affects backend runtime.
 
 ### Cloudflare Tunnel Configuration
 
@@ -275,6 +284,11 @@ The bot runs multiple background tasks after startup:
 
 ### Recent Updates
 
+- **2026-04-24** Fixed math image challenge infinite loop + refactored fallback strategy
+  - Root cause: `sendMathImageChallenge`'s `for answer < 0` loop only re-rolls `a` while `b/c/op1/op2` stay fixed. When `op1='-' op2='-' b+c>29`, any `a` in `[10,29]` yields a negative answer forever. Two joiners pinned the bot at 220% CPU.
+  - Fix: whole-tuple re-roll + 50-attempt cap + 3s context timeout + 1000-seed regression test
+  - Degradation changed to **same-form fallback**: anomalies still produce an image challenge (fallback expression `5 + 3 + 2`) instead of dropping to a weaker text challenge
+  - When image render truly fails: Error log + @user notice ("verification system temporarily unavailable", auto-deleted after 30s) + user stays restricted
 - **2026-04** Feedback templates added clickable `{user_mention}` / `{admin_mention}` variables
 - **2026-04** Banned terminal-state protection + banned metadata (banned_at/banned_reason) + admin UI display
 - **2026-04** CPU hot path optimization: 30s flushBatch timeout, async bio review, t.me preview rate limiting
