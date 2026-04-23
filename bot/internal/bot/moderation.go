@@ -166,48 +166,7 @@ func (s *Service) applyAIModeration(ctx context.Context, msg *tele.Message, poli
 	// 未毕业用户（new/suspicious）发言前 bio 审核（开关打开时才做）
 	// 防止用户入群时 bio 干净、之后偷偷改 bio 加广告
 	if policy.AI.CheckProfileOnMessage {
-		if matched, aiOutput, err := s.checkProfileOnMessage(ctx, msg.Chat, msg.Sender, policy); err != nil {
-			s.logger.Warn("on-message profile check failed, fallthrough to AI",
-				zap.Error(err),
-				zap.Int64("chat_id", msg.Chat.ID),
-				zap.Int64("user_id", msg.Sender.ID))
-		} else if matched != "" {
-			// 命中：删消息 + ban + 记 violation，不再进入 AI 消息审核
-			if err := s.deleteMessage(msg); err != nil {
-				s.logger.Warn("delete msg on profile match failed", zap.Error(err))
-			}
-			if err := s.banUser(msg.Chat, msg.Sender); err != nil {
-				s.logger.Error("ban on-message profile match user failed",
-					zap.Error(err),
-					zap.Int64("chat_id", msg.Chat.ID),
-					zap.Int64("user_id", msg.Sender.ID))
-				return err
-			}
-			if _, err := s.queries.InsertViolation(ctx, store.InsertViolationParams{
-				ChatID:      msg.Chat.ID,
-				UserID:      msg.Sender.ID,
-				Username:    stringPtr(msg.Sender.Username),
-				Rule:        "profile_match_on_message",
-				Matched:     stringPtr(matched),
-				Action:      "ban",
-				MessageText: stringPtr(truncateString(msg.Text, 2000)),
-			}); err != nil {
-				s.logger.Warn("insert on-message profile violation failed", zap.Error(err))
-			}
-			decisionMode := "on_message_ai"
-			if strings.EqualFold(strings.TrimSpace(policy.AI.ProfileOnMessageMode), "keyword") {
-				decisionMode = "on_message_keyword"
-			}
-			if err := s.recordProfileViolationDecision(ctx, msg.Chat, msg.Sender, msg, matched, decisionMode, aiOutput); err != nil {
-				s.logger.Warn("record profile violation ai_decision failed", zap.Error(err))
-			}
-			s.resetTrustAfterViolation(ctx, msg, "ban", stringPtr("profile_match_on_message: "+matched))
-			s.sendActionFeedback(msg.Chat, nil, policy.Feedback.Ban, map[string]string{
-				"user":   feedbackUserLabel(msg.Sender, policy.Feedback.Ban.ParseMode),
-				"reason": "资料简介违规：" + matched,
-			})
-			return nil
-		}
+		s.asyncProfileCheck(msg, policy)
 	}
 
 	imageBase64 := ""
@@ -845,7 +804,7 @@ func int64PtrIfPositive(v int64) *int64 {
 }
 
 func buildReviewableContent(msg *tele.Message) reviewableContent {
-	return buildReviewableContentWithOptions(context.Background(), msg, nil, fetchTmeLinkPreview)
+	return buildReviewableContentWithOptions(context.Background(), msg, nil, fetchTmeLinkPreviewForUser)
 }
 
 func (s *Service) buildReviewableContent(ctx context.Context, msg *tele.Message) reviewableContent {
@@ -853,14 +812,14 @@ func (s *Service) buildReviewableContent(ctx context.Context, msg *tele.Message)
 	if typed, ok := s.redis.(*redis.Client); ok {
 		redisClient = typed
 	}
-	return buildReviewableContentWithOptions(ctx, msg, redisClient, fetchTmeLinkPreview)
+	return buildReviewableContentWithOptions(ctx, msg, redisClient, fetchTmeLinkPreviewForUser)
 }
 
 func buildReviewableContentWithOptions(
 	ctx context.Context,
 	msg *tele.Message,
 	redisClient *redis.Client,
-	fetchPreview func(context.Context, string, *redis.Client) (*LinkPreview, error),
+	fetchPreview func(context.Context, string, *redis.Client, int64) (*LinkPreview, error),
 ) reviewableContent {
 	current := extractReviewableContent(msg)
 
@@ -912,7 +871,7 @@ func buildTmePreviewReviewable(
 	msg *tele.Message,
 	current reviewableContent,
 	redisClient *redis.Client,
-	fetchPreview func(context.Context, string, *redis.Client) (*LinkPreview, error),
+	fetchPreview func(context.Context, string, *redis.Client, int64) (*LinkPreview, error),
 ) (reviewableContent, bool) {
 	urls := extractTmeURLs(msg)
 	if len(urls) == 0 {
@@ -927,11 +886,15 @@ func buildTmePreviewReviewable(
 
 	previews := make([]*LinkPreview, len(urls))
 	group, groupCtx := errgroup.WithContext(timeoutCtx)
+	userID := int64(0)
+	if msg != nil && msg.Sender != nil {
+		userID = msg.Sender.ID
+	}
 	for index, rawURL := range urls {
 		index := index
 		rawURL := rawURL
 		group.Go(func() error {
-			preview, err := fetchPreview(groupCtx, rawURL, redisClient)
+			preview, err := fetchPreview(groupCtx, rawURL, redisClient, userID)
 			if err != nil {
 				return err
 			}
@@ -1976,6 +1939,120 @@ func (s *Service) checkProfileOnMessage(ctx context.Context, chat *tele.Chat, us
 	}
 	s.enqueueProfileCheckLog(chatID, user, bio, "on_message_ai", "pass", nil, &aiConf, &aiVerdict)
 	return "", &output, nil
+}
+
+func (s *Service) asyncProfileCheck(msg *tele.Message, policy config.GuardPolicy) {
+	if msg == nil || msg.Chat == nil || msg.Sender == nil {
+		return
+	}
+
+	release, ok := s.acquireProfileCheckInFlight(msg.Sender.ID)
+	if !ok {
+		return
+	}
+
+	go func() {
+		defer release()
+		defer func() {
+			if r := recover(); r != nil {
+				s.logger.Error("async bio check panic", zap.Any("panic", r), zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID))
+			}
+		}()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		matched, output, err := s.checkProfileOnMessage(ctx, msg.Chat, msg.Sender, policy)
+		if err != nil {
+			s.logger.Warn("async on-message profile check failed",
+				zap.Error(err),
+				zap.Int64("chat_id", msg.Chat.ID),
+				zap.Int64("user_id", msg.Sender.ID),
+				zap.Int("message_id", msg.ID))
+			return
+		}
+		if matched == "" {
+			return
+		}
+
+		if err := s.handleProfileOnMessageViolation(ctx, msg, policy, matched, output); err != nil {
+			s.logger.Error("handle async on-message profile violation failed",
+				zap.Error(err),
+				zap.Int64("chat_id", msg.Chat.ID),
+				zap.Int64("user_id", msg.Sender.ID),
+				zap.Int("message_id", msg.ID))
+		}
+	}()
+}
+
+func (s *Service) acquireProfileCheckInFlight(userID int64) (func(), bool) {
+	if userID <= 0 {
+		return func() {}, false
+	}
+
+	if s.redis != nil {
+		inflightKey := "bio_check_inflight:" + strconv.FormatInt(userID, 10)
+		ok, err := s.redis.SetNX(context.Background(), inflightKey, "1", 60*time.Second).Result()
+		if err == nil {
+			if !ok {
+				return func() {}, false
+			}
+			return func() {
+				_ = s.redis.Del(context.Background(), inflightKey).Err()
+			}, true
+		}
+		s.logger.Warn("acquire bio check inflight via redis failed", zap.Error(err), zap.Int64("user_id", userID))
+	}
+
+	if _, loaded := s.bioCheckInFlight.LoadOrStore(userID, struct{}{}); loaded {
+		return func() {}, false
+	}
+	return func() {
+		s.bioCheckInFlight.Delete(userID)
+	}, true
+}
+
+func (s *Service) handleProfileOnMessageViolation(
+	ctx context.Context,
+	msg *tele.Message,
+	policy config.GuardPolicy,
+	matched string,
+	aiOutput *ai.CheckOutput,
+) error {
+	if msg == nil || msg.Chat == nil || msg.Sender == nil {
+		return nil
+	}
+
+	if err := s.banUser(msg.Chat, msg.Sender); err != nil {
+		return err
+	}
+	if _, err := s.queries.InsertViolation(ctx, store.InsertViolationParams{
+		ChatID:      msg.Chat.ID,
+		UserID:      msg.Sender.ID,
+		Username:    stringPtr(msg.Sender.Username),
+		Rule:        "profile_match_on_message",
+		Matched:     stringPtr(matched),
+		Action:      "ban",
+		MessageText: stringPtr(truncateString(msg.Text, 2000)),
+	}); err != nil {
+		s.logger.Warn("insert on-message profile violation failed", zap.Error(err))
+	}
+
+	decisionMode := "on_message_ai"
+	if strings.EqualFold(strings.TrimSpace(policy.AI.ProfileOnMessageMode), "keyword") {
+		decisionMode = "on_message_keyword"
+	}
+	if err := s.recordProfileViolationDecision(ctx, msg.Chat, msg.Sender, msg, matched, decisionMode, aiOutput); err != nil {
+		s.logger.Warn("record profile violation ai_decision failed", zap.Error(err))
+	}
+
+	// 方案 C：bio 审核改为异步后，不回溯删除触发消息，正文仍由消息 AI 正常审核。
+	s.resetTrustAfterViolation(ctx, msg, "ban", stringPtr("profile_match_on_message: "+matched))
+	s.sendActionFeedback(msg.Chat, nil, policy.Feedback.Ban, map[string]string{
+		"user":   feedbackUserLabel(msg.Sender, policy.Feedback.Ban.ParseMode),
+		"reason": "资料简介违规：" + matched,
+	})
+	return nil
 }
 
 // fetchUserBioCached 读取用户 bio，带 Redis 缓存。

@@ -14,14 +14,13 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/openclaw/clawguard/internal/ai"
 	"github.com/openclaw/clawguard/internal/config"
 	"github.com/openclaw/clawguard/internal/store"
 	"go.uber.org/zap"
 	tele "gopkg.in/telebot.v3"
 )
 
-func TestApplyAIModeration_ProfileOnMessageHit_RecordsAIDecisionAndBansTrust(t *testing.T) {
+func TestAsyncProfileCheck_ProfileOnMessageHit_RecordsAIDecisionAndBansTrust(t *testing.T) {
 	const (
 		chatID = -100123
 		userID = 42
@@ -31,10 +30,9 @@ func TestApplyAIModeration_ProfileOnMessageHit_RecordsAIDecisionAndBansTrust(t *
 	db := newModerationProfileMatchMockDB(chatID, userID)
 
 	svc := &Service{
-		logger:      zap.NewNop(),
-		queries:     store.New(db),
-		aiModerator: &ai.Moderator{},
-		bot:         botClient,
+		logger:  zap.NewNop(),
+		queries: store.New(db),
+		bot:     botClient,
 	}
 
 	policy := config.DefaultPolicy
@@ -52,15 +50,27 @@ func TestApplyAIModeration_ProfileOnMessageHit_RecordsAIDecisionAndBansTrust(t *
 		Sender: &tele.User{ID: userID, Username: "new_user"},
 	}
 
-	if err := svc.applyAIModeration(context.Background(), msg, policy, false, reviewableContent{Text: msg.Text}); err != nil {
-		t.Fatalf("applyAIModeration() error = %v", err)
-	}
+	svc.asyncProfileCheck(msg, policy)
 
-	db.mu.Lock()
-	decisions := append([]store.InsertAIDecisionParams(nil), db.aiDecisions...)
-	violations := append([]store.InsertViolationParams(nil), db.violations...)
-	trust := db.userTrust
-	db.mu.Unlock()
+	deadline := time.Now().Add(2 * time.Second)
+	var decisions []store.InsertAIDecisionParams
+	var violations []store.InsertViolationParams
+	var trust store.UserTrust
+	for {
+		db.mu.Lock()
+		decisions = append([]store.InsertAIDecisionParams(nil), db.aiDecisions...)
+		violations = append([]store.InsertViolationParams(nil), db.violations...)
+		trust = db.userTrust
+		db.mu.Unlock()
+
+		if len(decisions) == 1 && len(violations) == 1 && trust.Status == "banned" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("async profile check did not finish in time: decisions=%d violations=%d trust=%q", len(decisions), len(violations), trust.Status)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 
 	if len(decisions) != 1 {
 		t.Fatalf("ai_decisions inserts = %d, want 1", len(decisions))
@@ -90,10 +100,13 @@ func TestApplyAIModeration_ProfileOnMessageHit_RecordsAIDecisionAndBansTrust(t *
 	}
 
 	methods := transport.Methods()
-	for _, want := range []string{"getChat", "deleteMessage", "kickChatMember"} {
+	for _, want := range []string{"getChat", "kickChatMember"} {
 		if !containsString(methods, want) {
 			t.Fatalf("telegram methods = %v, missing %q", methods, want)
 		}
+	}
+	if containsString(methods, "deleteMessage") {
+		t.Fatalf("telegram methods = %v, should not delete triggering message in async path", methods)
 	}
 }
 
