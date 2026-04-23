@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"image/color"
 	"math/rand"
@@ -18,6 +19,14 @@ import (
 )
 
 const mathImageFontPath = "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf"
+
+const maxMathImageChallengeAttempts = 50
+
+type mathImageChallenge struct {
+	Expression string
+	Answer     int
+	Options    []int
+}
 
 // renderMathImage 渲染算式图，返回 PNG bytes。
 func renderMathImage(expression string) ([]byte, error) {
@@ -107,7 +116,9 @@ func renderMathImage(expression string) ([]byte, error) {
 		dc.SetRGBA255(int(c.R), int(c.G), int(c.B), 255)
 		for dx := -3.0; dx <= 3.0; dx += 1.0 {
 			for dy := -3.0; dy <= 3.0; dy += 1.0 {
-				if dx*dx+dy*dy > 9 { continue }
+				if dx*dx+dy*dy > 9 {
+					continue
+				}
 				dc.DrawStringAnchored(string(ch), x+dx, y+dy, 0.5, 0.5)
 			}
 		}
@@ -199,51 +210,38 @@ func renderMathImage(expression string) ([]byte, error) {
 func (s *Service) sendMathImageChallenge(ctx context.Context, chat *tele.Chat, user *tele.User, policy config.GuardPolicy) error {
 	r := rand.New(rand.NewSource(time.Now().UnixNano()))
 
-	a := r.Intn(20) + 1
-	b := r.Intn(20) + 1
-	c := r.Intn(20) + 1
-	op1 := []string{"+", "-"}[r.Intn(2)]
-	op2 := []string{"+", "-"}[r.Intn(2)]
-	answer := applyOp(applyOp(a, op1, b), op2, c)
-	for answer < 0 {
-		a = r.Intn(20) + 10
-		answer = applyOp(applyOp(a, op1, b), op2, c)
-	}
-	expression := fmt.Sprintf("%d %s %d %s %d", a, op1, b, op2, c)
+	challengeCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
 
-	options := []int{answer}
-	seen := map[int]bool{answer: true}
-	for len(options) < 4 {
-		delta := r.Intn(7) - 3
-		if delta == 0 {
-			continue
+	challenge, err := buildMathImageChallenge(challengeCtx, r, maxMathImageChallengeAttempts)
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			s.logger.Warn(
+				"math image challenge generation timed out, fallback to text",
+				zap.Int64("chat_id", chat.ID),
+				zap.Int64("user_id", user.ID),
+				zap.Error(err),
+			)
+			return s.startMathVerification(ctx, chat, user, policy)
 		}
-		option := answer + delta
-		if option < 0 || seen[option] {
-			continue
-		}
-		seen[option] = true
-		options = append(options, option)
+		return err
 	}
-	r.Shuffle(len(options), func(i, j int) {
-		options[i], options[j] = options[j], options[i]
-	})
 
-	png, err := renderMathImage(expression)
+	png, err := renderMathImage(challenge.Expression)
 	if err != nil {
 		s.logger.Warn("render math image failed, fallback to text", zap.Error(err))
 		return s.startMathVerification(ctx, chat, user, policy)
 	}
 
 	markup := &tele.ReplyMarkup{}
-	row := make([]tele.Btn, 0, len(options))
-	for _, option := range options {
+	row := make([]tele.Btn, 0, len(challenge.Options))
+	for _, option := range challenge.Options {
 		row = append(row, markup.Data(strconv.Itoa(option), s.verifyMathBtn.Unique, formatVerifyCallbackData(user.ID, strconv.Itoa(option))))
 	}
 	markup.Inline(row)
 
 	photo := &tele.Photo{
-		File:    tele.FromReader(bytes.NewReader(png)),
+		File: tele.FromReader(bytes.NewReader(png)),
 		Caption: fmt.Sprintf(
 			"👋 <b>欢迎 %s 加入</b>\n\n🧮 请在 <b>%s</b> 内计算下图算式并点击正确答案\n⚠️ <i>答错或超时将被立即移出群组</i>",
 			mentionHTML(user),
@@ -259,14 +257,72 @@ func (s *Service) sendMathImageChallenge(ctx context.Context, chat *tele.Chat, u
 	}
 
 	payload, err := json.Marshal(mathPayload{
-		Answer:     answer,
-		Expression: expression,
+		Answer:     challenge.Answer,
+		Expression: challenge.Expression,
 	})
 	if err != nil {
 		return err
 	}
 
 	return s.storePendingVerification(ctx, chat.ID, user, "math_image", payload, sent.ID, policy.Verify.TimeoutSeconds)
+}
+
+func buildMathImageChallenge(ctx context.Context, r *rand.Rand, maxAttempts int) (mathImageChallenge, error) {
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return mathImageChallenge{}, err
+		}
+
+		a := r.Intn(20) + 1
+		b := r.Intn(20) + 1
+		c := r.Intn(20) + 1
+		op1 := []string{"+", "-"}[r.Intn(2)]
+		op2 := []string{"+", "-"}[r.Intn(2)]
+		answer := applyOp(applyOp(a, op1, b), op2, c)
+		if answer < 0 {
+			continue
+		}
+
+		options := []int{answer}
+		seen := map[int]bool{answer: true}
+		for len(options) < 4 {
+			if err := ctx.Err(); err != nil {
+				return mathImageChallenge{}, err
+			}
+
+			delta := r.Intn(7) - 3
+			if delta == 0 {
+				continue
+			}
+			option := answer + delta
+			if option < 0 || seen[option] {
+				continue
+			}
+			seen[option] = true
+			options = append(options, option)
+		}
+		r.Shuffle(len(options), func(i, j int) {
+			options[i], options[j] = options[j], options[i]
+		})
+
+		return mathImageChallenge{
+			Expression: fmt.Sprintf("%d %s %d %s %d", a, op1, b, op2, c),
+			Answer:     answer,
+			Options:    options,
+		}, nil
+	}
+
+	fallbackAnswer := 10
+	fallbackOptions := []int{fallbackAnswer, 8, 9, 11}
+	r.Shuffle(len(fallbackOptions), func(i, j int) {
+		fallbackOptions[i], fallbackOptions[j] = fallbackOptions[j], fallbackOptions[i]
+	})
+
+	return mathImageChallenge{
+		Expression: "5 + 3 + 2",
+		Answer:     fallbackAnswer,
+		Options:    fallbackOptions,
+	}, nil
 }
 
 func applyOp(x int, op string, y int) int {
