@@ -213,7 +213,10 @@ func (m *Moderator) flushBatch(key string, window time.Duration) {
 		return
 	}
 
-	outputs, err := m.checkBatch(context.Background(), batch.inputs)
+	batchCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	outputs, err := m.checkBatch(batchCtx, batch.inputs)
 	if err != nil {
 		for _, waiter := range batch.waiters {
 			waiter <- batchResult{err: err}
