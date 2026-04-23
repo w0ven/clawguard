@@ -264,14 +264,22 @@ Bot 启动后运行多个后台任务：
 
 | 里程碑 | 内容 | 状态 |
 |---|---|---|
-| M1 | 项目骨架 + Docker Compose + 数据库 Schema | ✅ 已完成 |
-| M2 | Bot 核心：Webhook + 命令路由 + 新人验证 | ✅ 已完成 |
-| M3 | 反广告过滤器 + 警告系统 + CAS 同步 | ✅ 已完成 |
-| M4 | REST API + Telegram Login + Web 面板骨架 | ✅ 已完成 |
-| M5 | AI 审核 + 信任系统 + 多模型 + Prompt 编辑器 | ✅ 已完成 |
-| M6 | Turnstile 验证流程 | ✅ 已完成 |
-| M7 | 审查优化 + Bug 修复 | 🔄 进行中 |
-| M8 | 生产部署 + CF Tunnel + 首群接入 | 🔄 进行中 |
+| M1 | 项目骨架 + Docker Compose + 数据库 Schema | ✅ |
+| M2 | Bot 核心：Webhook + 命令路由 + 新人验证 | ✅ |
+| M3 | 反广告过滤器 + 警告系统 + CAS 同步 | ✅ |
+| M4 | REST API + Telegram Login + Web 面板骨架 | ✅ |
+| M5 | AI 审核 + 信任系统 + 多模型 + Prompt 编辑器 | ✅ |
+| M6 | Turnstile 验证流程 | ✅ |
+| M7 | AI 审核增强：跨聊天引用、t.me 预览、消息前 Bio 审核 | ✅ |
+| M8 | 生产部署：RFC / TOP 群正式接入 | ✅ |
+
+### 近期更新
+
+- **2026-04** 反馈模板新增 `{user_mention}` / `{admin_mention}` 可点击变量
+- **2026-04** Banned 状态终态保护 + 封禁元数据（banned_at/banned_reason）+ 后台 UI 展示
+- **2026-04** CPU 热路径优化：flushBatch 30s 超时、bio 审核异步、t.me 预览限速
+- **2026-04** 欢迎语改用 MarkdownV2，修复格式嵌套导致的 mention link 失效
+- **2026-04** CI/CD：GitHub Actions → Docker Hub → 远程 pull，替换原 rsync 流程
 
 ---
 

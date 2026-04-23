@@ -264,14 +264,22 @@ The bot runs multiple background tasks after startup:
 
 | Milestone | Content | Status |
 |---|---|---|
-| M1 | Project skeleton + Docker Compose + Database Schema | ✅ Done |
-| M2 | Bot core: Webhook + command routing + join verification | ✅ Done |
-| M3 | Anti-spam filters + warning system + CAS sync | ✅ Done |
-| M4 | REST API + Telegram Login + web panel skeleton | ✅ Done |
-| M5 | AI moderation + trust system + multi-model + prompt editor | ✅ Done |
-| M6 | Turnstile verification flow | ✅ Done |
-| M7 | Review & optimization + bug fixes | 🔄 In Progress |
-| M8 | Production deployment + CF Tunnel + first group onboard | 🔄 In Progress |
+| M1 | Project skeleton + Docker Compose + Database Schema | ✅ |
+| M2 | Bot core: Webhook + command routing + join verification | ✅ |
+| M3 | Anti-spam filters + warning system + CAS sync | ✅ |
+| M4 | REST API + Telegram Login + web panel skeleton | ✅ |
+| M5 | AI moderation + trust system + multi-model + prompt editor | ✅ |
+| M6 | Turnstile verification flow | ✅ |
+| M7 | AI moderation enhancements: cross-chat quotes, t.me previews, pre-message bio review | ✅ |
+| M8 | Production deployment: RFC / TOP groups officially onboarded | ✅ |
+
+### Recent Updates
+
+- **2026-04** Feedback templates added clickable `{user_mention}` / `{admin_mention}` variables
+- **2026-04** Banned terminal-state protection + banned metadata (banned_at/banned_reason) + admin UI display
+- **2026-04** CPU hot path optimization: 30s flushBatch timeout, async bio review, t.me preview rate limiting
+- **2026-04** Welcome messages switched to MarkdownV2, fixing mention link failures caused by nested formatting
+- **2026-04** CI/CD: GitHub Actions → Docker Hub → remote pull, replacing the previous rsync flow
 
 ---
 
