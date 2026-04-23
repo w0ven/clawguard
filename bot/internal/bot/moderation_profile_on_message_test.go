@@ -181,6 +181,8 @@ func (db *moderationProfileMatchMockDB) QueryRow(_ context.Context, query string
 			trust.MessagesChecked,
 			trust.MessagesClean,
 			trust.GraduatedAt,
+			trust.BannedAt,
+			trust.BannedReason,
 			trust.Notes,
 		)
 	case strings.Contains(query, "INSERT INTO ai_decisions"):
@@ -305,6 +307,8 @@ func (db *moderationProfileMatchMockDB) QueryRow(_ context.Context, query string
 			trust.MessagesChecked,
 			trust.MessagesClean,
 			trust.GraduatedAt,
+			trust.BannedAt,
+			trust.BannedReason,
 			trust.Notes,
 		)
 	case strings.Contains(query, "SET status = $3"):
@@ -312,7 +316,9 @@ func (db *moderationProfileMatchMockDB) QueryRow(_ context.Context, query string
 		db.userTrust.Status = args[2].(string)
 		db.userTrust.Score = args[3].(float64)
 		db.userTrust.GraduatedAt = args[4].(*time.Time)
-		db.userTrust.Notes = args[5].(*string)
+		db.userTrust.BannedAt = args[5].(*time.Time)
+		db.userTrust.BannedReason = args[6].([]byte)
+		db.userTrust.Notes = args[7].(*string)
 		db.userTrust.UpdatedAt = db.now.Add(3 * time.Minute)
 		trust := db.userTrust
 		db.mu.Unlock()
@@ -329,6 +335,8 @@ func (db *moderationProfileMatchMockDB) QueryRow(_ context.Context, query string
 			trust.MessagesChecked,
 			trust.MessagesClean,
 			trust.GraduatedAt,
+			trust.BannedAt,
+			trust.BannedReason,
 			trust.Notes,
 		)
 	default:

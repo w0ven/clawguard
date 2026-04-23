@@ -21,6 +21,22 @@ import (
 	"github.com/openclaw/clawguard/internal/store"
 )
 
+func marshalUserTrustBanReason(rule, matched, source string) []byte {
+	raw, _ := json.Marshal(map[string]any{
+		"rule":    strings.TrimSpace(rule),
+		"matched": strings.TrimSpace(matched),
+		"source":  strings.TrimSpace(source),
+	})
+	return raw
+}
+
+func stringValue(v *string) string {
+	if v == nil {
+		return ""
+	}
+	return *v
+}
+
 func (s *Server) registerAdminRoutes() {
 	admin := s.echo.Group("/api/admin", s.requireAdminJWT)
 	admin.GET("/groups", s.handleListGroups)
@@ -1369,17 +1385,27 @@ func (s *Server) handleUpdateUserTrust(c echo.Context) error {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "load user trust failed"})
 	}
 	var graduatedAt *time.Time
+	var bannedAt *time.Time
+	var bannedReason []byte
+	nextStatus := strings.TrimSpace(payload.Status)
 	if strings.TrimSpace(payload.Status) == "trusted" {
 		now := time.Now()
 		graduatedAt = &now
 	}
+	if nextStatus == "banned" {
+		now := time.Now()
+		bannedAt = &now
+		bannedReason = marshalUserTrustBanReason("manual_admin_ban", strings.TrimSpace(stringValue(payload.Notes)), "manual_admin")
+	}
 	updated, err := s.botService.Queries().UpdateUserTrustStatus(c.Request().Context(), store.UpdateUserTrustStatusParams{
-		ChatID:      chatID,
-		UserID:      userID,
-		Status:      strings.TrimSpace(payload.Status),
-		Score:       payload.Score,
-		GraduatedAt: graduatedAt,
-		Notes:       trimStringPtr(payload.Notes),
+		ChatID:       chatID,
+		UserID:       userID,
+		Status:       nextStatus,
+		Score:        payload.Score,
+		GraduatedAt:  graduatedAt,
+		BannedAt:     bannedAt,
+		BannedReason: bannedReason,
+		Notes:        trimStringPtr(payload.Notes),
 	})
 	if err != nil {
 		if err == pgx.ErrNoRows {
@@ -1388,7 +1414,6 @@ func (s *Server) handleUpdateUserTrust(c echo.Context) error {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "update user trust failed"})
 	}
 	response := map[string]any{"trust": serializeUserTrust(updated)}
-	nextStatus := strings.TrimSpace(payload.Status)
 	switch {
 	case nextStatus == "banned":
 		if err := s.botService.BanChatUser(c.Request().Context(), chatID, userID); err != nil {
@@ -1399,6 +1424,11 @@ func (s *Server) handleUpdateUserTrust(c echo.Context) error {
 		if err := s.botService.UnbanChatUser(c.Request().Context(), chatID, userID); err != nil {
 			s.logger.Warn("user trust status unban sync failed", zap.Error(err), zap.Int64("chat_id", chatID), zap.Int64("user_id", userID))
 			response["telegram_action_error"] = err.Error()
+		} else if err := s.botService.Queries().ClearUserTrustBanMeta(c.Request().Context(), chatID, userID); err != nil {
+			s.logger.Warn("user trust status clear ban meta failed", zap.Error(err), zap.Int64("chat_id", chatID), zap.Int64("user_id", userID))
+			response["telegram_action_error"] = err.Error()
+		} else if refreshed, getErr := s.botService.Queries().GetUserTrust(c.Request().Context(), chatID, userID); getErr == nil {
+			response["trust"] = serializeUserTrust(refreshed)
 		}
 	}
 	return c.JSON(http.StatusOK, response)
@@ -1799,6 +1829,10 @@ func serializeAIDecision(item store.AIDecision) map[string]any {
 }
 
 func serializeUserTrust(item store.UserTrust) map[string]any {
+	var bannedReason any
+	if len(item.BannedReason) > 0 {
+		bannedReason = json.RawMessage(item.BannedReason)
+	}
 	return map[string]any{
 		"chat_id":          item.ChatID,
 		"user_id":          item.UserID,
@@ -1812,6 +1846,8 @@ func serializeUserTrust(item store.UserTrust) map[string]any {
 		"messages_checked": item.MessagesChecked,
 		"messages_clean":   item.MessagesClean,
 		"graduated_at":     item.GraduatedAt,
+		"banned_at":        item.BannedAt,
+		"banned_reason":    bannedReason,
 		"notes":            item.Notes,
 	}
 }

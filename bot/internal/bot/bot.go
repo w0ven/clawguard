@@ -1592,6 +1592,8 @@ func (s *Service) handleUnbanCommand(c tele.Context) error {
 		Score:  0.5,
 	}); err != nil {
 		s.logger.Warn("reset user trust status on unban failed", zap.Error(err), zap.Int64("user_id", target.UserID))
+	} else if err := s.queries.ClearUserTrustBanMeta(context.Background(), chat.ID, target.UserID); err != nil {
+		s.logger.Warn("clear user trust ban meta on unban failed", zap.Error(err), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", target.UserID))
 	}
 
 	diff := "manual_unban"
@@ -1653,11 +1655,14 @@ func (s *Service) handleSpamCommand(c tele.Context) error {
 	})
 
 	// 3. Update trust status to banned
+	now := time.Now()
 	_, _ = s.queries.UpdateUserTrustStatus(ctx, store.UpdateUserTrustStatusParams{
-		ChatID: chat.ID,
-		UserID: target.UserID,
-		Status: "banned",
-		Score:  0,
+		ChatID:       chat.ID,
+		UserID:       target.UserID,
+		Status:       "banned",
+		Score:        0,
+		BannedAt:     &now,
+		BannedReason: buildUserTrustBanReason("spam", "spam", "manual_spam_cmd"),
 	})
 
 	// 4. Audit log

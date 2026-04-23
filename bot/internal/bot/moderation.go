@@ -20,6 +20,47 @@ import (
 	"github.com/openclaw/clawguard/internal/store"
 )
 
+func buildUserTrustBanReason(rule, matched, source string) []byte {
+	return mustJSONBytes(map[string]any{
+		"rule":    strings.TrimSpace(rule),
+		"matched": strings.TrimSpace(matched),
+		"source":  strings.TrimSpace(source),
+	})
+}
+
+func parseUserTrustBanMeta(notes *string, fallbackSource string) (string, string, string) {
+	if notes == nil {
+		return "manual_ban", "", fallbackSource
+	}
+	raw := strings.TrimSpace(*notes)
+	if raw == "" {
+		return "manual_ban", "", fallbackSource
+	}
+
+	for _, prefix := range []struct {
+		rule   string
+		source string
+	}{
+		{rule: "profile_match_on_message", source: "bio_on_message"},
+		{rule: "profile_match", source: "profile_match"},
+		{rule: "cas_banned", source: "cas"},
+		{rule: "warnings_threshold", source: "warnings_threshold"},
+	} {
+		if strings.HasPrefix(raw, prefix.rule+": ") {
+			return prefix.rule, strings.TrimSpace(strings.TrimPrefix(raw, prefix.rule+": ")), prefix.source
+		}
+		if raw == prefix.rule {
+			return prefix.rule, "", prefix.source
+		}
+	}
+
+	if strings.HasPrefix(raw, "filter_") {
+		return raw, "", "filter_rule"
+	}
+
+	return "ai_ban", raw, fallbackSource
+}
+
 type reviewableContent struct {
 	Text     string
 	Kind     string
@@ -1233,16 +1274,24 @@ func (s *Service) applyAIAction(ctx context.Context, msg *tele.Message, policy c
 	if nextStatus != "" && nextStatus != updated.Status {
 		now := time.Now()
 		var graduatedAt *time.Time
+		var bannedAt *time.Time
+		var bannedReason []byte
 		if nextStatus == "trusted" {
 			graduatedAt = &now
 		}
+		if nextStatus == "banned" {
+			bannedAt = &now
+			bannedReason = buildUserTrustBanReason(output.Verdict.Verdict, output.Verdict.Reason, "ai")
+		}
 		updated, err = s.queries.UpdateUserTrustStatus(ctx, store.UpdateUserTrustStatusParams{
-			ChatID:      msg.Chat.ID,
-			UserID:      msg.Sender.ID,
-			Status:      nextStatus,
-			Score:       score,
-			GraduatedAt: graduatedAt,
-			Notes:       stringPtr(output.Verdict.Reason),
+			ChatID:       msg.Chat.ID,
+			UserID:       msg.Sender.ID,
+			Status:       nextStatus,
+			Score:        score,
+			GraduatedAt:  graduatedAt,
+			BannedAt:     bannedAt,
+			BannedReason: bannedReason,
+			Notes:        stringPtr(output.Verdict.Reason),
 		})
 		if err != nil {
 			return err
@@ -1354,17 +1403,27 @@ func (s *Service) resetTrustAfterViolation(ctx context.Context, msg *tele.Messag
 
 	if nextStatus != trust.Status || score != trust.Score {
 		var graduatedAt *time.Time
+		var bannedAt *time.Time
+		var bannedReason []byte
 		if nextStatus == "trusted" {
 			now := time.Now()
 			graduatedAt = &now
 		}
+		if nextStatus == "banned" {
+			now := time.Now()
+			bannedAt = &now
+			rule, matched, source := parseUserTrustBanMeta(notes, "ai")
+			bannedReason = buildUserTrustBanReason(rule, matched, source)
+		}
 		if _, err := s.queries.UpdateUserTrustStatus(ctx, store.UpdateUserTrustStatusParams{
-			ChatID:      msg.Chat.ID,
-			UserID:      msg.Sender.ID,
-			Status:      nextStatus,
-			Score:       score,
-			GraduatedAt: graduatedAt,
-			Notes:       notes,
+			ChatID:       msg.Chat.ID,
+			UserID:       msg.Sender.ID,
+			Status:       nextStatus,
+			Score:        score,
+			GraduatedAt:  graduatedAt,
+			BannedAt:     bannedAt,
+			BannedReason: bannedReason,
+			Notes:        notes,
 		}); err != nil {
 			s.logger.Warn("update user trust after violation failed", zap.Error(err), zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID), zap.String("action", action))
 		}
