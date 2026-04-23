@@ -296,7 +296,15 @@ export type UserTrust = {
   messages_checked: number;
   messages_clean: number;
   graduated_at: Nullable<string>;
+  banned_at: Nullable<string>;
+  banned_reason: Nullable<BannedReason>;
   notes: Nullable<string>;
+};
+
+export type BannedReason = {
+  rule?: string;
+  matched?: string;
+  source?: string;
 };
 
 export type AICostStat = {

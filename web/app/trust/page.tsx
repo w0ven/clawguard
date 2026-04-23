@@ -76,6 +76,19 @@ const statusLabel: Record<string, string> = {
   archived: "已归档",
 };
 
+const sourceLabel = (source?: string) =>
+  ({
+    ai: "AI 审核",
+    profile_match: "入群 bio",
+    cas: "CAS 黑名单",
+    bio_on_message: "消息前 bio",
+    manual_admin: "管理员手动",
+    manual_spam_cmd: "/spam 命令",
+    historical_backfill: "历史回填",
+    filter_rule: "规则命中",
+    warnings_threshold: "警告阈值",
+  })[source ?? ""] ?? source ?? "未知";
+
 function buildQueryString(filters: TrustFilters) {
   const params = new URLSearchParams();
   if (filters.chat_id.trim()) params.set("chat_id", filters.chat_id.trim());
@@ -211,6 +224,7 @@ function TrustPageInner() {
   }
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  const showBannedMeta = filters.status === "banned";
   const tabs = (["all", "new", "trusted", "suspicious", "banned", "archived"] as TrustStatus[]).map(
     (value) => ({
       value,
@@ -279,6 +293,8 @@ function TrustPageInner() {
                   <TableHeaderCell>用户</TableHeaderCell>
                   <TableHeaderCell>加入时间</TableHeaderCell>
                   <TableHeaderCell>状态</TableHeaderCell>
+                  {showBannedMeta && <TableHeaderCell>封禁时间</TableHeaderCell>}
+                  {showBannedMeta && <TableHeaderCell>封禁原因</TableHeaderCell>}
                   <TableHeaderCell>清洁/审核</TableHeaderCell>
                   <TableHeaderCell>得分</TableHeaderCell>
                   <TableHeaderCell>操作</TableHeaderCell>
@@ -302,6 +318,32 @@ function TrustPageInner() {
                         {statusLabel[item.status] ?? item.status}
                       </Badge>
                     </TableCell>
+                    {showBannedMeta && (
+                      <TableCell className="text-[var(--text-muted)] whitespace-nowrap">
+                        {item.banned_at ? new Date(item.banned_at).toLocaleString("zh-CN") : "—"}
+                      </TableCell>
+                    )}
+                    {showBannedMeta && (
+                      <TableCell className="min-w-[260px]">
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          {item.banned_reason?.rule && (
+                            <Badge tone="danger">{item.banned_reason.rule}</Badge>
+                          )}
+                          {item.banned_reason?.matched && (
+                            <span
+                              className="max-w-[220px] truncate text-xs text-[var(--text-muted)]"
+                              title={item.banned_reason.matched}
+                            >
+                              {item.banned_reason.matched}
+                            </span>
+                          )}
+                          {item.banned_reason?.source && (
+                            <Badge tone="default">{sourceLabel(item.banned_reason.source)}</Badge>
+                          )}
+                          {!item.banned_reason && "—"}
+                        </div>
+                      </TableCell>
+                    )}
                     <TableCell className="tabular-nums text-[var(--text-muted)]">
                       {item.messages_clean} / {item.messages_checked}
                     </TableCell>
