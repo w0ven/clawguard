@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -49,9 +50,26 @@ type LinkPreview struct {
 }
 
 func fetchTmeLinkPreview(ctx context.Context, rawURL string, redisClient *redis.Client) (*LinkPreview, error) {
+	return fetchTmeLinkPreviewForUser(ctx, rawURL, redisClient, 0)
+}
+
+func fetchTmeLinkPreviewForUser(ctx context.Context, rawURL string, redisClient *redis.Client, userID int64) (*LinkPreview, error) {
 	normalized, err := normalizeTmeURL(rawURL)
 	if err != nil {
 		return nil, err
+	}
+
+	if redisClient != nil && userID > 0 {
+		rateLimitKey := "tme_fetch_rate:" + strconv.FormatInt(userID, 10)
+		count, err := redisClient.Incr(ctx, rateLimitKey).Result()
+		if err == nil {
+			if count == 1 {
+				_ = redisClient.Expire(ctx, rateLimitKey, time.Minute).Err()
+			}
+			if count > 3 {
+				return nil, nil
+			}
+		}
 	}
 
 	cacheKey := "tme_preview:" + sha256Hex(normalized)

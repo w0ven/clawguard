@@ -25,7 +25,10 @@ func TestBuildReviewableContent_LinkPreviewFetched(t *testing.T) {
 		},
 	}
 
-	rv := buildReviewableContentWithOptions(context.Background(), msg, nil, func(_ context.Context, rawURL string, _ *redis.Client) (*LinkPreview, error) {
+	rv := buildReviewableContentWithOptions(context.Background(), msg, nil, func(_ context.Context, rawURL string, _ *redis.Client, userID int64) (*LinkPreview, error) {
+		if userID != 0 {
+			t.Fatalf("userID = %d, want 0", userID)
+		}
 		if rawURL != "https://t.me/da91wang/9" {
 			t.Fatalf("rawURL = %q", rawURL)
 		}
@@ -66,7 +69,7 @@ func TestBuildReviewableContent_LinkPreviewTimeoutFallback(t *testing.T) {
 		},
 	}
 
-	rv := buildReviewableContentWithOptions(context.Background(), msg, nil, func(ctx context.Context, rawURL string, _ *redis.Client) (*LinkPreview, error) {
+	rv := buildReviewableContentWithOptions(context.Background(), msg, nil, func(ctx context.Context, rawURL string, _ *redis.Client, _ int64) (*LinkPreview, error) {
 		<-ctx.Done()
 		return nil, ctx.Err()
 	})
@@ -114,7 +117,10 @@ func TestBuildReviewableContent_MultipleURLsFetchedConcurrently(t *testing.T) {
 	release := make(chan struct{})
 	var maxConcurrent int32
 
-	rv := buildReviewableContentWithOptions(context.Background(), msg, nil, func(_ context.Context, rawURL string, _ *redis.Client) (*LinkPreview, error) {
+	rv := buildReviewableContentWithOptions(context.Background(), msg, nil, func(_ context.Context, rawURL string, _ *redis.Client, userID int64) (*LinkPreview, error) {
+		if userID != 0 {
+			t.Fatalf("userID = %d, want 0", userID)
+		}
 		current := atomic.AddInt32(&started, 1)
 		for {
 			seen := atomic.LoadInt32(&maxConcurrent)
@@ -163,11 +169,11 @@ func TestFetchTmeLinkPreview_UsesRedisCacheOnSecondCall(t *testing.T) {
 	}()
 
 	ctx := context.Background()
-	first, err := fetchTmeLinkPreview(ctx, "https://t.me/cachetest/1", redisClient)
+	first, err := fetchTmeLinkPreviewForUser(ctx, "https://t.me/cachetest/1", redisClient, 0)
 	if err != nil {
 		t.Fatalf("first fetch error: %v", err)
 	}
-	second, err := fetchTmeLinkPreview(ctx, "https://t.me/cachetest/1", redisClient)
+	second, err := fetchTmeLinkPreviewForUser(ctx, "https://t.me/cachetest/1", redisClient, 0)
 	if err != nil {
 		t.Fatalf("second fetch error: %v", err)
 	}
@@ -187,7 +193,10 @@ func TestBuildReviewableContent_OnlyURLAndEmptyCurrentText(t *testing.T) {
 		},
 	}
 
-	rv := buildReviewableContentWithOptions(context.Background(), msg, nil, func(_ context.Context, rawURL string, _ *redis.Client) (*LinkPreview, error) {
+	rv := buildReviewableContentWithOptions(context.Background(), msg, nil, func(_ context.Context, rawURL string, _ *redis.Client, userID int64) (*LinkPreview, error) {
+		if userID != 0 {
+			t.Fatalf("userID = %d, want 0", userID)
+		}
 		return &LinkPreview{
 			URL:         rawURL,
 			Title:       "只有链接",
@@ -204,6 +213,45 @@ func TestBuildReviewableContent_OnlyURLAndEmptyCurrentText(t *testing.T) {
 	}
 	if !strings.Contains(rv.Text, "【本次消息】") {
 		t.Fatalf("Text 缺少本次消息标记: %q", rv.Text)
+	}
+}
+
+func TestFetchTmeLinkPreviewForUser_RateLimitedAfterThreeRequests(t *testing.T) {
+	redisClient := newFakeRedisClient(t)
+
+	var hits atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		fmt.Fprint(w, `<html><head><meta property="og:title" content="标题"></head></html>`)
+	}))
+	defer server.Close()
+
+	previousBaseURL := tmePreviewBaseURL
+	tmePreviewBaseURL = server.URL
+	defer func() {
+		tmePreviewBaseURL = previousBaseURL
+	}()
+
+	ctx := context.Background()
+	for i := 0; i < 3; i++ {
+		preview, err := fetchTmeLinkPreviewForUser(ctx, fmt.Sprintf("https://t.me/ratelimit/%d", i), redisClient, 42)
+		if err != nil {
+			t.Fatalf("request %d error: %v", i+1, err)
+		}
+		if preview == nil {
+			t.Fatalf("request %d preview = nil, want non-nil", i+1)
+		}
+	}
+
+	preview, err := fetchTmeLinkPreviewForUser(ctx, "https://t.me/ratelimit/4", redisClient, 42)
+	if err != nil {
+		t.Fatalf("request 4 error: %v", err)
+	}
+	if preview != nil {
+		t.Fatalf("request 4 preview = %+v, want nil", preview)
+	}
+	if hits.Load() != 3 {
+		t.Fatalf("server hits = %d, want 3", hits.Load())
 	}
 }
 
@@ -290,6 +338,28 @@ func handleFakeRedisConn(conn net.Conn, store *fakeRedisStore) {
 			store.data[args[1]] = args[2]
 			store.mu.Unlock()
 			_, _ = writer.WriteString("+OK\r\n")
+		case "INCR":
+			if len(args) < 2 {
+				_, _ = writer.WriteString("-ERR wrong number of arguments\r\n")
+				_ = writer.Flush()
+				continue
+			}
+			store.mu.Lock()
+			current := 0
+			if raw, ok := store.data[args[1]]; ok {
+				_, _ = fmt.Sscanf(raw, "%d", &current)
+			}
+			current++
+			store.data[args[1]] = fmt.Sprintf("%d", current)
+			store.mu.Unlock()
+			_, _ = writer.WriteString(fmt.Sprintf(":%d\r\n", current))
+		case "EXPIRE":
+			if len(args) < 3 {
+				_, _ = writer.WriteString("-ERR wrong number of arguments\r\n")
+				_ = writer.Flush()
+				continue
+			}
+			_, _ = writer.WriteString(":1\r\n")
 		case "PING":
 			_, _ = writer.WriteString("+PONG\r\n")
 		case "QUIT":
