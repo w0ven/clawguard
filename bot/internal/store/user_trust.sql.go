@@ -6,7 +6,7 @@ import (
 )
 
 const getUserTrust = `-- name: GetUserTrust :one
-SELECT chat_id, user_id, username, first_name, last_name, joined_at, updated_at, status, score, messages_checked, messages_clean, graduated_at, notes
+SELECT chat_id, user_id, username, first_name, last_name, joined_at, updated_at, status, score, messages_checked, messages_clean, graduated_at, banned_at, banned_reason, notes
 FROM user_trust
 WHERE chat_id = $1 AND user_id = $2
 `
@@ -19,7 +19,7 @@ SET status = 'new',
 WHERE chat_id = $1
   AND user_id = $2
   AND status = 'archived'
-RETURNING chat_id, user_id, username, first_name, last_name, joined_at, updated_at, status, score, messages_checked, messages_clean, graduated_at, notes
+RETURNING chat_id, user_id, username, first_name, last_name, joined_at, updated_at, status, score, messages_checked, messages_clean, graduated_at, banned_at, banned_reason, notes
 `
 
 const upsertUserTrust = `-- name: UpsertUserTrust :one
@@ -36,8 +36,10 @@ INSERT INTO user_trust (
     messages_checked,
     messages_clean,
     graduated_at,
+    banned_at,
+    banned_reason,
     notes
-) VALUES ($1, $2, $3, $4, $5, $6, NOW(), $7, $8, $9, $10, $11, $12)
+) VALUES ($1, $2, $3, $4, $5, $6, NOW(), $7, $8, $9, $10, $11, $12, $13, $14)
 ON CONFLICT (chat_id, user_id) DO UPDATE
 SET joined_at = LEAST(user_trust.joined_at, EXCLUDED.joined_at),
     username = COALESCE(EXCLUDED.username, user_trust.username),
@@ -49,8 +51,10 @@ SET joined_at = LEAST(user_trust.joined_at, EXCLUDED.joined_at),
     messages_checked = CASE WHEN user_trust.status = 'banned' THEN user_trust.messages_checked ELSE EXCLUDED.messages_checked END,
     messages_clean = CASE WHEN user_trust.status = 'banned' THEN user_trust.messages_clean ELSE EXCLUDED.messages_clean END,
     graduated_at = CASE WHEN user_trust.status = 'banned' THEN user_trust.graduated_at ELSE EXCLUDED.graduated_at END,
+    banned_at = CASE WHEN user_trust.status = 'banned' THEN user_trust.banned_at ELSE EXCLUDED.banned_at END,
+    banned_reason = CASE WHEN user_trust.status = 'banned' THEN user_trust.banned_reason ELSE EXCLUDED.banned_reason END,
     notes = CASE WHEN user_trust.status = 'banned' THEN user_trust.notes ELSE EXCLUDED.notes END
-RETURNING chat_id, user_id, username, first_name, last_name, joined_at, updated_at, status, score, messages_checked, messages_clean, graduated_at, notes
+RETURNING chat_id, user_id, username, first_name, last_name, joined_at, updated_at, status, score, messages_checked, messages_clean, graduated_at, banned_at, banned_reason, notes
 `
 
 const incrementUserTrustCounters = `-- name: IncrementUserTrustCounters :one
@@ -60,7 +64,7 @@ SET messages_checked = messages_checked + $3,
     score = $5,
     updated_at = NOW()
 WHERE chat_id = $1 AND user_id = $2
-RETURNING chat_id, user_id, username, first_name, last_name, joined_at, updated_at, status, score, messages_checked, messages_clean, graduated_at, notes
+RETURNING chat_id, user_id, username, first_name, last_name, joined_at, updated_at, status, score, messages_checked, messages_clean, graduated_at, banned_at, banned_reason, notes
 `
 
 const updateUserTrustStatus = `-- name: UpdateUserTrustStatus :one
@@ -68,10 +72,12 @@ UPDATE user_trust
 SET status = $3,
     score = $4,
     graduated_at = $5,
-    notes = $6,
+    banned_at = CASE WHEN $6::TIMESTAMPTZ IS NULL THEN banned_at ELSE $6 END,
+    banned_reason = CASE WHEN $7::JSONB IS NULL THEN banned_reason ELSE $7 END,
+    notes = $8,
     updated_at = NOW()
 WHERE chat_id = $1 AND user_id = $2
-RETURNING chat_id, user_id, username, first_name, last_name, joined_at, updated_at, status, score, messages_checked, messages_clean, graduated_at, notes
+RETURNING chat_id, user_id, username, first_name, last_name, joined_at, updated_at, status, score, messages_checked, messages_clean, graduated_at, banned_at, banned_reason, notes
 `
 
 const resetUserTrustClean = `-- name: ResetUserTrustClean :one
@@ -80,7 +86,7 @@ SET messages_clean = 0,
     score = $3,
     updated_at = NOW()
 WHERE chat_id = $1 AND user_id = $2
-RETURNING chat_id, user_id, username, first_name, last_name, joined_at, updated_at, status, score, messages_checked, messages_clean, graduated_at, notes
+RETURNING chat_id, user_id, username, first_name, last_name, joined_at, updated_at, status, score, messages_checked, messages_clean, graduated_at, banned_at, banned_reason, notes
 `
 
 const adjustUserTrustScore = `-- name: AdjustUserTrustScore :one
@@ -102,7 +108,13 @@ INSERT INTO user_trust (
 ON CONFLICT (chat_id, user_id) DO UPDATE
 SET score = LEAST(1, GREATEST(0, user_trust.score + $3)),
     updated_at = NOW()
-RETURNING chat_id, user_id, username, first_name, last_name, joined_at, updated_at, status, score, messages_checked, messages_clean, graduated_at, notes
+RETURNING chat_id, user_id, username, first_name, last_name, joined_at, updated_at, status, score, messages_checked, messages_clean, graduated_at, banned_at, banned_reason, notes
+`
+
+const clearUserTrustBanMeta = `-- name: ClearUserTrustBanMeta :exec
+UPDATE user_trust
+SET banned_at = NULL, banned_reason = NULL
+WHERE chat_id = $1 AND user_id = $2
 `
 
 const countUserTrust = `-- name: CountUserTrust :one
@@ -125,7 +137,7 @@ WHERE ($1::BIGINT IS NULL OR chat_id = $1)
 `
 
 const listUserTrustPaginated = `-- name: ListUserTrustPaginated :many
-SELECT chat_id, user_id, username, first_name, last_name, joined_at, updated_at, status, score, messages_checked, messages_clean, graduated_at, notes
+SELECT chat_id, user_id, username, first_name, last_name, joined_at, updated_at, status, score, messages_checked, messages_clean, graduated_at, banned_at, banned_reason, notes
 FROM user_trust
 WHERE ($1::BIGINT IS NULL OR chat_id = $1)
   AND ($2::BIGINT IS NULL OR user_id = $2)
@@ -158,6 +170,8 @@ type UpsertUserTrustParams struct {
 	MessagesChecked int32
 	MessagesClean   int32
 	GraduatedAt     *time.Time
+	BannedAt        *time.Time
+	BannedReason    []byte
 	Notes           *string
 }
 
@@ -170,12 +184,14 @@ type IncrementUserTrustCountersParams struct {
 }
 
 type UpdateUserTrustStatusParams struct {
-	ChatID      int64
-	UserID      int64
-	Status      string
-	Score       float64
-	GraduatedAt *time.Time
-	Notes       *string
+	ChatID       int64
+	UserID       int64
+	Status       string
+	Score        float64
+	GraduatedAt  *time.Time
+	BannedAt     *time.Time
+	BannedReason []byte
+	Notes        *string
 }
 
 type ResetUserTrustCleanParams struct {
@@ -217,6 +233,8 @@ func (q *Queries) GetUserTrust(ctx context.Context, chatID, userID int64) (UserT
 		&i.MessagesChecked,
 		&i.MessagesClean,
 		&i.GraduatedAt,
+		&i.BannedAt,
+		&i.BannedReason,
 		&i.Notes,
 	)
 	return i, err
@@ -238,13 +256,15 @@ func (q *Queries) ReactivateArchivedUserTrust(ctx context.Context, chatID, userI
 		&i.MessagesChecked,
 		&i.MessagesClean,
 		&i.GraduatedAt,
+		&i.BannedAt,
+		&i.BannedReason,
 		&i.Notes,
 	)
 	return i, err
 }
 
 func (q *Queries) UpsertUserTrust(ctx context.Context, arg UpsertUserTrustParams) (UserTrust, error) {
-	row := q.db.QueryRow(ctx, upsertUserTrust, arg.ChatID, arg.UserID, arg.Username, arg.FirstName, arg.LastName, arg.JoinedAt, arg.Status, arg.Score, arg.MessagesChecked, arg.MessagesClean, arg.GraduatedAt, arg.Notes)
+	row := q.db.QueryRow(ctx, upsertUserTrust, arg.ChatID, arg.UserID, arg.Username, arg.FirstName, arg.LastName, arg.JoinedAt, arg.Status, arg.Score, arg.MessagesChecked, arg.MessagesClean, arg.GraduatedAt, arg.BannedAt, arg.BannedReason, arg.Notes)
 	var i UserTrust
 	err := row.Scan(
 		&i.ChatID,
@@ -259,6 +279,8 @@ func (q *Queries) UpsertUserTrust(ctx context.Context, arg UpsertUserTrustParams
 		&i.MessagesChecked,
 		&i.MessagesClean,
 		&i.GraduatedAt,
+		&i.BannedAt,
+		&i.BannedReason,
 		&i.Notes,
 	)
 	return i, err
@@ -280,13 +302,15 @@ func (q *Queries) IncrementUserTrustCounters(ctx context.Context, arg IncrementU
 		&i.MessagesChecked,
 		&i.MessagesClean,
 		&i.GraduatedAt,
+		&i.BannedAt,
+		&i.BannedReason,
 		&i.Notes,
 	)
 	return i, err
 }
 
 func (q *Queries) UpdateUserTrustStatus(ctx context.Context, arg UpdateUserTrustStatusParams) (UserTrust, error) {
-	row := q.db.QueryRow(ctx, updateUserTrustStatus, arg.ChatID, arg.UserID, arg.Status, arg.Score, arg.GraduatedAt, arg.Notes)
+	row := q.db.QueryRow(ctx, updateUserTrustStatus, arg.ChatID, arg.UserID, arg.Status, arg.Score, arg.GraduatedAt, arg.BannedAt, arg.BannedReason, arg.Notes)
 	var i UserTrust
 	err := row.Scan(
 		&i.ChatID,
@@ -301,9 +325,16 @@ func (q *Queries) UpdateUserTrustStatus(ctx context.Context, arg UpdateUserTrust
 		&i.MessagesChecked,
 		&i.MessagesClean,
 		&i.GraduatedAt,
+		&i.BannedAt,
+		&i.BannedReason,
 		&i.Notes,
 	)
 	return i, err
+}
+
+func (q *Queries) ClearUserTrustBanMeta(ctx context.Context, chatID, userID int64) error {
+	_, err := q.db.Exec(ctx, clearUserTrustBanMeta, chatID, userID)
+	return err
 }
 
 func (q *Queries) ResetUserTrustClean(ctx context.Context, arg ResetUserTrustCleanParams) (UserTrust, error) {
@@ -322,6 +353,8 @@ func (q *Queries) ResetUserTrustClean(ctx context.Context, arg ResetUserTrustCle
 		&i.MessagesChecked,
 		&i.MessagesClean,
 		&i.GraduatedAt,
+		&i.BannedAt,
+		&i.BannedReason,
 		&i.Notes,
 	)
 	return i, err
@@ -343,6 +376,8 @@ func (q *Queries) AdjustUserTrustScore(ctx context.Context, arg AdjustUserTrustS
 		&i.MessagesChecked,
 		&i.MessagesClean,
 		&i.GraduatedAt,
+		&i.BannedAt,
+		&i.BannedReason,
 		&i.Notes,
 	)
 	return i, err
@@ -377,6 +412,8 @@ func (q *Queries) ListUserTrustPaginated(ctx context.Context, arg ListUserTrustP
 			&i.MessagesChecked,
 			&i.MessagesClean,
 			&i.GraduatedAt,
+			&i.BannedAt,
+			&i.BannedReason,
 			&i.Notes,
 		); err != nil {
 			return nil, err

@@ -136,6 +136,8 @@ type UserTrust struct {
 	MessagesChecked int32
 	MessagesClean   int32
 	GraduatedAt     *time.Time
+	BannedAt        *time.Time
+	BannedReason    []byte
 	Notes           *string
 }
 
