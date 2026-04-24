@@ -37,6 +37,7 @@ import type {
   ProfileCheckLog,
 } from "@/lib/types";
 import { useToast } from "@/components/providers";
+import { ScheduledMessagesEditor } from "@/components/scheduled-messages-editor";
 import { Save, ChevronDown, ChevronRight } from "lucide-react";
 
 type FieldKind =
@@ -592,6 +593,7 @@ const tabs = [
   { value: "feedback", label: "动作反馈" },
   { value: "logging", label: "日志" },
   { value: "audit", label: "审计" },
+  { value: "scheduled", label: "定时消息" },
 ];
 
 type Props = {
@@ -992,7 +994,7 @@ export function GroupConfigEditor({ group, mergedPolicy }: Props) {
         </div>
       )}
 
-      {activeTab !== "basic" && activeTab !== "audit" && (
+      {activeTab !== "basic" && activeTab !== "audit" && activeTab !== "scheduled" && (
         <div className="space-y-3">
           {tabFields.map((field) => {
             const inherited = !hasPath(draft, field.path);
@@ -1123,6 +1125,8 @@ export function GroupConfigEditor({ group, mergedPolicy }: Props) {
         </div>
       )}
 
+      {activeTab === "scheduled" && <ScheduledMessagesEditor group={group} />}
+
       {activeTab === "audit" && (
         <Card>
           <CardHeader>
@@ -1185,18 +1189,20 @@ export function GroupConfigEditor({ group, mergedPolicy }: Props) {
       )}
 
       {/* sticky save */}
-      <div className="fixed bottom-6 right-6 z-20">
-        <Button
-          onClick={saveConfig}
-          disabled={!isDirty || saving}
-          variant={isDirty ? "primary" : "secondary"}
-          size="lg"
-          className="shadow-lg"
-        >
-          <Save className="h-4 w-4" />
-          {saving ? "保存中…" : isDirty ? "保存配置" : "已保存"}
-        </Button>
-      </div>
+      {activeTab !== "scheduled" && (
+        <div className="fixed bottom-6 right-6 z-20">
+          <Button
+            onClick={saveConfig}
+            disabled={!isDirty || saving}
+            variant={isDirty ? "primary" : "secondary"}
+            size="lg"
+            className="shadow-lg"
+          >
+            <Save className="h-4 w-4" />
+            {saving ? "保存中…" : isDirty ? "保存配置" : "已保存"}
+          </Button>
+        </div>
+      )}
     </div>
   );
 }
