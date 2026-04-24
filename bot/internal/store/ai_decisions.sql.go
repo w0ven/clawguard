@@ -29,7 +29,11 @@ SELECT id, chat_id, user_id, message_id, message_text, provider_id, model_id, mo
 FROM ai_decisions
 WHERE ($1::BIGINT IS NULL OR chat_id = $1)
   AND ($2::BIGINT IS NULL OR user_id = $2)
-  AND ($3::TEXT = '' OR verdict = $3)
+  AND (
+    $3::TEXT = ''
+    OR verdict = $3
+    OR ($3::TEXT = 'normal' AND verdict = 'clean')
+  )
   AND ($4::TEXT = '' OR COALESCE(admin_override, '') = $4)
   AND ($5::TEXT = '' OR category = $5)
   AND ($6::TEXT = '' OR action_taken = $6)

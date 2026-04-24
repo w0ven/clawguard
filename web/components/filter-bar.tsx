@@ -81,7 +81,7 @@ export function FilterBar({ groups, values, onChange, onApply, onReset, mode }: 
       ) : (
         <Select value={values.verdict} onChange={(e) => onChange("verdict", e.target.value)}>
           <option value="">全部判定</option>
-          <option value="clean">正常 (normal)</option>
+          <option value="normal">正常 (normal)</option>
           <option value="ad">广告 (ad)</option>
           <option value="scam">诈骗 (scam)</option>
           <option value="spam">垃圾消息 (spam)</option>

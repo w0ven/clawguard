@@ -26,7 +26,7 @@ const DANGER_VERDICTS = ["ad", "scam", "harass", "spam", "porn", "violence"];
 function verdictTone(
   v: string,
 ): "success" | "warning" | "danger" | "default" {
-  if (v === "clean") return "success";
+  if (v === "normal" || v === "clean") return "success";
   if (v === "suspicious") return "warning";
   if (DANGER_VERDICTS.includes(v)) return "danger";
   return "default";
