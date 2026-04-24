@@ -192,7 +192,9 @@ func (m *Moderator) CheckMessage(ctx context.Context, input CheckInput) (CheckOu
 		if window <= 0 {
 			window = 500
 		}
-		go m.flushBatch(key, time.Duration(window)*time.Millisecond)
+		safeGo(context.Background(), m.logger, func() {
+			m.flushBatch(key, time.Duration(window)*time.Millisecond)
+		})
 	}
 	batch.inputs = append(batch.inputs, input)
 	batch.waiters = append(batch.waiters, waiter)
