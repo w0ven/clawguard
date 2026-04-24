@@ -26,6 +26,38 @@ type Group struct {
 	Config      []byte
 }
 
+type ScheduledMessage struct {
+	ID                int64
+	ChatID            int64
+	Name              string
+	ScheduleType      string
+	IntervalMinutes   *int32
+	DailyTimes        []string
+	Timezone          string
+	Content           string
+	Buttons           []byte
+	AutoDeleteSeconds int32
+	Enabled           bool
+	Status            string
+	LastRunAt         *time.Time
+	LastMessageID     *int64
+	LastError         *string
+	LastSkipReason    *string
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
+}
+
+type ScheduledMessageRun struct {
+	ID                 int64
+	ScheduledMessageID int64
+	RanAt              time.Time
+	Success            bool
+	TgMessageID        *int64
+	RenderedPreview    *string
+	Error              *string
+	DurationMs         *int32
+}
+
 type AuthorizedGroup struct {
 	ChatID       int64
 	Title        string
