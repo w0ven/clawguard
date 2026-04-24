@@ -151,10 +151,13 @@ func cloneHeaders(src map[string]string) map[string]string {
 // counts as healthy.
 func (c *OpenAICompatibleClient) Probe(ctx context.Context, modelKey string) (int, error) {
 	body, err := json.Marshal(chatCompletionRequest{
-		Model:       modelKey,
-		Messages:    []Message{{Role: "user", Content: "ping"}},
+		Model: modelKey,
+		Messages: []Message{
+			{Role: "system", Content: "你是内容审核探活测试。无论用户输入什么，请严格返回 JSON：{\"verdict\":\"normal\"}，不要加其他文字。"},
+			{Role: "user", Content: "请严格返回 JSON。"},
+		},
 		Temperature: 0,
-		MaxTokens:   1,
+		MaxTokens:   32,
 	})
 	if err != nil {
 		return 0, fmt.Errorf("marshal probe request: %w", err)
@@ -187,8 +190,13 @@ func (c *OpenAICompatibleClient) Probe(ctx context.Context, modelKey string) (in
 		return 0, fmt.Errorf("probe status %d: %s", resp.StatusCode, strings.TrimSpace(string(payload)))
 	}
 
-	// Drain body so any upstream pooling is clean. We do not need to parse.
-	_, _ = io.ReadAll(io.LimitReader(resp.Body, 16*1024))
+	var decoded chatCompletionResponse
+	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
+		return 0, fmt.Errorf("decode probe response: %w", err)
+	}
+	if len(decoded.Choices) == 0 {
+		return 0, fmt.Errorf("probe returned no choices")
+	}
 	return int(time.Since(startedAt) / time.Millisecond), nil
 }
 

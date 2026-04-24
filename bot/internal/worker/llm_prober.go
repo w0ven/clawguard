@@ -21,7 +21,7 @@ const (
 	defaultProbeInterval  = 60 * time.Second
 	minProbeInterval      = 30 * time.Second
 	mainProbeTickInterval = 15 * time.Second
-	defaultProbeTimeout   = 5 * time.Second
+	defaultProbeTimeout   = 10 * time.Second
 	probeAlertCooldown    = 5 * time.Minute
 	probeOrphanSweepEvery = 10 * time.Minute
 )

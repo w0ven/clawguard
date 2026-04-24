@@ -45,7 +45,7 @@ type LLMClient interface {
 	Check(ctx context.Context, req CheckRequest) (*CheckResult, error)
 	// Probe issues a minimal ping-style request to the given model and returns
 	// the round-trip latency in milliseconds. Implementations should use a
-	// short context timeout (5s suggested) and parse success very loosely: any
+	// short context timeout (10s suggested) and parse success very loosely: any
 	// non-error HTTP response with at least one choice is a pass.
 	Probe(ctx context.Context, modelKey string) (int, error)
 	// Chat returns the raw assistant reply text, bypassing verdict parsing.
