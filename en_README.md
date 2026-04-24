@@ -300,3 +300,11 @@ The bot runs multiple background tasks after startup:
 ## 📄 License
 
 Private project. Unauthorized use prohibited.
+
+## Group Scheduled Messages
+
+- Open the web admin panel, go to Group Management → select a group → Scheduled Messages to create up to 20 scheduled messages per group.
+- Supports interval triggers every N minutes and multiple daily HH:MM times shown in Asia/Shanghai; times are stored in UTC and reloaded when the bot process starts.
+- Message bodies are sent as MarkdownV2 as written and support `{group_title}` `{member_count}` `{date}` `{time}` `{weekday}`; unknown variables are preserved.
+- Optional URL inline buttons and 0-3600 second auto-delete are supported; if the previous message is still within its auto-delete window, the next run is skipped and recorded.
+- The latest 50 send attempts are retained for history, and admins can use Run Now from the group page to test a template immediately.
