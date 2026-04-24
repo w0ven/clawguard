@@ -20,7 +20,8 @@ UPDATE user_trust
 SET status = 'archived',
     notes = COALESCE(notes, '') || ' [archived ' || NOW()::text || ']',
     updated_at = NOW()
-WHERE status = 'new'
+WHERE status NOT IN ('banned', 'archived')
+  AND status = 'new'
   AND messages_checked = 0
   AND joined_at < NOW() - make_interval(days => sqlc.arg(days)::int);
 

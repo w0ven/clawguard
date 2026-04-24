@@ -1398,16 +1398,26 @@ func (s *Server) handleUpdateUserTrust(c echo.Context) error {
 		bannedAt = &now
 		bannedReason = marshalUserTrustBanReason("manual_admin_ban", strings.TrimSpace(stringValue(payload.Notes)), "manual_admin")
 	}
-	updated, err := s.botService.Queries().UpdateUserTrustStatus(c.Request().Context(), store.UpdateUserTrustStatusParams{
-		ChatID:       chatID,
-		UserID:       userID,
-		Status:       nextStatus,
-		Score:        payload.Score,
-		GraduatedAt:  graduatedAt,
-		BannedAt:     bannedAt,
-		BannedReason: bannedReason,
-		Notes:        trimStringPtr(payload.Notes),
-	})
+	var updated store.UserTrust
+	if previous.Status == "banned" && nextStatus != "banned" {
+		updated, err = s.botService.Queries().UnbanUserTrust(c.Request().Context(), store.UnbanUserTrustParams{
+			ChatID: chatID,
+			UserID: userID,
+			Score:  payload.Score,
+			Notes:  trimStringPtr(payload.Notes),
+		})
+	} else {
+		updated, err = s.botService.Queries().UpdateUserTrustStatus(c.Request().Context(), store.UpdateUserTrustStatusParams{
+			ChatID:       chatID,
+			UserID:       userID,
+			Status:       nextStatus,
+			Score:        payload.Score,
+			GraduatedAt:  graduatedAt,
+			BannedAt:     bannedAt,
+			BannedReason: bannedReason,
+			Notes:        trimStringPtr(payload.Notes),
+		})
+	}
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return c.JSON(http.StatusNotFound, map[string]string{"error": "user trust not found"})
@@ -1425,11 +1435,6 @@ func (s *Server) handleUpdateUserTrust(c echo.Context) error {
 		if err := s.botService.UnbanChatUser(c.Request().Context(), chatID, userID); err != nil {
 			s.logger.Warn("user trust status unban sync failed", zap.Error(err), zap.Int64("chat_id", chatID), zap.Int64("user_id", userID))
 			response["telegram_action_error"] = err.Error()
-		} else if err := s.botService.Queries().ClearUserTrustBanMeta(c.Request().Context(), chatID, userID); err != nil {
-			s.logger.Warn("user trust status clear ban meta failed", zap.Error(err), zap.Int64("chat_id", chatID), zap.Int64("user_id", userID))
-			response["telegram_action_error"] = err.Error()
-		} else if refreshed, getErr := s.botService.Queries().GetUserTrust(c.Request().Context(), chatID, userID); getErr == nil {
-			response["trust"] = serializeUserTrust(refreshed)
 		}
 	}
 	return c.JSON(http.StatusOK, response)

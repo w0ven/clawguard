@@ -1593,15 +1593,12 @@ func (s *Service) handleUnbanCommand(c tele.Context) error {
 	if err := s.UnmuteChatUser(context.Background(), chat.ID, target.UserID); err != nil {
 		return c.Send("解除禁言失败: "+htmlEscape(err.Error()), &tele.SendOptions{ParseMode: tele.ModeHTML})
 	}
-	if _, err := s.queries.UpdateUserTrustStatus(context.Background(), store.UpdateUserTrustStatusParams{
+	if _, err := s.queries.UnbanUserTrust(context.Background(), store.UnbanUserTrustParams{
 		ChatID: chat.ID,
 		UserID: target.UserID,
-		Status: "new",
 		Score:  0.5,
 	}); err != nil {
 		s.logger.Warn("reset user trust status on unban failed", zap.Error(err), zap.Int64("user_id", target.UserID))
-	} else if err := s.queries.ClearUserTrustBanMeta(context.Background(), chat.ID, target.UserID); err != nil {
-		s.logger.Warn("clear user trust ban meta on unban failed", zap.Error(err), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", target.UserID))
 	}
 
 	diff := "manual_unban"
