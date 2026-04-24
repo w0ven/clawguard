@@ -28,11 +28,11 @@ func TestDecideAIActionVerdictCeiling(t *testing.T) {
 		want       string
 	}{
 		{
-			name:       "suspicious category ban is clamped to warn",
+			name:       "unknown suspicious category ban is ignored",
 			verdict:    "suspicious",
 			category:   "刷单",
 			confidence: 0.78,
-			want:       "warn",
+			want:       "none",
 		},
 		{
 			name:       "hard ad verdict keeps category ban",
@@ -56,17 +56,17 @@ func TestDecideAIActionVerdictCeiling(t *testing.T) {
 			want:       "none",
 		},
 		{
-			name:       "suspicious category none is raised to warn",
+			name:       "unknown suspicious category none stays none",
 			verdict:    "suspicious",
 			category:   "正常",
 			confidence: 0.80,
-			want:       "warn",
+			want:       "none",
 		},
 		{
-			name:       "suspicious low confidence threshold is raised to warn",
+			name:       "unknown suspicious low confidence stays none",
 			verdict:    "suspicious",
 			confidence: 0.10,
-			want:       "warn",
+			want:       "none",
 		},
 		{
 			name:       "hard ad category none is raised to warn",
@@ -76,10 +76,10 @@ func TestDecideAIActionVerdictCeiling(t *testing.T) {
 			want:       "warn",
 		},
 		{
-			name:       "suspicious high confidence threshold is clamped to warn",
+			name:       "unknown suspicious high confidence stays none",
 			verdict:    "suspicious",
 			confidence: 0.95,
-			want:       "warn",
+			want:       "none",
 		},
 		{
 			name:       "hard ad high confidence threshold can ban",

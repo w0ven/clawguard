@@ -21,12 +21,13 @@ import (
 )
 
 const messageBasePrompt = `你是一个中文群聊反垃圾审核员。判断下面的消息属于哪类：
-- clean（正常对话）
+- normal（正常对话）
 - ad（商业广告、引流、招聘、交友、币圈、刷单等）
 - scam（诈骗）
-- harass（骚扰辱骂）
 - spam（无意义刷屏）
-- suspicious（模糊不清但有风险）
+- harass（骚扰辱骂）
+- porn（色情）
+- violence（暴力、血腥、极端内容）
 
 输出 JSON：
 {"items":[{"verdict":"...","confidence":0.0-1.0,"category":"招聘/交友/币圈/刷单/引流/政治/色情/正常","reason":"简短中文解释"}]}
@@ -38,7 +39,7 @@ const messageBasePrompt = `你是一个中文群聊反垃圾审核员。判断�
 
 如果消息包含【跨聊天引用】块，表示用户从其他群/频道引用消息到本群。
 广告号常用此方式引流色情/诈骗/赌博频道：自己只发空白或单字，让被引用的频道内容代为铺陈。
-只要原消息来自陌生频道/bot 且涉及色情、赌博、诈骗、引流，即使本次消息本身无文字，也必须判定为 banned 或 suspicious。
+只要原消息来自陌生频道/bot 且涉及色情、赌博、诈骗、引流，即使本次消息本身无文字，也必须判定为 ad、scam、porn 或 violence。
 【引用回复】【引用片段】同理，也要把被引用的内容纳入判断。
 如果审核内容里有【链接预览】或【无法展开的 Telegram 链接】标记，说明用户消息里嵌了 Telegram 频道/消息链接。把链接预览的标题/描述视为用户本次发送的实际内容来判定，引流型内容判 ad，色情/赌博/诈骗按对应 verdict 判。
 
@@ -46,7 +47,7 @@ const messageBasePrompt = `你是一个中文群聊反垃圾审核员。判断�
 %s`
 
 const bioBasePrompt = `你是一个中文 Telegram 用户资料简介审核员。判断下面的用户简介属于哪类：
-- clean（正常简介）
+- normal（正常简介）
 - ad（商业广告、引流、招聘、交友、币圈、刷单等）
 - scam（诈骗）
 - spam（堆砌关键词、无意义刷屏式简介）
@@ -61,9 +62,9 @@ const bioBasePrompt = `你是一个中文 Telegram 用户资料简介审核员�
 %s
 
 判定要点：
-- 简介为空、或仅是普通自我介绍（职业、爱好、所在地、兴趣标签等）一律 clean。
+- 简介为空、或仅是普通自我介绍（职业、爱好、所在地、兴趣标签等）一律 normal。
 - 留 Telegram/WhatsApp 链接、TG 频道/群组邀请、@用户名引流、加 vx/微信、TRC20/USDT/收款方式、境外博彩、刷单兼职，按对应 verdict 判，置信度通常 >= 0.7。
-- verdict 与 category 不允许矛盾：clean 必须搭配"正常"，其他 verdict 不允许搭配"正常"。
+- verdict 与 category 不允许矛盾：normal 必须搭配"正常"，其他 verdict 不允许搭配"正常"。
 - 没有"消息列表"概念，每次只判一条简介。
 
 简介：
@@ -304,7 +305,7 @@ func (m *Moderator) checkBatch(ctx context.Context, inputs []CheckInput) ([]Chec
 			outputs := make([]CheckOutput, len(inputs))
 			for index, verdict := range result.Verdicts {
 				outputs[index] = CheckOutput{
-					Verdict:       normalizeVerdict(verdict),
+					Verdict:       m.normalizeVerdict(verdict),
 					Model:         ref.String(),
 					ProviderID:    model.ProviderID,
 					ModelID:       model.ID,
@@ -418,7 +419,7 @@ func (m *Moderator) checkSingle(ctx context.Context, input CheckInput) (CheckOut
 			}
 
 			output := CheckOutput{
-				Verdict:       normalizeVerdict(result.Verdicts[0]),
+				Verdict:       m.normalizeVerdict(result.Verdicts[0]),
 				Model:         ref.String(),
 				ProviderID:    model.ProviderID,
 				ModelID:       model.ID,
@@ -498,15 +499,27 @@ func BuildPromptPreview(scene, customRules, sampleText string) string {
 	return buildPrompt(scene, customRules, []CheckInput{{Text: sampleText}})
 }
 
-func normalizeVerdict(verdict Verdict) Verdict {
-	// 空 verdict 一律当 normal 放行（模型响应解析失败时不应误伤用户）
-	if verdict.Verdict == "" {
+func (m *Moderator) normalizeVerdict(verdict Verdict) Verdict {
+	raw := strings.TrimSpace(strings.ToLower(verdict.Verdict))
+	allowed := map[string]struct{}{
+		"normal":   {},
+		"ad":       {},
+		"scam":     {},
+		"spam":     {},
+		"harass":   {},
+		"porn":     {},
+		"violence": {},
+	}
+	if _, ok := allowed[raw]; !ok {
+		if raw != "" && m != nil && m.logger != nil {
+			m.logger.Warn("unknown ai verdict downgraded to normal", zap.String("verdict", raw))
+		}
 		verdict.Verdict = "normal"
 		if verdict.Confidence == 0 {
 			verdict.Confidence = 0.5
 		}
-	} else if strings.TrimSpace(strings.ToLower(verdict.Verdict)) == "clean" {
-		verdict.Verdict = "normal"
+	} else {
+		verdict.Verdict = raw
 	}
 	if verdict.Category == "" {
 		verdict.Category = "正常"

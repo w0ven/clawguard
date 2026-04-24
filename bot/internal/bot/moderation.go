@@ -705,32 +705,28 @@ func (s *Service) decideAIAction(policy config.AIPolicy, output ai.CheckOutput) 
 }
 
 // verdictActionCeiling 给定 verdict 返回允许的最强动作
-// normal/clean → "none"（无视 category）
-// suspicious → "warn"（category 映射的 ban/mute 会被夹回 warn）
-// 其他硬 verdict（ad/scam/spam/harass/porn/violence）→ "ban"（不限制）
-// 未知 verdict → "ban"（兼容旧行为，别意外放过）
+// normal → "none"（无视 category）
+// 硬 verdict（ad/scam/spam/harass/porn/violence）→ "ban"（不限制）
+// 未知 verdict → "none"（解析层应已降级，动作层继续 fail-safe）
 func verdictActionCeiling(verdict string) string {
 	switch strings.TrimSpace(strings.ToLower(verdict)) {
-	case "normal", "clean", "":
-		return "none"
-	case "suspicious":
-		return "warn"
-	default:
+	case "ad", "scam", "spam", "harass", "porn", "violence":
 		return "ban"
+	default:
+		return "none"
 	}
 }
 
 // verdictActionFloor 给定 verdict 返回允许的最弱动作（地板）。
-// normal/clean/空 → "none"（放行，无地板）
-// suspicious → "warn"（必须至少 warn；category 映射再低也被抬到 warn）
-// 其他硬 verdict（ad/scam/spam/harass/porn/violence/unknown）→ "warn"
+// normal/空/未知 → "none"（放行，无地板）
+// 硬 verdict（ad/scam/spam/harass/porn/violence）→ "warn"
 // 说明：硬罪名最低也得 warn，绝不能被 category="正常" 之类洗成 none
 func verdictActionFloor(verdict string) string {
 	switch strings.TrimSpace(strings.ToLower(verdict)) {
-	case "normal", "clean", "":
-		return "none"
-	default:
+	case "ad", "scam", "spam", "harass", "porn", "violence":
 		return "warn"
+	default:
+		return "none"
 	}
 }
 
@@ -821,7 +817,7 @@ func (s *Service) recordProfileViolationDecision(
 		return nil
 	}
 
-	verdict := "profile_violation"
+	verdict := "normal"
 	category := "bio_match"
 	confidence := 1.0
 	reason := "profile check hit: " + matched
@@ -901,11 +897,11 @@ func (s *Service) recordAIDecisionError(ctx context.Context, msg *tele.Message, 
 		ModelID:       nil,
 		Model:         "",
 		PromptVersion: "",
-		Verdict:       "error",
+		Verdict:       "normal",
 		Confidence:    0,
 		Category:      "system",
 		Reason:        stringPtr(reason),
-		ActionTaken:   "none",
+		ActionTaken:   "error",
 		LatencyMs:     0,
 		CostCents:     0,
 	})
