@@ -671,31 +671,68 @@ func (s *Service) ensureUserTrust(ctx context.Context, msg *tele.Message) (store
 func (s *Service) decideAIAction(policy config.AIPolicy, output ai.CheckOutput) string {
 	// 优先按 verdict（粗分：ad/scam/harass/spam）查映射，再回退 category（细分：引流/刷单/...）
 	verdict := strings.TrimSpace(strings.ToLower(output.Verdict.Verdict))
+	ceiling := verdictActionCeiling(verdict)
+	if ceiling == "none" {
+		return "none"
+	}
 	if verdict != "" {
 		if action, ok := policy.ActionsByCategory[verdict]; ok && strings.TrimSpace(action) != "" {
-			return normalizeAIAction(action)
+			return clampAIActionByCeiling(normalizeAIAction(action), ceiling)
 		}
 	}
 	category := strings.TrimSpace(output.Verdict.Category)
 	if category != "" {
 		if action, ok := policy.ActionsByCategory[category]; ok && strings.TrimSpace(action) != "" {
-			return normalizeAIAction(action)
+			return clampAIActionByCeiling(normalizeAIAction(action), ceiling)
 		}
 	}
 
 	confidence := output.Verdict.Confidence
+	action := "none"
 	switch {
 	case confidence >= policy.Thresholds.Ban:
-		return "ban"
+		action = "ban"
 	case confidence >= policy.Thresholds.Mute:
-		return "mute"
+		action = "mute"
 	case confidence >= policy.Thresholds.Warn:
-		return "warn"
+		action = "warn"
 	case confidence >= policy.Thresholds.Flag:
-		return "flag"
-	default:
-		return "none"
+		action = "flag"
 	}
+	return clampAIActionByCeiling(action, ceiling)
+}
+
+// verdictActionCeiling 给定 verdict 返回允许的最强动作
+// normal/clean → "none"（无视 category）
+// suspicious → "warn"（category 映射的 ban/mute 会被夹回 warn）
+// 其他硬 verdict（ad/scam/spam/harass/porn/violence）→ "ban"（不限制）
+// 未知 verdict → "ban"（兼容旧行为，别意外放过）
+func verdictActionCeiling(verdict string) string {
+	switch strings.TrimSpace(strings.ToLower(verdict)) {
+	case "normal", "clean", "":
+		return "none"
+	case "suspicious":
+		return "warn"
+	default:
+		return "ban"
+	}
+}
+
+// clampAIActionByCeiling 按 ceiling 夹住 action，返回最终动作
+// 动作强度排序：none < flag < warn < delete < mute < ban
+func clampAIActionByCeiling(action, ceiling string) string {
+	rank := map[string]int{
+		"none": 0, "flag": 1, "warn": 2, "delete": 3, "mute": 4, "ban": 5,
+	}
+	actionRank, okAction := rank[action]
+	ceilingRank, okCeiling := rank[ceiling]
+	if !okAction || !okCeiling {
+		return action
+	}
+	if actionRank <= ceilingRank {
+		return action
+	}
+	return ceiling
 }
 
 func normalizeAIAction(action string) string {

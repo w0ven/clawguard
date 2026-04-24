@@ -443,12 +443,14 @@ func BuildPromptPreview(scene, customRules, sampleText string) string {
 }
 
 func normalizeVerdict(verdict Verdict) Verdict {
-	// 空 verdict 一律当 clean 放行（模型响应解析失败时不应误伤用户）
+	// 空 verdict 一律当 normal 放行（模型响应解析失败时不应误伤用户）
 	if verdict.Verdict == "" {
-		verdict.Verdict = "clean"
+		verdict.Verdict = "normal"
 		if verdict.Confidence == 0 {
 			verdict.Confidence = 0.5
 		}
+	} else if strings.TrimSpace(strings.ToLower(verdict.Verdict)) == "clean" {
+		verdict.Verdict = "normal"
 	}
 	if verdict.Category == "" {
 		verdict.Category = "正常"
