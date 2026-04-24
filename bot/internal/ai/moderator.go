@@ -133,6 +133,9 @@ func NewModerator(logger *zap.Logger, redis redis.Cmdable, queries *store.Querie
 	MarkAISuccess()
 	MarkAIFailure(error)
 }) *Moderator {
+	if logger == nil {
+		logger = zap.NewNop()
+	}
 	return &Moderator{
 		logger:    logger,
 		redis:     redis,
@@ -247,16 +250,21 @@ func (m *Moderator) checkBatch(ctx context.Context, inputs []CheckInput) ([]Chec
 	modelChain, _ := m.resolver.BuildChain(policy, []string{"moderation"})
 
 	var lastErr error
+	failureCount := 0
 	for attempt := 0; attempt <= policy.MaxRetries; attempt++ {
 		for _, ref := range modelChain {
 			model, ok := m.models.Get(ref)
 			if !ok {
 				lastErr = fmt.Errorf("model %q not found", ref)
+				failureCount++
+				m.warnAICallFailed(ref, Model{}, attempt, 0, lastErr)
 				continue
 			}
 			client, ok := m.providers.Client(model.ProviderKey)
 			if !ok {
 				lastErr = fmt.Errorf("provider %q not available", model.ProviderKey)
+				failureCount++
+				m.warnAICallFailed(ref, model, attempt, 0, lastErr)
 				continue
 			}
 			timeout := time.Duration(policy.TimeoutMs) * time.Millisecond
@@ -276,6 +284,8 @@ func (m *Moderator) checkBatch(ctx context.Context, inputs []CheckInput) ([]Chec
 			cancel()
 			if err != nil {
 				lastErr = err
+				failureCount++
+				m.warnAICallFailed(ref, model, attempt, timeout, err)
 				if m.status != nil {
 					m.status.MarkAIFailure(err)
 				}
@@ -283,6 +293,8 @@ func (m *Moderator) checkBatch(ctx context.Context, inputs []CheckInput) ([]Chec
 			}
 			if len(result.Verdicts) != len(inputs) {
 				lastErr = fmt.Errorf("llm verdict count mismatch")
+				failureCount++
+				m.warnAICallFailed(ref, model, attempt, timeout, lastErr)
 				if m.status != nil {
 					m.status.MarkAIFailure(lastErr)
 				}
@@ -313,6 +325,12 @@ func (m *Moderator) checkBatch(ctx context.Context, inputs []CheckInput) ([]Chec
 	}
 	if lastErr == nil {
 		lastErr = errors.New("no ai provider available")
+	}
+	if failureCount > 1 {
+		m.logger.Warn("ai moderation exhausted all models",
+			zap.Int("model_count", len(modelChain)),
+			zap.Int("max_retries", policy.MaxRetries),
+			zap.Error(lastErr))
 	}
 	return nil, lastErr
 }
@@ -349,16 +367,21 @@ func (m *Moderator) checkSingle(ctx context.Context, input CheckInput) (CheckOut
 	modelChain, _ := m.resolver.BuildChain(policy, caps)
 
 	var lastErr error
+	failureCount := 0
 	for attempt := 0; attempt <= policy.MaxRetries; attempt++ {
 		for _, ref := range modelChain {
 			model, ok := m.models.Get(ref)
 			if !ok {
 				lastErr = fmt.Errorf("model %q not found", ref)
+				failureCount++
+				m.warnAICallFailed(ref, Model{}, attempt, 0, lastErr)
 				continue
 			}
 			client, ok := m.providers.Client(model.ProviderKey)
 			if !ok {
 				lastErr = fmt.Errorf("provider %q not available", model.ProviderKey)
+				failureCount++
+				m.warnAICallFailed(ref, model, attempt, 0, lastErr)
 				continue
 			}
 			timeout := time.Duration(policy.TimeoutMs) * time.Millisecond
@@ -379,6 +402,8 @@ func (m *Moderator) checkSingle(ctx context.Context, input CheckInput) (CheckOut
 			cancel()
 			if err != nil {
 				lastErr = err
+				failureCount++
+				m.warnAICallFailed(ref, model, attempt, timeout, err)
 				if m.status != nil {
 					m.status.MarkAIFailure(err)
 				}
@@ -386,6 +411,8 @@ func (m *Moderator) checkSingle(ctx context.Context, input CheckInput) (CheckOut
 			}
 			if len(result.Verdicts) != 1 {
 				lastErr = fmt.Errorf("llm verdict count mismatch")
+				failureCount++
+				m.warnAICallFailed(ref, model, attempt, timeout, lastErr)
 				if m.status != nil {
 					m.status.MarkAIFailure(lastErr)
 				}
@@ -415,7 +442,27 @@ func (m *Moderator) checkSingle(ctx context.Context, input CheckInput) (CheckOut
 	if lastErr == nil {
 		lastErr = errors.New("no ai provider available")
 	}
+	if failureCount > 1 {
+		m.logger.Warn("ai moderation exhausted all models",
+			zap.Int("model_count", len(modelChain)),
+			zap.Int("max_retries", policy.MaxRetries),
+			zap.Error(lastErr))
+	}
 	return CheckOutput{}, lastErr
+}
+
+func (m *Moderator) warnAICallFailed(ref ModelRef, model Model, attempt int, timeout time.Duration, err error) {
+	if m.logger == nil {
+		return
+	}
+	m.logger.Warn("ai call failed, trying next model",
+		zap.String("ref", string(ref)),
+		zap.String("provider", model.ProviderKey),
+		zap.String("model", model.ModelKey),
+		zap.Int("attempt", attempt),
+		zap.Int("timeout_ms", int(timeout/time.Millisecond)),
+		zap.Error(err),
+	)
 }
 
 func buildPrompt(scene string, customRules string, inputs []CheckInput) string {
