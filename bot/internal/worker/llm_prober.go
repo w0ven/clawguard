@@ -58,8 +58,8 @@ type LLMProber struct {
 	interval  time.Duration
 	timeout   time.Duration
 
-	mu          sync.Mutex
-	failStreak  map[int64]int
+	mu         sync.Mutex
+	failStreak map[int64]int
 }
 
 func NewLLMProber(
@@ -73,14 +73,14 @@ func NewLLMProber(
 	rdb redis.Cmdable,
 ) *LLMProber {
 	return &LLMProber{
-		logger:    logger,
-		queries:   queries,
-		providers: providers,
-		models:    models,
-		resolver:  resolver,
-		policy:    policy,
-		notifier:  notifier,
-		redis:     rdb,
+		logger:     logger,
+		queries:    queries,
+		providers:  providers,
+		models:     models,
+		resolver:   resolver,
+		policy:     policy,
+		notifier:   notifier,
+		redis:      rdb,
 		interval:   defaultProbeInterval,
 		timeout:    defaultProbeTimeout,
 		failStreak: make(map[int64]int),
@@ -185,6 +185,13 @@ func (p *LLMProber) probeOne(ctx context.Context, model ai.Model) {
 
 	checkedAt := time.Now().UTC()
 	probeOK := probeErr == nil
+
+	prev, loadErr := p.queries.GetLLMModelStats(ctx, model.ID)
+	hadPrev := loadErr == nil
+	if loadErr != nil && !errors.Is(loadErr, pgx.ErrNoRows) {
+		p.logger.Warn("load prior probe state failed", zap.Error(loadErr), zap.String("ref", string(ref)))
+	}
+
 	// 连续失败计数：只有连续失败到阈值才把 healthy 标 false
 	// 避免 aw/sub2api 偶发 400/抖动立刻触发告警
 	p.mu.Lock()
@@ -192,6 +199,9 @@ func (p *LLMProber) probeOne(ctx context.Context, model ai.Model) {
 	if probeOK {
 		streak = 0
 	} else {
+		if streak == 0 && hadPrev && !prev.Healthy {
+			streak = probeFailStreakThreshold - 1
+		}
 		streak++
 	}
 	p.failStreak[model.ID] = streak
@@ -217,12 +227,6 @@ func (p *LLMProber) probeOne(ctx context.Context, model ai.Model) {
 				zap.Int("threshold", probeFailStreakThreshold),
 				zap.String("error", errText))
 		}
-	}
-
-	prev, loadErr := p.queries.GetLLMModelStats(ctx, model.ID)
-	hadPrev := loadErr == nil
-	if loadErr != nil && !errors.Is(loadErr, pgx.ErrNoRows) {
-		p.logger.Warn("load prior probe state failed", zap.Error(loadErr), zap.String("ref", string(ref)))
 	}
 
 	if err := p.queries.UpsertLLMProbeResult(ctx, store.UpsertLLMProbeResultParams{
