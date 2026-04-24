@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -24,6 +25,11 @@ const (
 	defaultProbeTimeout   = 10 * time.Second
 	probeAlertCooldown    = 5 * time.Minute
 	probeOrphanSweepEvery = 10 * time.Minute
+
+	// probeFailStreakThreshold 连续失败多少次才把 healthy 翻成 false。
+	// 之前每次失败立刻翻 false，导致 aw/sub2api 偶发 400/超时就触发告警。
+	// 连续 3 次（约 3 分钟）才算真挂，避免误报。
+	probeFailStreakThreshold = 3
 )
 
 // PolicyProvider exposes the global AI policy knobs the prober needs. We keep
@@ -51,6 +57,9 @@ type LLMProber struct {
 	redis     redis.Cmdable
 	interval  time.Duration
 	timeout   time.Duration
+
+	mu          sync.Mutex
+	failStreak  map[int64]int
 }
 
 func NewLLMProber(
@@ -72,8 +81,9 @@ func NewLLMProber(
 		policy:    policy,
 		notifier:  notifier,
 		redis:     rdb,
-		interval:  defaultProbeInterval,
-		timeout:   defaultProbeTimeout,
+		interval:   defaultProbeInterval,
+		timeout:    defaultProbeTimeout,
+		failStreak: make(map[int64]int),
 	}
 }
 
@@ -174,14 +184,39 @@ func (p *LLMProber) probeOne(ctx context.Context, model ai.Model) {
 	_, probeErr := client.Probe(probeCtx, model.ModelKey)
 
 	checkedAt := time.Now().UTC()
+	probeOK := probeErr == nil
+	// 连续失败计数：只有连续失败到阈值才把 healthy 标 false
+	// 避免 aw/sub2api 偶发 400/抖动立刻触发告警
+	p.mu.Lock()
+	streak := p.failStreak[model.ID]
+	if probeOK {
+		streak = 0
+	} else {
+		streak++
+	}
+	p.failStreak[model.ID] = streak
+	p.mu.Unlock()
+
+	healthy := streak < probeFailStreakThreshold
 	var okAt *time.Time
-	healthy := probeErr == nil
 	errText := ""
-	if healthy {
+	if probeOK {
 		t := checkedAt
 		okAt = &t
 	} else {
 		errText = truncateError(probeErr.Error())
+		if !healthy {
+			p.logger.Warn("llm probe failed consecutively",
+				zap.String("ref", string(ref)),
+				zap.Int("streak", streak),
+				zap.String("error", errText))
+		} else {
+			p.logger.Info("llm probe transient failure (not yet unhealthy)",
+				zap.String("ref", string(ref)),
+				zap.Int("streak", streak),
+				zap.Int("threshold", probeFailStreakThreshold),
+				zap.String("error", errText))
+		}
 	}
 
 	prev, loadErr := p.queries.GetLLMModelStats(ctx, model.ID)
