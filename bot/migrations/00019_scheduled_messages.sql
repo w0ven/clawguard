@@ -1,3 +1,4 @@
+-- +goose Up
 CREATE TABLE IF NOT EXISTS scheduled_messages (
   id BIGSERIAL PRIMARY KEY,
   chat_id BIGINT NOT NULL,
