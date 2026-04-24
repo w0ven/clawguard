@@ -20,7 +20,7 @@ type FilterResult struct {
 	Action      string
 }
 
-func checkMessage(_ context.Context, msg *tele.Message, policy config.FilterConfig) FilterResult {
+func checkMessage(_ context.Context, msg *tele.Message, policy config.FilterConfig, isAdmin bool) FilterResult {
 	if msg == nil {
 		return FilterResult{}
 	}
@@ -87,7 +87,7 @@ func checkMessage(_ context.Context, msg *tele.Message, policy config.FilterConf
 	}
 
 	links := collectMessageLinks(msg)
-	if len(links) == 0 || !policy.Links.Enabled {
+	if len(links) == 0 || !policy.Links.Enabled || (isAdmin && policy.Links.ExemptAdmins) {
 		return FilterResult{}
 	}
 

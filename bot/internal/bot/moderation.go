@@ -100,23 +100,19 @@ func (s *Service) handleIncomingMessage(c tele.Context) error {
 	}
 
 	isAdmin := false
-	if policy.Filter.Links.ExemptAdmins {
-		adminStatus, err := s.isChatAdmin(ctx, msg.Chat.ID, msg.Sender.ID)
-		if err != nil {
-			s.logger.Warn("check chat admin failed", zap.Error(err), zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID))
-		}
+	adminStatus, err := s.isChatAdmin(ctx, msg.Chat.ID, msg.Sender.ID)
+	if err != nil {
+		s.logger.Warn("check chat admin failed", zap.Error(err), zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID))
+	} else {
 		isAdmin = adminStatus
 	}
 
-	// 管理员跳过 filter 检查，但关键词回复对所有人生效
-	if !isAdmin {
-		handled, err := s.applyFilterChecks(ctx, msg, policy)
-		if err != nil {
-			return err
-		}
-		if handled {
-			return nil
-		}
+	handled, err := s.applyFilterChecks(ctx, msg, policy, isAdmin)
+	if err != nil {
+		return err
+	}
+	if handled {
+		return nil
 	}
 
 	matchedReply, err := s.tryKeywordReply(ctx, msg, policy)
@@ -263,8 +259,8 @@ func (s *Service) applyAIModeration(ctx context.Context, msg *tele.Message, poli
 	return nil
 }
 
-func (s *Service) applyFilterChecks(ctx context.Context, msg *tele.Message, policy config.GuardPolicy) (bool, error) {
-	result := checkMessage(ctx, msg, policy.Filter)
+func (s *Service) applyFilterChecks(ctx context.Context, msg *tele.Message, policy config.GuardPolicy, isAdmin bool) (bool, error) {
+	result := checkMessage(ctx, msg, policy.Filter, isAdmin)
 	if !result.Hit {
 		var err error
 		result, err = s.checkStatefulFilter(ctx, msg, policy)

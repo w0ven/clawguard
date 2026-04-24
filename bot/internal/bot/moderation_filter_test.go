@@ -20,7 +20,7 @@ func TestApplyFilterChecksHandledFlag(t *testing.T) {
 	policy.Filter.Keywords.Enabled = true
 	policy.Filter.Keywords.List = []string{"blocked"}
 
-	handled, err := svc.applyFilterChecks(context.Background(), msg, policy)
+	handled, err := svc.applyFilterChecks(context.Background(), msg, policy, false)
 	if err != nil {
 		t.Fatalf("unexpected error on non-hit filter: %v", err)
 	}
@@ -38,7 +38,7 @@ func TestCheckMessageRegexHit(t *testing.T) {
 	policy.Regex.Enabled = true
 	policy.Regex.Patterns = []string{`cheap\s+crypto`}
 
-	result := checkMessage(context.Background(), msg, policy)
+	result := checkMessage(context.Background(), msg, policy, false)
 	if !result.Hit {
 		t.Fatalf("expected regex hit")
 	}
@@ -59,7 +59,7 @@ func TestCheckMessageUsernameBlacklistHit(t *testing.T) {
 	policy.Usernames.Enabled = true
 	policy.Usernames.Blacklist = []string{"@spamaccount"}
 
-	result := checkMessage(context.Background(), msg, policy)
+	result := checkMessage(context.Background(), msg, policy, false)
 	if !result.Hit {
 		t.Fatalf("expected username blacklist hit")
 	}
