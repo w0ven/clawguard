@@ -28,6 +28,7 @@ type Model struct {
 	ID                   int64
 	ProviderKey          string
 	ProviderID           int64
+	ProviderTimeout      time.Duration
 	ModelKey             string
 	Label                string
 	APIFormat            string
@@ -235,6 +236,7 @@ func (r *DBModelRegistry) Reload(ctx context.Context) error {
 			ID:                   row.ID,
 			ProviderKey:          row.ProviderKey,
 			ProviderID:           row.ProviderID,
+			ProviderTimeout:      time.Duration(row.TimeoutMs) * time.Millisecond,
 			ModelKey:             row.ModelKey,
 			Label:                row.Label,
 			APIFormat:            row.ApiFormat,

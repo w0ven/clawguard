@@ -1,6 +1,9 @@
 package ai
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 type Message struct {
 	Role    string `json:"role"`
@@ -13,6 +16,7 @@ type CheckRequest struct {
 	Messages     []Message
 	MaxTokens    int
 	Temperature  float64
+	Timeout      time.Duration
 }
 
 type Verdict struct {

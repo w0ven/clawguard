@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/openclaw/clawguard/internal/config"
 	"go.uber.org/zap"
@@ -76,5 +77,26 @@ func TestCheckSingleLogsFallbackFailureAndReturnsNextModel(t *testing.T) {
 	}
 	if logs.FilterMessage("ai call failed, trying next model").Len() == 0 {
 		t.Fatalf("expected fallback failure warning, got logs: %#v", logs.All())
+	}
+}
+
+func TestEffectiveTimeout(t *testing.T) {
+	tests := []struct {
+		name            string
+		policyMs        int
+		providerTimeout time.Duration
+		want            time.Duration
+	}{
+		{name: "provider tightens policy", policyMs: 30000, providerTimeout: time.Second, want: time.Second},
+		{name: "provider unset uses policy", policyMs: 30000, providerTimeout: 0, want: 30 * time.Second},
+		{name: "policy default", policyMs: 0, providerTimeout: 0, want: 10 * time.Second},
+		{name: "provider cannot loosen policy", policyMs: 1000, providerTimeout: 30 * time.Second, want: time.Second},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := effectiveTimeout(tt.policyMs, tt.providerTimeout); got != tt.want {
+				t.Fatalf("effectiveTimeout() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }

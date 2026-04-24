@@ -12,10 +12,11 @@ import (
 )
 
 type OpenAICompatibleClient struct {
-	baseURL      string
-	apiKey       string
-	extraHeaders map[string]string
-	client       *http.Client
+	baseURL        string
+	apiKey         string
+	extraHeaders   map[string]string
+	client         *http.Client
+	defaultTimeout time.Duration
 }
 
 func NewOpenAICompatibleClient(baseURL, apiKey string, timeout time.Duration, extraHeaders map[string]string) *OpenAICompatibleClient {
@@ -23,10 +24,11 @@ func NewOpenAICompatibleClient(baseURL, apiKey string, timeout time.Duration, ex
 		timeout = 10 * time.Second
 	}
 	return &OpenAICompatibleClient{
-		baseURL:      strings.TrimRight(baseURL, "/"),
-		apiKey:       strings.TrimSpace(apiKey),
-		extraHeaders: cloneHeaders(extraHeaders),
-		client:       &http.Client{Timeout: timeout},
+		baseURL:        strings.TrimRight(baseURL, "/"),
+		apiKey:         strings.TrimSpace(apiKey),
+		extraHeaders:   cloneHeaders(extraHeaders),
+		client:         &http.Client{Timeout: 5 * time.Minute},
+		defaultTimeout: timeout,
 	}
 }
 
@@ -52,6 +54,9 @@ type chatCompletionResponse struct {
 }
 
 func (c *OpenAICompatibleClient) Check(ctx context.Context, req CheckRequest) (*CheckResult, error) {
+	ctx, cancel := c.withRequestTimeout(ctx, req.Timeout)
+	defer cancel()
+
 	body, err := json.Marshal(chatCompletionRequest{
 		Model:       req.Model,
 		Messages:    append([]Message{{Role: "system", Content: req.SystemPrompt}}, req.Messages...),
@@ -110,6 +115,16 @@ func (c *OpenAICompatibleClient) Check(ctx context.Context, req CheckRequest) (*
 		PromptTokens:     decoded.Usage.PromptTokens,
 		CompletionTokens: decoded.Usage.CompletionTokens,
 	}, nil
+}
+
+func (c *OpenAICompatibleClient) withRequestTimeout(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	if timeout <= 0 {
+		timeout = c.defaultTimeout
+	}
+	if timeout <= 0 {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, timeout)
 }
 
 func estimateCostCents(promptTokens, completionTokens int) float64 {
@@ -192,6 +207,9 @@ type ChatRawResult struct {
 // raw text. Used by the admin console's test button and any future free-form
 // probe that needs the model's actual output rather than a strict verdict.
 func (c *OpenAICompatibleClient) Chat(ctx context.Context, req CheckRequest) (*ChatRawResult, error) {
+	ctx, cancel := c.withRequestTimeout(ctx, req.Timeout)
+	defer cancel()
+
 	msgs := append([]Message{}, Message{Role: "system", Content: req.SystemPrompt})
 	msgs = append(msgs, req.Messages...)
 	body, err := json.Marshal(chatCompletionRequest{

@@ -267,10 +267,7 @@ func (m *Moderator) checkBatch(ctx context.Context, inputs []CheckInput) ([]Chec
 				m.warnAICallFailed(ref, model, attempt, 0, lastErr)
 				continue
 			}
-			timeout := time.Duration(policy.TimeoutMs) * time.Millisecond
-			if timeout <= 0 {
-				timeout = 10 * time.Second
-			}
+			timeout := effectiveTimeout(policy.TimeoutMs, model.ProviderTimeout)
 			callCtx, cancel := context.WithTimeout(ctx, timeout)
 			result, err := client.Check(callCtx, CheckRequest{
 				Model:        model.ModelKey,
@@ -280,6 +277,7 @@ func (m *Moderator) checkBatch(ctx context.Context, inputs []CheckInput) ([]Chec
 				},
 				MaxTokens:   512,
 				Temperature: policy.Temperature,
+				Timeout:     timeout,
 			})
 			cancel()
 			if err != nil {
@@ -384,10 +382,7 @@ func (m *Moderator) checkSingle(ctx context.Context, input CheckInput) (CheckOut
 				m.warnAICallFailed(ref, model, attempt, 0, lastErr)
 				continue
 			}
-			timeout := time.Duration(policy.TimeoutMs) * time.Millisecond
-			if timeout <= 0 {
-				timeout = 10 * time.Second
-			}
+			timeout := effectiveTimeout(policy.TimeoutMs, model.ProviderTimeout)
 
 			callCtx, cancel := context.WithTimeout(ctx, timeout)
 			result, err := client.Check(callCtx, CheckRequest{
@@ -398,6 +393,7 @@ func (m *Moderator) checkSingle(ctx context.Context, input CheckInput) (CheckOut
 				},
 				MaxTokens:   512,
 				Temperature: policy.Temperature,
+				Timeout:     timeout,
 			})
 			cancel()
 			if err != nil {
@@ -449,6 +445,17 @@ func (m *Moderator) checkSingle(ctx context.Context, input CheckInput) (CheckOut
 			zap.Error(lastErr))
 	}
 	return CheckOutput{}, lastErr
+}
+
+func effectiveTimeout(policyMs int, providerTimeout time.Duration) time.Duration {
+	policyTimeout := time.Duration(policyMs) * time.Millisecond
+	if policyTimeout <= 0 {
+		policyTimeout = 10 * time.Second
+	}
+	if providerTimeout > 0 && providerTimeout < policyTimeout {
+		return providerTimeout
+	}
+	return policyTimeout
 }
 
 func (m *Moderator) warnAICallFailed(ref ModelRef, model Model, attempt int, timeout time.Duration, err error) {
