@@ -200,9 +200,12 @@ func (s *Scheduler) run(ctx context.Context, id int64, manual bool) error {
 	if sendErr != nil {
 		errText := sendErr.Error()
 		if !manual {
-			_ = s.queries.MarkScheduledMessageFailed(ctx, msg.ID, errText)
-			s.Remove(msg.ID)
-			s.logger.Warn("scheduled message disabled after send failures", zap.Error(sendErr), zap.Int64("scheduled_message_id", msg.ID), zap.Int64("chat_id", msg.ChatID))
+			if markErr := s.queries.MarkScheduledMessageFailed(ctx, msg.ID, errText); markErr != nil {
+				s.logger.Warn("mark scheduled message failed state failed", zap.Error(markErr), zap.Int64("scheduled_message_id", msg.ID), zap.Int64("chat_id", msg.ChatID))
+			} else {
+				s.Remove(msg.ID)
+				s.logger.Warn("scheduled message disabled after send failures", zap.Error(sendErr), zap.Int64("scheduled_message_id", msg.ID), zap.Int64("chat_id", msg.ChatID))
+			}
 		}
 		s.insertRun(ctx, msg.ID, false, nil, &rendered, &errText, started)
 		return sendErr
