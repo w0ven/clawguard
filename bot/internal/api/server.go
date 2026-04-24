@@ -11,6 +11,7 @@ import (
 
 	"github.com/openclaw/clawguard/internal/bot"
 	"github.com/openclaw/clawguard/internal/config"
+	"github.com/openclaw/clawguard/internal/scheduler"
 )
 
 type Server struct {
@@ -18,9 +19,10 @@ type Server struct {
 	logger     *zap.Logger
 	botService *bot.Service
 	echo       *echo.Echo
+	scheduler  *scheduler.Scheduler
 }
 
-func NewServer(cfg config.Config, logger *zap.Logger, botService *bot.Service) *Server {
+func NewServer(cfg config.Config, logger *zap.Logger, botService *bot.Service, scheduled *scheduler.Scheduler) *Server {
 	e := echo.New()
 	e.HideBanner = true
 	e.HidePort = true
@@ -31,6 +33,7 @@ func NewServer(cfg config.Config, logger *zap.Logger, botService *bot.Service) *
 		logger:     logger,
 		botService: botService,
 		echo:       e,
+		scheduler:  scheduled,
 	}
 
 	e.GET("/healthz", server.healthz)

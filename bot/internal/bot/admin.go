@@ -14,6 +14,10 @@ func (s *Service) Queries() *store.Queries {
 	return s.queries
 }
 
+func (s *Service) TelegramBot() *tele.Bot {
+	return s.bot
+}
+
 func (s *Service) BanChatUser(_ context.Context, chatID, userID int64) error {
 	return s.banUser(&tele.Chat{ID: chatID}, &tele.User{ID: userID})
 }

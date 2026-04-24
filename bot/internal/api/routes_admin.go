@@ -77,6 +77,7 @@ func (s *Server) registerAdminRoutes() {
 	admin.GET("/ai-costs", s.handleListAICosts)
 
 	s.registerAdminLLMRoutes(admin)
+	s.registerScheduledMessageRoutes(admin)
 }
 
 func (s *Server) handleListGroups(c echo.Context) error {

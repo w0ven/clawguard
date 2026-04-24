@@ -13,10 +13,11 @@ import (
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
 
-	"github.com/openclaw/clawguard/internal/api"
 	"github.com/openclaw/clawguard/internal/ai"
+	"github.com/openclaw/clawguard/internal/api"
 	"github.com/openclaw/clawguard/internal/bot"
 	"github.com/openclaw/clawguard/internal/config"
+	"github.com/openclaw/clawguard/internal/scheduler"
 	"github.com/openclaw/clawguard/internal/store"
 	"github.com/openclaw/clawguard/internal/worker"
 )
@@ -99,6 +100,20 @@ func main() {
 		logger.Fatal("register webhook", zap.Error(err))
 	}
 
+	scheduledMessages := scheduler.New(logger, queries, botService.TelegramBot())
+	if err := scheduledMessages.LoadActive(ctx); err != nil {
+		logger.Fatal("load scheduled messages", zap.Error(err))
+	}
+	scheduledMessages.Start()
+	defer func() {
+		stopCtx := scheduledMessages.Stop()
+		select {
+		case <-stopCtx.Done():
+		case <-time.After(5 * time.Second):
+			logger.Warn("scheduled messages scheduler stop timeout")
+		}
+	}()
+
 	workerCtx, workerCancel := context.WithCancel(ctx)
 	defer workerCancel()
 
@@ -118,7 +133,7 @@ func main() {
 	go dailyReportWorker.Run(workerCtx)
 	worker.StartRetentionCleanup(workerCtx, queries, cfg.Retention, logger)
 
-	server := api.NewServer(cfg, logger, botService)
+	server := api.NewServer(cfg, logger, botService, scheduledMessages)
 
 	errCh := make(chan error, 1)
 	go func() {
