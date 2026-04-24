@@ -672,18 +672,24 @@ func (s *Service) decideAIAction(policy config.AIPolicy, output ai.CheckOutput) 
 	// 优先按 verdict（粗分：ad/scam/harass/spam）查映射，再回退 category（细分：引流/刷单/...）
 	verdict := strings.TrimSpace(strings.ToLower(output.Verdict.Verdict))
 	ceiling := verdictActionCeiling(verdict)
+	floor := verdictActionFloor(verdict)
 	if ceiling == "none" {
 		return "none"
 	}
+
+	apply := func(action string) string {
+		return raiseAIActionByFloor(clampAIActionByCeiling(action, ceiling), floor)
+	}
+
 	if verdict != "" {
 		if action, ok := policy.ActionsByCategory[verdict]; ok && strings.TrimSpace(action) != "" {
-			return clampAIActionByCeiling(normalizeAIAction(action), ceiling)
+			return apply(normalizeAIAction(action))
 		}
 	}
 	category := strings.TrimSpace(output.Verdict.Category)
 	if category != "" {
 		if action, ok := policy.ActionsByCategory[category]; ok && strings.TrimSpace(action) != "" {
-			return clampAIActionByCeiling(normalizeAIAction(action), ceiling)
+			return apply(normalizeAIAction(action))
 		}
 	}
 
@@ -699,7 +705,7 @@ func (s *Service) decideAIAction(policy config.AIPolicy, output ai.CheckOutput) 
 	case confidence >= policy.Thresholds.Flag:
 		action = "flag"
 	}
-	return clampAIActionByCeiling(action, ceiling)
+	return apply(action)
 }
 
 // verdictActionCeiling 给定 verdict 返回允许的最强动作
@@ -718,6 +724,20 @@ func verdictActionCeiling(verdict string) string {
 	}
 }
 
+// verdictActionFloor 给定 verdict 返回允许的最弱动作（地板）。
+// normal/clean/空 → "none"（放行，无地板）
+// suspicious → "warn"（必须至少 warn；category 映射再低也被抬到 warn）
+// 其他硬 verdict（ad/scam/spam/harass/porn/violence/unknown）→ "warn"
+// 说明：硬罪名最低也得 warn，绝不能被 category="正常" 之类洗成 none
+func verdictActionFloor(verdict string) string {
+	switch strings.TrimSpace(strings.ToLower(verdict)) {
+	case "normal", "clean", "":
+		return "none"
+	default:
+		return "warn"
+	}
+}
+
 // clampAIActionByCeiling 按 ceiling 夹住 action，返回最终动作
 // 动作强度排序：none < flag < warn < delete < mute < ban
 func clampAIActionByCeiling(action, ceiling string) string {
@@ -733,6 +753,23 @@ func clampAIActionByCeiling(action, ceiling string) string {
 		return action
 	}
 	return ceiling
+}
+
+// raiseAIActionByFloor 按 floor 抬高 action。
+// 动作强度排序：none < flag < warn < delete < mute < ban
+func raiseAIActionByFloor(action, floor string) string {
+	rank := map[string]int{
+		"none": 0, "flag": 1, "warn": 2, "delete": 3, "mute": 4, "ban": 5,
+	}
+	actionRank, okAction := rank[action]
+	floorRank, okFloor := rank[floor]
+	if !okAction || !okFloor {
+		return action
+	}
+	if actionRank >= floorRank {
+		return action
+	}
+	return floor
 }
 
 func normalizeAIAction(action string) string {

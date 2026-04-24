@@ -17,6 +17,7 @@ func TestDecideAIActionVerdictCeiling(t *testing.T) {
 		},
 		ActionsByCategory: map[string]string{
 			"刷单": "ban",
+			"正常": "none",
 		},
 	}
 	tests := []struct {
@@ -48,6 +49,33 @@ func TestDecideAIActionVerdictCeiling(t *testing.T) {
 			want:       "none",
 		},
 		{
+			name:       "normal category none stays none",
+			verdict:    "normal",
+			category:   "正常",
+			confidence: 0.10,
+			want:       "none",
+		},
+		{
+			name:       "suspicious category none is raised to warn",
+			verdict:    "suspicious",
+			category:   "正常",
+			confidence: 0.80,
+			want:       "warn",
+		},
+		{
+			name:       "suspicious low confidence threshold is raised to warn",
+			verdict:    "suspicious",
+			confidence: 0.10,
+			want:       "warn",
+		},
+		{
+			name:       "hard ad category none is raised to warn",
+			verdict:    "ad",
+			category:   "正常",
+			confidence: 0.95,
+			want:       "warn",
+		},
+		{
 			name:       "suspicious high confidence threshold is clamped to warn",
 			verdict:    "suspicious",
 			confidence: 0.95,
@@ -58,6 +86,18 @@ func TestDecideAIActionVerdictCeiling(t *testing.T) {
 			verdict:    "ad",
 			confidence: 0.95,
 			want:       "ban",
+		},
+		{
+			name:       "hard ad low confidence threshold is raised to warn",
+			verdict:    "ad",
+			confidence: 0.10,
+			want:       "warn",
+		},
+		{
+			name:       "hard scam low confidence threshold is raised to warn",
+			verdict:    "scam",
+			confidence: 0.10,
+			want:       "warn",
 		},
 	}
 
