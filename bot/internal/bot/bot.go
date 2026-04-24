@@ -1085,16 +1085,6 @@ func (s *Service) handleVerifyRandom(c tele.Context) error {
 }
 
 func (s *Service) completeVerification(ctx context.Context, chat *tele.Chat, user *tele.User, pending store.PendingVerification) error {
-	member := tele.ChatMember{
-		User:   user,
-		Rights: tele.NoRestrictions(),
-	}
-	if err := s.bot.Restrict(chat, &member); err != nil {
-		return fmt.Errorf("unrestrict member: %w", err)
-	}
-
-	s.deleteVerificationMessage(chat, pending.JoinMessageID)
-
 	if err := s.queries.DeletePendingVerification(ctx, store.DeletePendingVerificationParams{
 		ChatID: chat.ID,
 		UserID: user.ID,
@@ -1102,6 +1092,18 @@ func (s *Service) completeVerification(ctx context.Context, chat *tele.Chat, use
 		return fmt.Errorf("delete pending verification: %w", err)
 	}
 
+	member := tele.ChatMember{
+		User:   user,
+		Rights: tele.NoRestrictions(),
+	}
+	if err := s.bot.Restrict(chat, &member); err != nil {
+		if restoreErr := s.restorePendingVerification(ctx, pending); restoreErr != nil {
+			s.logger.Error("restore pending verification after restrict failure", zap.Error(restoreErr), zap.Int64("chat_id", pending.ChatID), zap.Int64("user_id", pending.UserID))
+		}
+		return fmt.Errorf("unrestrict member: %w", err)
+	}
+
+	s.deleteVerificationMessage(chat, pending.JoinMessageID)
 	s.sendWelcomeMessage(context.Background(), chat, user)
 
 	// 验证通过反馈（默认关）
