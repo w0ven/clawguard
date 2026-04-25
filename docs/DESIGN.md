@@ -11,7 +11,7 @@ Telegram 群组反广告 / 反潜伏广告号 / 群管理平台。Bot + Web 面�
 - **反潜伏广告号**：用户信任状态机 + AI 内容审核 + Bio（简介）审核双层防线。
 - **多群管理**：全局策略 + 群级覆盖，面板可视化配置。
 - **人审闭环**：AI 判决可标注（正确 / 误封 / 漏判），支持回滚与学习。
-- **成本可控**：多 Provider / 多模型 fallback、自动探针降级、每日预算、缓存。
+- **调用可控**：多 Provider / 多模型 fallback、自动探针降级、每用户调用限制、缓存。
 
 ---
 
@@ -91,7 +91,7 @@ clawguard/
 │   │   ├── trust/                   # 用户信任列表
 │   │   ├── violations/              # 传统违规
 │   │   ├── ai-review/               # AI 判决人审队列
-│   │   ├── ai-costs/                # AI 成本仪表盘
+│   │   ├── ai-calls/                # AI 调用统计
 │   │   ├── prompt-editor/           # AI prompt 编辑 + 测试
 │   │   ├── llm/                     # LLM Provider / Model 管理
 │   │   ├── admins/                  # 管理员管理
@@ -124,12 +124,12 @@ clawguard/
 | `warnings` | 警告记录 | `reason`, `issued_by`, `consumed_at` |
 | `config_audit` | 配置变更审计 | `scope`, `before`, `after`, `diff`, `action` |
 | `user_trust` | **用户信任状态机**（M5 核心） | `status` = `new` / `suspicious` / `trusted` / `banned` / `archived`，`score`, `messages_checked`, `messages_clean`, `graduated_at` |
-| `ai_decisions` | **AI 判决历史** | `verdict`, `confidence`, `category`, `action_taken`, `admin_override`, `model`, `provider_id`, `latency_ms`, `cost_cents`, `message_text` |
+| `ai_decisions` | **AI 判决历史** | `verdict`, `confidence`, `category`, `action_taken`, `admin_override`, `model`, `provider_id`, `latency_ms`, `message_text` |
 | `profile_check_logs` | Bio 审核记录（命中 / 通过 / 跳过 / 错误） | `check_mode` = `keyword` / `ai` / `on_message_keyword` / `on_message_ai`, `result` = `hit` / `pass` / `skip` / `error` |
-| `system_state` | 全局运行态（暂停 AI / 暂停动作 / 冻结 / 预算锁） | `ai_paused`, `actions_paused`, `frozen`, `ai_budget_locked` |
+| `system_state` | 全局运行态（暂停 AI / 暂停动作 / 冻结 / 运行锁） | `ai_paused`, `actions_paused`, `frozen` |
 | `llm_providers` | LLM 网关注册表 | `name`, `base_url`, `api_key_encrypted`（`ENCRYPTION_KEY` 加密） |
 | `llm_models` | 每个 provider 下的可用模型 | `provider_id`, `model_key`, `capabilities`（JSON 数组，如 `["moderation","vision"]`）|
-| `llm_model_stats` | 探针 / 实际调用统计 | 成功率、延迟、成本聚合（用于 /ai-costs 页面） |
+| `llm_model_stats` | 探针 / 实际调用统计 | 成功率、延迟、调用统计聚合（用于 /ai-calls 页面） |
 
 ### 4.1 `user_trust` 状态流转
 
@@ -258,9 +258,9 @@ Bio 通过 `getChat` 抓取，`policy.AI.BioCacheTTLMinutes` 控制 Redis 缓存
 - **`llm_prober` worker**（`ProbeEnabled + ProbeIntervalSeconds`）：周期对每个启用模型发一次小请求，写 `llm_model_stats`，连续失败触发 `AutoDegrade` 标记 → resolver 临时跳过。
 - **env fallback**：老部署的 `LLM_PROVIDERS` env 仍可用，启动时 `legacy_migrate.go` 自动迁到 DB（历史数据一次性搬家）。
 
-### 5.7 成本与缓存
+### 5.7 调用次数与缓存
 
-- **每日预算**：`DailyBudgetCents`，`budget_reset` worker 每日零点清零；超支 → `system_state.ai_budget_locked = true`，AI 调用全部跳过（硬规则仍生效）。
+- **每用户调用限制**：`PerUserDailyLimit`，Redis 按日计数，超出后跳过 AI 调用（硬规则仍生效）。
 - **Per-user 限流**：`PerUserDailyLimit`，Redis 计数。
 - **短消息跳过**：`SkipMessagesShorterThan`，默认 5 字符。
 - **消息哈希缓存**：`CacheTTLHours`，相同文本 24h 内复用判决（广告号常复制粘贴）。
@@ -274,7 +274,7 @@ Web `/ai-review`：列出所有 `ai_decisions`（含 Bio 命中的合成记录�
 - `false_positive` → AI 判错了，自动解封用户（若被 ban），把该样本作为反例。
 - `false_negative` → AI 漏判，补处罚，作为正例。
 
-面板还提供：`prompt-editor`（system prompt + 自定义规则 + 测试沙箱，判决不入库）、`ai-costs`（按日 / 按群 / 按模型统计）、`trust`（信任列表筛选 + 手动 `graduate` / `ban`）。
+面板还提供：`prompt-editor`（system prompt + 自定义规则 + 测试沙箱，判决不入库）、`ai-calls`（按日 / 按群 / 按模型统计）、`trust`（信任列表筛选 + 手动 `graduate` / `ban`）。
 
 ### 5.9 后台 worker
 
@@ -286,8 +286,8 @@ Web `/ai-review`：列出所有 `ai_decisions`（含 Bio 命中的合成记录�
 | `retention_cleanup` | 每天 | 按 `RETENTION_*` 阈值清理日志 / 归档僵尸用户 |
 | `daily_report` | 每天 | `DAILY_REPORT_ENABLED` 打开时给 super admin 发日报 |
 | `llm_prober` | `ProbeIntervalSeconds` | 对启用模型发探针，写 `llm_model_stats` |
-| `llm_stats` | 分钟级 | 聚合 `ai_decisions` 成本到统计表 |
-| `budget_reset` | 每天零点 | 清零预算锁 |
+| `llm_stats` | 分钟级 | 聚合 `ai_decisions` 调用与延迟到统计表 |
+| `budget_reset` | 每天零点 | 清零运行锁 |
 | `healthcheck` | 秒级 | `/healthz` 就绪态 |
 
 ---
@@ -308,7 +308,7 @@ type GuardPolicy struct {
     AntiSpam AntiSpamPolicy     // CAS + 速率限制
     Warnings WarningsConfig     // 累计警告 → 动作
     Logging  LoggingConfig      // 违规日志推送到指定群
-    AI       AIPolicy           // AI 审核 + 信任 + 成本 + Bio-on-message
+    AI       AIPolicy           // AI 审核 + 信任 + 调用控制 + Bio-on-message
     Feedback ActionFeedbackPolicy // 每种动作的群内反馈模板（可关）
 }
 ```
@@ -331,7 +331,6 @@ type AIPolicy struct {
     MaxRetries              int
     GraduateAfterMessages   int         // 毕业阈值
     GraduateAfterDays       int
-    DailyBudgetCents        int
     PerUserDailyLimit       int
     SkipMessagesShorterThan int
     BatchWindowMs           int
@@ -382,7 +381,7 @@ Telegram Update
 | 路径 | 作用 |
 |---|---|
 | `/` | Telegram Login Widget + 登录态跳转 |
-| `/dashboard` | 今日违规 / AI 成本 / 活跃群 / 信任用户数 |
+| `/dashboard` | 今日违规 / AI 调用次数 / 活跃群 / 信任用户数 |
 | `/groups` | 群列表 |
 | `/groups/[chatId]` | 单群配置（基础 / 验证 / 过滤 / 警告 / 反垃圾 / AI / Feedback / 审计） |
 | `/groups/global-config` | 全局配置 |
@@ -390,7 +389,7 @@ Telegram Update
 | `/violations` | 硬规则违规日志 |
 | `/ai-review` | AI 判决人审（含 Bio 命中） |
 | `/trust` | 信任列表（按 status 筛选，手动 graduate / ban） |
-| `/ai-costs` | 成本仪表盘（按日 / 群 / 模型） |
+| `/ai-calls` | 调用统计（按日 / 群 / 模型） |
 | `/prompt-editor` | AI prompt 编辑 + 测试沙箱 |
 | `/llm` | LLM Provider / Model 管理 + 探针 |
 | `/admins` | 管理员管理（仅 super / owner 可见） |
@@ -411,7 +410,7 @@ Telegram Update
 - **管理员**：`/admin/admins`（CRUD，需 owner）
 - **事件 / 日志**：`/admin/events`, `/admin/violations`, `/admin/profile-check-logs`, `/admin/audit`
 - **处罚**：`/admin/ban`, `/admin/unban`, `/admin/warnings`, `/admin/warnings/clear`
-- **AI**：`/admin/ai-decisions`（GET/PUT override），`/admin/ai-test`, `/admin/ai-prompt-preview`, `/admin/ai-cache-stats`, `/admin/ai-costs`, `/admin/ai-models`
+- **AI**：`/admin/ai-decisions`（GET/PUT override），`/admin/ai-test`, `/admin/ai-prompt-preview`, `/admin/ai-cache-stats`, `/admin/ai-calls`, `/admin/ai-models`
 - **信任**：`/admin/user-trust`, `/admin/user-trust/:chat_id/:user_id`
 - **LLM 注册表**：`/admin/llm/providers`, `/admin/llm/models`, `/admin/llm/models/:p/:m/probe`, `/admin/llm/models/:p/:m/test`, `/admin/llm/stats`, `/admin/llm/reload`（仅 owner）
 - **公开**：`POST /api/public/magic/exchange`, `POST /api/verify/turnstile/:token`
@@ -467,11 +466,11 @@ Cloudflare Tunnel 把公网域名打到本机 8090 → caddy:80。
 
 ---
 
-## 12. 性能与成本预期
+## 12. 性能与调用量预期
 
 - Bot 冷启动 < 200ms（Go 静态编译 + migrate）
 - 单消息硬规则处理 < 2ms；命中 AI 路径 P50 < 2s（取决于上游 LLM）
-- 5k 人群观测值：日均 AI 调用 200~800 次，月成本 ¥5~¥30（主用国产模型）
+- 5k 人群观测值：日均 AI 调用 200~800 次（主用国产模型）
 - 内存占用（稳态）：bot ~80MB，web ~180MB，postgres ~150MB，redis ~40MB
 
 ---
@@ -480,7 +479,7 @@ Cloudflare Tunnel 把公网域名打到本机 8090 → caddy:80。
 
 | 决策 | 为什么 |
 |---|---|
-| 信任状态机而非一刀切 | 避免老成员被 AI 误伤；AI 只审新人期，成本大幅下降 |
+| 信任状态机而非一刀切 | 避免老成员被 AI 误伤；AI 只审新人期，调用量大幅下降 |
 | Bio 审核独立路径 | 发言前 Bio 审核是专门针对「入群干净、改 Bio 后发广告」的潜伏号，硬规则 + AI 都接不住 |
 | Bio 命中也写 `ai_decisions` | 统一到 AI 复核队列，管理员一个页面处理所有 AI 相关决策 |
 | LLM 注册表入 DB | 支持热增删 provider / model，探针自动降级，不用改 env 重启 |

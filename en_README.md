@@ -36,11 +36,11 @@ ClawGuard provides a complete management suite for Telegram groups (currently se
 
 ### 🌐 Web Admin Panel
 - **Telegram Login** authentication + JWT authorization
-- **Dashboard**: Group count, today's violations, AI costs, trusted user overview
+- **Dashboard**: Group count, today's violations, AI calls, trusted user overview
 - **Group management**: Group list, per-group config editing (verification/filtering/AI policies, etc.)
 - **Violation logs**: Traditional violations + AI decision review queue
 - **Trust management**: Filter and manually tag user trust statuses
-- **AI cost analytics**: Cost breakdown by day/group/model
+- **AI call analytics**: Call breakdown by day/group/model
 - **Prompt editor**: Visual editing + live testing sandbox
 - **Audit trail**: Configuration change history
 - **Admin management**: Role-based permissions (owner/admin)
@@ -102,7 +102,7 @@ clawguard/
 │   │   ├── groups/              # Group management
 │   │   ├── violations/          # Violation logs
 │   │   ├── ai-review/           # AI review queue
-│   │   ├── ai-costs/            # AI cost analytics
+│   │   ├── ai-calls/            # AI call analytics
 │   │   ├── trust/               # Trust management
 │   │   ├── prompt-editor/       # Prompt editor
 │   │   ├── admins/              # Admin management
@@ -251,7 +251,6 @@ The bot runs multiple background tasks after startup:
 | Worker | Responsibility |
 |---|---|
 | VerificationExpiry | Auto-kick on verification timeout |
-| BudgetReset | Daily AI budget reset |
 | Healthcheck | Service health monitoring |
 | LLMProber | Periodic LLM Provider availability probing |
 | LLMStatsAggregator | AI call statistics aggregation |
