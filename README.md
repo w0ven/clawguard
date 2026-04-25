@@ -284,7 +284,7 @@ Bot 启动后运行多个后台任务：
 
 ### 近期更新
 
-- **2026-04-25** 终极审计修复：6 路 Codex 审查 + 主助手亲自 diff，关闭 P0 8 条、P1 30 条、P2 14 条、P3 1 条。重点改动：
+- **2026-04-25 ✅ 最终版本** — 终极审计修复全部上线（6 路 Codex 审查 + 主助手亲自 diff，关闭 P0 8 条、P1 30 条、P2 14 条、P3 1 条 + rune-safe 字符串收尾）。重点改动：
   - **服务边界**：Echo HTTP server 加 ReadHeader/Read/Write/Idle timeout 防 slowloris；所有 outbound HTTP client 配 Transport（image/link preview/AI/Turnstile）；Caddy 加 5 个安全响应头（HSTS / nosniff / Referrer-Policy / X-Frame-Options / Permissions-Policy）+ `-Server`。
   - **限流防爆破**：登录/logout/Turnstile/admin write 接口全部 Redis INCR/EXPIRE 限流（fail-open + Retry-After）；Telegram 主动外推消息加 `golang.org/x/time/rate` 双层限流（全局 25/s + per-chat 18/min），429 自动 RetryAfter 重试一次。
   - **Turnstile 加固**：siteverify 加 10s 专用 timeout + idempotency_key（cf_response 用 sha256 hash 后 60s 内 Redis 缓存，幂等重试）。
@@ -296,6 +296,7 @@ Bot 启动后运行多个后台任务：
   - **AI 上下文**：Moderator 接受 lifecycle ctx；saveCache/BumpBudget 用 `WithTimeout(lifeCtx, 5s)` 派生，错误从 `_ =` 吞掉降为 Debug log。
   - **审计完整性**：non_text_messages 策略 `delete` / `delete_warn` 分支补 `filter_non_text_message` violation 写入。
   - **Redis 抖动防护**：bio 检查 inflight 锁本地路径加 60s timer 自动释放；keyword reply 冷却 Redis 失败时改 fail-closed 防重复广告。
+  - **Rune-safe 截断**：`truncateString` / `truncateProfileCheckLogBio` / `llm_prober.truncateError` 全部改用 `unicode/utf8.RuneCountInString` + `[]rune` 切片，避免中文 utf-8 边界被切坏出乱码字节；max 语义从 byte → 字符数（CJK 容量约 3×）。
 - **2026-04-24** 数学图片验证题死循环修复 + 降级路径重构
   - 根因：`sendMathImageChallenge` 的 `for answer < 0` 循环只 re-roll `a`，当 `op1='-' op2='-' b+c>29` 时永久死循环，两个入群用户把 bot CPU 烧到 220%
   - 修复：整体重 roll + 50 次上限 + 3 秒 context timeout + 1000 seed 回归测试
