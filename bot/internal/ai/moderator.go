@@ -20,6 +20,38 @@ import (
 	"github.com/openclaw/clawguard/internal/store"
 )
 
+const (
+	aiInflightGlobalLimit = 32
+	aiInflightChatLimit   = 4
+)
+
+const reserveQuotaScript = `
+local userLimit = tonumber(ARGV[1]) or 0
+local budgetLimit = tonumber(ARGV[2]) or 0
+local ttl = tonumber(ARGV[3]) or 172800
+if userLimit > 0 then
+	local current = tonumber(redis.call("GET", KEYS[1]) or "0")
+	if current >= userLimit then
+		return {0, "user"}
+	end
+end
+if budgetLimit > 0 then
+	local current = tonumber(redis.call("GET", KEYS[2]) or "0")
+	if current >= budgetLimit then
+		return {0, "budget"}
+	end
+end
+if userLimit > 0 then
+	redis.call("INCR", KEYS[1])
+	redis.call("EXPIRE", KEYS[1], ttl)
+end
+if budgetLimit > 0 then
+	redis.call("INCRBYFLOAT", KEYS[2], "1")
+	redis.call("EXPIRE", KEYS[2], ttl)
+end
+return {1, "ok"}
+`
+
 const messageBasePrompt = `你是一个中文群聊反垃圾审核员。判断下面的消息属于哪类：
 - normal（正常对话）
 - ad（商业广告、引流、招聘、交友、币圈、刷单等）
@@ -82,8 +114,10 @@ type Moderator struct {
 		MarkAIFailure(error)
 	}
 
-	mu      sync.Mutex
-	batches map[string]*pendingBatch
+	mu             sync.Mutex
+	batches        map[string]*pendingBatch
+	inflightGlobal int
+	inflightByChat map[int64]int
 }
 
 type CheckInput struct {
@@ -139,14 +173,15 @@ func NewModerator(logger *zap.Logger, redis redis.Cmdable, queries *store.Querie
 		logger = zap.NewNop()
 	}
 	return &Moderator{
-		logger:    logger,
-		redis:     redis,
-		queries:   queries,
-		providers: providers,
-		models:    models,
-		resolver:  resolver,
-		batches:   map[string]*pendingBatch{},
-		status:    status,
+		logger:         logger,
+		redis:          redis,
+		queries:        queries,
+		providers:      providers,
+		models:         models,
+		resolver:       resolver,
+		batches:        map[string]*pendingBatch{},
+		inflightByChat: map[int64]int{},
+		status:         status,
 	}
 }
 
@@ -173,12 +208,16 @@ func (m *Moderator) CheckMessage(ctx context.Context, input CheckInput) (CheckOu
 			m.logger.Warn("load ai cache failed", zap.Error(err))
 		}
 	}
-	if over, err := m.overPerUserLimit(ctx, input); err == nil && over {
+	reserved, reserveReason, err := m.reserveQuota(ctx, input)
+	if err != nil {
+		m.logger.Warn("reserve ai quota failed, skip ai", zap.Error(err), zap.Int64("chat_id", input.ChatID), zap.Int64("user_id", input.UserID))
 		return CheckOutput{Skipped: true}, nil
 	}
-	if over, err := m.overBudget(ctx, input.ChatID, input.Policy); err == nil && over {
-		if lockErr := m.lockBudget(ctx); lockErr != nil {
-			m.logger.Warn("lock ai budget failed", zap.Error(lockErr))
+	if !reserved {
+		if reserveReason == "budget" {
+			if lockErr := m.lockBudget(ctx); lockErr != nil {
+				m.logger.Warn("lock ai budget failed", zap.Error(lockErr))
+			}
 		}
 		return CheckOutput{Skipped: true}, nil
 	}
@@ -275,8 +314,13 @@ func (m *Moderator) checkBatch(ctx context.Context, inputs []CheckInput) ([]Chec
 				m.warnAICallFailed(ref, model, attempt, 0, lastErr)
 				continue
 			}
+			release, ok := m.acquireInflight(inputs[0].ChatID)
+			if !ok {
+				return nil, errors.New("ai inflight limit reached")
+			}
 			timeout, ok := timeoutWithinContext(ctx, effectiveTimeout(policy.TimeoutMs, model.ProviderTimeout))
 			if !ok {
+				release()
 				return nil, contextDeadlineError(ctx)
 			}
 			callCtx, cancel := context.WithTimeout(ctx, timeout)
@@ -291,6 +335,7 @@ func (m *Moderator) checkBatch(ctx context.Context, inputs []CheckInput) ([]Chec
 				Timeout:     timeout,
 			})
 			cancel()
+			release()
 			if err != nil {
 				lastErr = err
 				failureCount++
@@ -323,7 +368,6 @@ func (m *Moderator) checkBatch(ctx context.Context, inputs []CheckInput) ([]Chec
 					FlagOnly:      flagOnly,
 				}
 				_ = m.saveCache(context.Background(), inputs[index], outputs[index])
-				_ = m.bumpUserCounter(context.Background(), inputs[index])
 				_ = m.BumpBudget(context.Background(), inputs[index].ChatID, outputs[index].CostCents)
 			}
 			if m.status != nil {
@@ -393,8 +437,13 @@ func (m *Moderator) checkSingle(ctx context.Context, input CheckInput) (CheckOut
 				m.warnAICallFailed(ref, model, attempt, 0, lastErr)
 				continue
 			}
+			release, ok := m.acquireInflight(input.ChatID)
+			if !ok {
+				return CheckOutput{}, errors.New("ai inflight limit reached")
+			}
 			timeout, ok := timeoutWithinContext(ctx, effectiveTimeout(policy.TimeoutMs, model.ProviderTimeout))
 			if !ok {
+				release()
 				return CheckOutput{}, contextDeadlineError(ctx)
 			}
 
@@ -410,6 +459,7 @@ func (m *Moderator) checkSingle(ctx context.Context, input CheckInput) (CheckOut
 				Timeout:     timeout,
 			})
 			cancel()
+			release()
 			if err != nil {
 				lastErr = err
 				failureCount++
@@ -440,7 +490,6 @@ func (m *Moderator) checkSingle(ctx context.Context, input CheckInput) (CheckOut
 				FlagOnly:      flagOnly,
 			}
 			_ = m.saveCache(context.Background(), input, output)
-			_ = m.bumpUserCounter(context.Background(), input)
 			_ = m.BumpBudget(context.Background(), input.ChatID, output.CostCents)
 			if m.status != nil {
 				m.status.MarkAISuccess()
@@ -691,6 +740,50 @@ func (m *Moderator) saveCache(ctx context.Context, input CheckInput, output Chec
 		ttl = 24 * time.Hour
 	}
 	return m.redis.Set(ctx, m.cacheKey(input), raw, ttl).Err()
+}
+
+func (m *Moderator) reserveQuota(ctx context.Context, input CheckInput) (bool, string, error) {
+	if m.redis == nil {
+		return false, "redis_unavailable", errors.New("redis unavailable for ai quota reservation")
+	}
+	if input.Policy.PerUserDailyLimit <= 0 && input.Policy.DailyBudgetCents <= 0 {
+		return true, "ok", nil
+	}
+	date := time.Now().Format("2006-01-02")
+	userKey := "ai:usercount:" + date + ":" + strconv.FormatInt(input.ChatID, 10) + ":" + strconv.FormatInt(input.UserID, 10)
+	budgetKey := "ai:budget:" + date + ":" + strconv.FormatInt(input.ChatID, 10)
+	result, err := m.redis.Eval(ctx, reserveQuotaScript, []string{userKey, budgetKey}, input.Policy.PerUserDailyLimit, input.Policy.DailyBudgetCents, int((48 * time.Hour).Seconds())).Slice()
+	if err != nil {
+		return false, "redis_error", err
+	}
+	if len(result) == 0 {
+		return false, "bad_result", errors.New("bad ai quota reservation result")
+	}
+	allowed, _ := strconv.ParseInt(fmt.Sprint(result[0]), 10, 64)
+	reason := "ok"
+	if len(result) > 1 {
+		reason = fmt.Sprint(result[1])
+	}
+	return allowed == 1, reason, nil
+}
+
+func (m *Moderator) acquireInflight(chatID int64) (func(), bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.inflightGlobal >= aiInflightGlobalLimit || m.inflightByChat[chatID] >= aiInflightChatLimit {
+		return nil, false
+	}
+	m.inflightGlobal++
+	m.inflightByChat[chatID]++
+	return func() {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		m.inflightGlobal--
+		m.inflightByChat[chatID]--
+		if m.inflightByChat[chatID] <= 0 {
+			delete(m.inflightByChat, chatID)
+		}
+	}, true
 }
 
 func (m *Moderator) overBudget(ctx context.Context, chatID int64, policy config.AIPolicy) (bool, error) {
