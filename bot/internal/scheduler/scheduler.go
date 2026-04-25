@@ -180,7 +180,10 @@ func (s *Scheduler) run(ctx context.Context, id int64, manual bool) error {
 		s.logger.Warn("load scheduled message before run failed", zap.Error(err), zap.Int64("scheduled_message_id", id))
 		return err
 	}
-	if !msg.Enabled || msg.Status != "active" {
+	if err := canRunScheduledMessage(msg, manual); err != nil {
+		return err
+	}
+	if !manual && (!msg.Enabled || msg.Status != "active") {
 		return nil
 	}
 
@@ -250,6 +253,16 @@ func (s *Scheduler) run(ctx context.Context, id int64, manual bool) error {
 
 	if msg.AutoDeleteSeconds > 0 {
 		go s.deleteLater(msg.ChatID, sent.ID, time.Duration(msg.AutoDeleteSeconds)*time.Second)
+	}
+	return nil
+}
+
+func canRunScheduledMessage(msg store.ScheduledMessage, manual bool) error {
+	switch msg.Status {
+	case "deleted", "archived":
+		if manual {
+			return errors.New("scheduled message is archived/deleted, cannot run")
+		}
 	}
 	return nil
 }

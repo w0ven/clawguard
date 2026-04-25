@@ -65,3 +65,24 @@ func TestSchedulerAddDailyRollsBackOnInvalidLaterTime(t *testing.T) {
 		t.Fatalf("cron entries length = %d, want 0", got)
 	}
 }
+
+func TestCanRunScheduledMessageAllowsManualPaused(t *testing.T) {
+	err := canRunScheduledMessage(store.ScheduledMessage{Enabled: false, Status: "paused"}, true)
+	if err != nil {
+		t.Fatalf("manual paused returned error: %v", err)
+	}
+}
+
+func TestCanRunScheduledMessageRejectsManualDeleted(t *testing.T) {
+	err := canRunScheduledMessage(store.ScheduledMessage{Enabled: true, Status: "deleted"}, true)
+	if err == nil || err.Error() != "scheduled message is archived/deleted, cannot run" {
+		t.Fatalf("manual deleted error = %v", err)
+	}
+}
+
+func TestCanRunScheduledMessageAllowsAutomaticActive(t *testing.T) {
+	err := canRunScheduledMessage(store.ScheduledMessage{Enabled: true, Status: "active"}, false)
+	if err != nil {
+		t.Fatalf("automatic active returned error: %v", err)
+	}
+}
