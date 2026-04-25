@@ -147,6 +147,20 @@ func (s *Service) handleIncomingMessageWithOptions(c tele.Context, isEdited bool
 		return nil
 	}
 	if content.Kind != "text" {
+		recordNonTextViolation := func(action string) {
+			caption := truncateString(strings.TrimSpace(collectMessageContent(msg)), 1000)
+			if _, err := s.queries.InsertViolation(ctx, store.InsertViolationParams{
+				ChatID:      msg.Chat.ID,
+				UserID:      msg.Sender.ID,
+				Username:    stringPtr(msg.Sender.Username),
+				Rule:        "filter_non_text_message",
+				Matched:     stringPtr(caption),
+				Action:      action,
+				MessageText: stringPtr(caption),
+			}); err != nil {
+				s.logger.Warn("insert non-text violation failed", zap.Error(err), zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID), zap.String("action", action))
+			}
+		}
 		switch strings.TrimSpace(strings.ToLower(policy.Filter.NonTextMessages)) {
 		case "", "ai_review":
 		case "off":
@@ -155,6 +169,7 @@ func (s *Service) handleIncomingMessageWithOptions(c tele.Context, isEdited bool
 			if err := s.deleteMessage(msg); err != nil {
 				s.logger.Warn("delete non-text message failed", zap.Error(err), zap.Int64("chat_id", msg.Chat.ID), zap.Int("message_id", msg.ID))
 			}
+			recordNonTextViolation("delete")
 			return nil
 		case "delete_warn":
 			if err := s.deleteMessage(msg); err != nil {
@@ -164,6 +179,7 @@ func (s *Service) handleIncomingMessageWithOptions(c tele.Context, isEdited bool
 			if _, _, err := s.IncrWarning(ctx, msg.Chat, msg.Sender, "filter_non_text_message", policy); err != nil {
 				s.logger.Warn("warn non-text message failed", zap.Error(err), zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID))
 			}
+			recordNonTextViolation("delete_warn")
 			return nil
 		default:
 			s.logger.Warn("unknown non_text_messages policy, fallback to ai_review", zap.String("action", policy.Filter.NonTextMessages), zap.Int64("chat_id", msg.Chat.ID))
