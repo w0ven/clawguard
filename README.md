@@ -94,7 +94,7 @@ clawguard/
 │   │   ├── config/              # 配置加载
 │   │   ├── store/               # sqlc 生成的数据访问层
 │   │   └── worker/              # 后台任务（验证过期/预算重置/LLM探测/日报等）
-│   ├── migrations/              # 数据库迁移（goose，16 个版本）
+│   ├── migrations/              # 数据库迁移（goose，21 个版本）
 │   └── sqlc.yaml
 ├── web/                         # Next.js 前端
 │   ├── app/                     # App Router 页面
@@ -284,6 +284,18 @@ Bot 启动后运行多个后台任务：
 
 ### 近期更新
 
+- **2026-04-25** 终极审计修复：6 路 Codex 审查 + 主助手亲自 diff，关闭 P0 8 条、P1 30 条、P2 14 条、P3 1 条。重点改动：
+  - **服务边界**：Echo HTTP server 加 ReadHeader/Read/Write/Idle timeout 防 slowloris；所有 outbound HTTP client 配 Transport（image/link preview/AI/Turnstile）；Caddy 加 5 个安全响应头（HSTS / nosniff / Referrer-Policy / X-Frame-Options / Permissions-Policy）+ `-Server`。
+  - **限流防爆破**：登录/logout/Turnstile/admin write 接口全部 Redis INCR/EXPIRE 限流（fail-open + Retry-After）；Telegram 主动外推消息加 `golang.org/x/time/rate` 双层限流（全局 25/s + per-chat 18/min），429 自动 RetryAfter 重试一次。
+  - **Turnstile 加固**：siteverify 加 10s 专用 timeout + idempotency_key（cf_response 用 sha256 hash 后 60s 内 Redis 缓存，幂等重试）。
+  - **Web 鉴权**：Next.js middleware 改反向白名单，`admins/ai-costs/ai-review/authorized-groups/llm/prompt-editor/trust` 等所有后台路由强制 cookie 校验，仅 `/auth /verify /api` 与静态资源放行。
+  - **Scheduler 稳健性**：daily 多时间点 Add 失败回滚已注册 entry，避免 orphan；定时消息 cron 加 per-msg-id 重入互斥；RunNow 允许执行 paused 任务（与 UI 语义一致）。
+  - **Lifecycle 收敛**：所有 `time.AfterFunc` / `go func sleep` delayed-delete goroutine 接 lifecycleCtx + sync.WaitGroup，Service/Scheduler Stop 各等 5s 优雅退出。
+  - **数据隔离**：scoped admin 的 `groups/violations/warnings` 改为 SQL `BIGINT[]` chat scope 下推（empty/NULL = owner 全局），count 也跟着 scope；删除内存过滤兜底，杜绝越权聚合。
+  - **隐私最小化**：profile_check_logs bio 写入 500 byte / 回显 200 byte+ellipsis；新增 90 天 retention worker 每日 03:00 自动清理。
+  - **AI 上下文**：Moderator 接受 lifecycle ctx；saveCache/BumpBudget 用 `WithTimeout(lifeCtx, 5s)` 派生，错误从 `_ =` 吞掉降为 Debug log。
+  - **审计完整性**：non_text_messages 策略 `delete` / `delete_warn` 分支补 `filter_non_text_message` violation 写入。
+  - **Redis 抖动防护**：bio 检查 inflight 锁本地路径加 60s timer 自动释放；keyword reply 冷却 Redis 失败时改 fail-closed 防重复广告。
 - **2026-04-24** 数学图片验证题死循环修复 + 降级路径重构
   - 根因：`sendMathImageChallenge` 的 `for answer < 0` 循环只 re-roll `a`，当 `op1='-' op2='-' b+c>29` 时永久死循环，两个入群用户把 bot CPU 烧到 220%
   - 修复：整体重 roll + 50 次上限 + 3 秒 context timeout + 1000 seed 回归测试
