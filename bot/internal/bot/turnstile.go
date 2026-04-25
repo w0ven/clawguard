@@ -4,15 +4,20 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
 	tele "gopkg.in/telebot.v3"
 
@@ -20,7 +25,33 @@ import (
 	"github.com/openclaw/clawguard/internal/store"
 )
 
+const (
+	turnstileSiteverifyURLDefault = "https://challenges.cloudflare.com/turnstile/v0/siteverify"
+	turnstileSiteverifyTimeout    = 10 * time.Second
+	turnstileIdempotencyTTL       = 60 * time.Second // seconds: Cloudflare idempotency key reuse window per cf_response.
+)
+
 var (
+	turnstileSiteverifyURL    = turnstileSiteverifyURLDefault
+	turnstileSiteverifyClient = &http.Client{
+		Timeout: turnstileSiteverifyTimeout,
+		Transport: &http.Transport{
+			Proxy: http.ProxyFromEnvironment,
+			DialContext: (&net.Dialer{
+				Timeout:   10 * time.Second,
+				KeepAlive: 30 * time.Second,
+			}).DialContext,
+			ForceAttemptHTTP2:     true,
+			MaxIdleConns:          100,
+			MaxIdleConnsPerHost:   10,
+			MaxConnsPerHost:       50,
+			IdleConnTimeout:       90 * time.Second,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ExpectContinueTimeout: 1 * time.Second,
+			ResponseHeaderTimeout: 30 * time.Second,
+		},
+	}
+
 	ErrTurnstileNotConfigured = errors.New("turnstile not configured")
 	ErrTurnstileTokenNotFound = errors.New("turnstile token not found")
 	ErrTurnstileVerifyFailed  = errors.New("turnstile verification failed")
@@ -134,9 +165,15 @@ func (s *Service) VerifyTurnstileToken(ctx context.Context, token, cfResponse, r
 func (s *Service) verifyTurnstileWithCloudflare(ctx context.Context, cfResponse, remoteIP string) (turnstileSiteVerifyResponse, error) {
 	body := &bytes.Buffer{}
 	writer := multipart.NewWriter(body)
+	idempotencyKey, err := s.turnstileIdempotencyKey(ctx, cfResponse)
+	if err != nil {
+		return turnstileSiteVerifyResponse{}, err
+	}
+
 	fields := map[string]string{
-		"secret":   s.cfg.TurnstileSecret,
-		"response": cfResponse,
+		"secret":          s.cfg.TurnstileSecret,
+		"response":        cfResponse,
+		"idempotency_key": idempotencyKey,
 	}
 	if strings.TrimSpace(remoteIP) != "" {
 		fields["remoteip"] = strings.TrimSpace(remoteIP)
@@ -151,13 +188,16 @@ func (s *Service) verifyTurnstileWithCloudflare(ctx context.Context, cfResponse,
 		return turnstileSiteVerifyResponse{}, fmt.Errorf("close turnstile form: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://challenges.cloudflare.com/turnstile/v0/siteverify", body)
+	requestCtx, cancel := context.WithTimeout(ctx, turnstileSiteverifyTimeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(requestCtx, http.MethodPost, turnstileSiteverifyURL, body)
 	if err != nil {
 		return turnstileSiteVerifyResponse{}, fmt.Errorf("new turnstile request: %w", err)
 	}
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := turnstileSiteverifyClient.Do(req)
 	if err != nil {
 		return turnstileSiteVerifyResponse{}, fmt.Errorf("call turnstile siteverify: %w", err)
 	}
@@ -173,6 +213,52 @@ func (s *Service) verifyTurnstileWithCloudflare(ctx context.Context, cfResponse,
 		return turnstileSiteVerifyResponse{}, fmt.Errorf("decode turnstile response: %w", err)
 	}
 	return payload, nil
+}
+
+func (s *Service) turnstileIdempotencyKey(ctx context.Context, cfResponse string) (string, error) {
+	redisClient := s.Redis()
+	if redisClient == nil {
+		s.logger.Warn("turnstile idempotency redis unavailable; generating one-shot key")
+		return generateTurnstileIdempotencyKey()
+	}
+
+	cacheKey := "turnstile_idempotency:" + sha256HexString(cfResponse)
+	if cached, err := redisClient.Get(ctx, cacheKey).Result(); err == nil && strings.TrimSpace(cached) != "" {
+		return cached, nil
+	} else if err != nil && !errors.Is(err, redis.Nil) {
+		s.logger.Warn("get turnstile idempotency key failed; generating one-shot key", zap.Error(err))
+		return generateTurnstileIdempotencyKey()
+	}
+
+	generated, err := generateTurnstileIdempotencyKey()
+	if err != nil {
+		return "", err
+	}
+	stored, err := redisClient.SetNX(ctx, cacheKey, generated, turnstileIdempotencyTTL).Result()
+	if err != nil {
+		s.logger.Warn("store turnstile idempotency key failed; using one-shot key", zap.Error(err))
+		return generated, nil
+	}
+	if stored {
+		return generated, nil
+	}
+	if cached, err := redisClient.Get(ctx, cacheKey).Result(); err == nil && strings.TrimSpace(cached) != "" {
+		return cached, nil
+	}
+	return generated, nil
+}
+
+func generateTurnstileIdempotencyKey() (string, error) {
+	raw := make([]byte, 16)
+	if _, err := rand.Read(raw); err != nil {
+		return "", fmt.Errorf("generate turnstile idempotency key: %w", err)
+	}
+	return hex.EncodeToString(raw), nil
+}
+
+func sha256HexString(value string) string {
+	sum := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(sum[:])
 }
 
 func (s *Service) restorePendingVerification(ctx context.Context, pending store.PendingVerification) error {
