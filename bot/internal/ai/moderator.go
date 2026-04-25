@@ -293,7 +293,7 @@ func (m *Moderator) checkBatch(ctx context.Context, inputs []CheckInput) ([]Chec
 		rules = policy.BioRules
 	}
 	prompt := buildPrompt(scene, rules, inputs)
-	flagOnly, _ := m.overBudget(ctx, inputs[0].ChatID, policy)
+	flagOnly := false
 	modelChain, _ := m.resolver.BuildChain(policy, []string{"moderation"})
 
 	var lastErr error
@@ -409,7 +409,7 @@ func (m *Moderator) checkSingle(ctx context.Context, input CheckInput) (CheckOut
 		rules = policy.BioRules
 	}
 	prompt := buildPrompt(scene, rules, []CheckInput{input})
-	flagOnly, _ := m.overBudget(ctx, input.ChatID, policy)
+	flagOnly := false
 	// Include vision capability when this message carries an image so the
 	// resolver filters out moderation-only text models that cannot read
 	// image_url payloads.
