@@ -24,7 +24,7 @@ LIMIT $3
 `
 
 const dailyReportAIDecisionStats = `
-SELECT verdict, action_taken, COUNT(*)::BIGINT AS count, COALESCE(SUM(cost_cents), 0)::DOUBLE PRECISION AS cost_cents
+SELECT verdict, action_taken, COUNT(*)::BIGINT AS count
 FROM ai_decisions
 WHERE created_at >= $1
   AND created_at < $2
@@ -55,7 +55,6 @@ type AIDecisionDailyStat struct {
 	Verdict     string
 	ActionTaken string
 	Count       int64
-	CostCents   float64
 }
 
 func (q *Queries) DailyReportViolationActionCounts(ctx context.Context, start, end time.Time) ([]CountByName, error) {
@@ -104,7 +103,7 @@ func (q *Queries) DailyReportAIDecisionStats(ctx context.Context, start, end tim
 	var items []AIDecisionDailyStat
 	for rows.Next() {
 		var item AIDecisionDailyStat
-		if err := rows.Scan(&item.Verdict, &item.ActionTaken, &item.Count, &item.CostCents); err != nil {
+		if err := rows.Scan(&item.Verdict, &item.ActionTaken, &item.Count); err != nil {
 			return nil, err
 		}
 		items = append(items, item)

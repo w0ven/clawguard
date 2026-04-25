@@ -87,10 +87,6 @@ func (w *DailyReport) runOnce(ctx context.Context, trigger time.Time) {
 }
 
 func (w *DailyReport) buildReport(ctx context.Context, start, end time.Time, label string) (string, error) {
-	policy, err := config.LoadPolicy(ctx, w.queries, 0)
-	if err != nil {
-		policy = config.DefaultPolicy
-	}
 
 	actionCounts, err := w.queries.DailyReportViolationActionCounts(ctx, start, end)
 	if err != nil {
@@ -130,7 +126,7 @@ func (w *DailyReport) buildReport(ctx context.Context, start, end time.Time, lab
 		topRules = strings.Join(parts, ", ")
 	}
 
-	aiTotal, verdictCounts, actionTakenCounts, totalCost := summarizeAI(aiStats)
+	aiTotal, verdictCounts, actionTakenCounts := summarizeAI(aiStats)
 	lines := []string{
 		fmt.Sprintf("📊 <b>ClawGuard 日报 %s</b>", label),
 		"",
@@ -144,7 +140,7 @@ func (w *DailyReport) buildReport(ctx context.Context, start, end time.Time, lab
 		"<b>AI 审核</b>",
 		fmt.Sprintf("• 判定: 共 %d 条 | ad %d | scam %d | spam %d | clean %d", aiTotal, verdictCounts["ad"], verdictCounts["scam"], verdictCounts["spam"], verdictCounts["clean"]),
 		fmt.Sprintf("• 动作: ban %d | mute %d | warn %d", actionTakenCounts["ban"], actionTakenCounts["mute"], actionTakenCounts["warn"]),
-		fmt.Sprintf("• 成本: %.4g¢（预算 %d¢）", totalCost, policy.AI.DailyBudgetCents),
+		fmt.Sprintf("• 调用次数: %d 次", aiTotal),
 		"",
 		"<b>熔断/异常</b>",
 		"• 今日无",
@@ -191,18 +187,16 @@ func summarizeVerification(items []store.CountByName, pendingCreated int64) (int
 	return total, passed, failed, pending
 }
 
-func summarizeAI(items []store.AIDecisionDailyStat) (int64, map[string]int64, map[string]int64, float64) {
+func summarizeAI(items []store.AIDecisionDailyStat) (int64, map[string]int64, map[string]int64) {
 	verdictCounts := map[string]int64{}
 	actionCounts := map[string]int64{}
 	var total int64
-	var cost float64
 	for _, item := range items {
 		verdictCounts[strings.TrimSpace(strings.ToLower(item.Verdict))] += item.Count
 		actionCounts[strings.TrimSpace(strings.ToLower(item.ActionTaken))] += item.Count
 		total += item.Count
-		cost += item.CostCents
 	}
-	return total, verdictCounts, actionCounts, cost
+	return total, verdictCounts, actionCounts
 }
 
 func countAction(items []store.CountByName, names ...string) int64 {

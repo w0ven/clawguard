@@ -75,7 +75,7 @@ func (s *Server) registerAdminRoutes() {
 	admin.GET("/ai-cache-stats", s.handleGetAICacheStats)
 	admin.GET("/user-trust", s.handleListUserTrust)
 	admin.PUT("/user-trust/:chat_id/:user_id", s.handleUpdateUserTrust)
-	admin.GET("/ai-costs", s.handleListAICosts)
+	admin.GET("/ai-calls", s.handleListAICalls)
 
 	s.registerAdminLLMRoutes(admin)
 	s.registerScheduledMessageRoutes(admin)
@@ -364,11 +364,10 @@ func (s *Server) handlePutSystemState(c echo.Context) error {
 	}
 
 	var payload struct {
-		AIPaused          *bool   `json:"ai_paused"`
-		ActionsPaused     *bool   `json:"actions_paused"`
-		Frozen            *bool   `json:"frozen"`
-		AIPausedReason    *string `json:"ai_paused_reason"`
-		ResetBudgetLocked bool    `json:"reset_budget_locked"`
+		AIPaused       *bool   `json:"ai_paused"`
+		ActionsPaused  *bool   `json:"actions_paused"`
+		Frozen         *bool   `json:"frozen"`
+		AIPausedReason *string `json:"ai_paused_reason"`
 	}
 	if err := c.Bind(&payload); err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid json body"})
@@ -390,23 +389,12 @@ func (s *Server) handlePutSystemState(c echo.Context) error {
 	if !next.AIPaused {
 		next.AIPausedReason = ""
 	}
-	if payload.ResetBudgetLocked {
-		next.AIBudgetLocked = false
-		next.AIBudgetLockedDate = nil
-		if payload.AIPaused == nil {
-			next.AIPaused = false
-			next.AIPausedReason = ""
-		}
-	}
-
 	updated, err := s.botService.UpdateSystemState(c.Request().Context(), store.UpdateSystemStateParams{
-		AIPaused:           next.AIPaused,
-		ActionsPaused:      next.ActionsPaused,
-		Frozen:             next.Frozen,
-		AIPausedReason:     next.AIPausedReason,
-		AIBudgetLocked:     next.AIBudgetLocked,
-		AIBudgetLockedDate: next.AIBudgetLockedDate,
-		UpdatedBy:          &admin.TelegramID,
+		AIPaused:       next.AIPaused,
+		ActionsPaused:  next.ActionsPaused,
+		Frozen:         next.Frozen,
+		AIPausedReason: next.AIPausedReason,
+		UpdatedBy:      &admin.TelegramID,
 	})
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "update system state failed"})
@@ -770,9 +758,9 @@ func (s *Server) handleHealth(c echo.Context) error {
 		}
 	}
 
-	todayCost, err := s.botService.Queries().GetTodayAICostCents(ctx)
+	todayCalls, err := s.botService.Queries().GetTodayAICallCount(ctx)
 	if err != nil {
-		todayCost = 0
+		todayCalls = 0
 	}
 	status := s.botService.Status()
 
@@ -784,7 +772,7 @@ func (s *Server) handleHealth(c echo.Context) error {
 		"ai_last_ok_at":          status["ai_last_ok_at"],
 		"ai_last_fail_at":        status["ai_last_fail_at"],
 		"ai_last_error":          status["ai_last_error"],
-		"today_cost_cents":       todayCost,
+		"today_calls":            todayCalls,
 		"uptime_seconds":         status["uptime_seconds"],
 	})
 }
@@ -1465,57 +1453,54 @@ func (s *Server) handleUpdateUserTrust(c echo.Context) error {
 	return c.JSON(http.StatusOK, response)
 }
 
-func (s *Server) handleListAICosts(c echo.Context) error {
+func (s *Server) handleListAICalls(c echo.Context) error {
 	admin, _ := currentAdmin(c)
 	scopeChatIDs, _ := adminScopeFilter(admin)
-	todayCost, err := s.botService.Queries().GetTodayAICostCentsScoped(c.Request().Context(), scopeChatIDs)
+	todayCalls, err := s.botService.Queries().GetTodayAICallCountScoped(c.Request().Context(), scopeChatIDs)
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "load ai cost summary failed"})
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "load ai call summary failed"})
 	}
-	daily, err := s.botService.Queries().ListDailyAICostsLast30Days(c.Request().Context(), scopeChatIDs)
+	daily, err := s.botService.Queries().ListDailyAICallsLast30Days(c.Request().Context(), scopeChatIDs)
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "load ai daily costs failed"})
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "load ai daily calls failed"})
 	}
-	perModel, err := s.botService.Queries().ListAICostsPerModelLast30Days(c.Request().Context(), scopeChatIDs)
+	perModel, err := s.botService.Queries().ListAICallsPerModelLast30Days(c.Request().Context(), scopeChatIDs)
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "load ai model costs failed"})
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "load ai model calls failed"})
 	}
-	perChat, err := s.botService.Queries().ListAICostsPerChatLast30Days(c.Request().Context(), scopeChatIDs, 10)
+	perChat, err := s.botService.Queries().ListAICallsPerChatLast30Days(c.Request().Context(), scopeChatIDs, 10)
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "load ai chat costs failed"})
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "load ai chat calls failed"})
 	}
 
 	dailyResponse := make([]map[string]any, 0, len(daily))
 	for _, item := range daily {
 		dailyResponse = append(dailyResponse, map[string]any{
-			"date":       item.Date.Format("2006-01-02"),
-			"cost_cents": item.CostCents,
-			"calls":      item.Calls,
+			"date":  item.Date.Format("2006-01-02"),
+			"calls": item.Calls,
 		})
 	}
 	modelResponse := make([]map[string]any, 0, len(perModel))
 	for _, item := range perModel {
 		modelResponse = append(modelResponse, map[string]any{
-			"model":      item.Model,
-			"cost_cents": item.CostCents,
-			"calls":      item.Calls,
+			"model": item.Model,
+			"calls": item.Calls,
 		})
 	}
 	chatResponse := make([]map[string]any, 0, len(perChat))
 	for _, item := range perChat {
 		chatResponse = append(chatResponse, map[string]any{
-			"chat_id":    item.ChatID,
-			"title":      item.Title,
-			"cost_cents": item.CostCents,
-			"calls":      item.Calls,
+			"chat_id": item.ChatID,
+			"title":   item.Title,
+			"calls":   item.Calls,
 		})
 	}
 
 	return c.JSON(http.StatusOK, map[string]any{
-		"today_cost_cents": todayCost,
-		"daily":            dailyResponse,
-		"per_model":        modelResponse,
-		"per_chat":         chatResponse,
+		"today_calls": todayCalls,
+		"daily":       dailyResponse,
+		"per_model":   modelResponse,
+		"per_chat":    chatResponse,
 	})
 }
 
@@ -1807,15 +1792,13 @@ func serializeAuthorizedGroup(group store.AuthorizedGroup) map[string]any {
 
 func serializeSystemState(state store.SystemState) map[string]any {
 	return map[string]any{
-		"id":                    state.ID,
-		"ai_paused":             state.AIPaused,
-		"actions_paused":        state.ActionsPaused,
-		"frozen":                state.Frozen,
-		"ai_paused_reason":      state.AIPausedReason,
-		"ai_budget_locked":      state.AIBudgetLocked,
-		"ai_budget_locked_date": state.AIBudgetLockedDate,
-		"updated_at":            state.UpdatedAt,
-		"updated_by":            state.UpdatedBy,
+		"id":               state.ID,
+		"ai_paused":        state.AIPaused,
+		"actions_paused":   state.ActionsPaused,
+		"frozen":           state.Frozen,
+		"ai_paused_reason": state.AIPausedReason,
+		"updated_at":       state.UpdatedAt,
+		"updated_by":       state.UpdatedBy,
 	}
 }
 
@@ -1854,7 +1837,6 @@ func serializeAIDecision(item store.AIDecision) map[string]any {
 		"action_taken":   item.ActionTaken,
 		"admin_override": item.AdminOverride,
 		"latency_ms":     item.LatencyMs,
-		"cost_cents":     item.CostCents,
 		"created_at":     item.CreatedAt,
 	}
 }
