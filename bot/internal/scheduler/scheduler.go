@@ -213,11 +213,13 @@ func (s *Scheduler) run(ctx context.Context, id int64, manual bool) error {
 
 	messageID := int64(sent.ID)
 	if !manual {
-		if err := s.queries.MarkScheduledMessageSent(ctx, msg.ID, messageID); err != nil {
-			s.logger.Warn("mark scheduled message sent failed", zap.Error(err), zap.Int64("scheduled_message_id", msg.ID))
+		if err := s.persistScheduledMessageSent(ctx, msg.ID, messageID, rendered, started); err != nil {
+			s.logger.Warn("persist scheduled message success failed", zap.Error(err), zap.Int64("scheduled_message_id", msg.ID))
+			return err
 		}
+	} else {
+		s.insertRun(ctx, msg.ID, true, &messageID, &rendered, nil, started)
 	}
-	s.insertRun(ctx, msg.ID, true, &messageID, &rendered, nil, started)
 
 	if msg.AutoDeleteSeconds > 0 {
 		go s.deleteLater(msg.ChatID, sent.ID, time.Duration(msg.AutoDeleteSeconds)*time.Second)
@@ -285,6 +287,25 @@ func buildReplyMarkup(raw []byte) *tele.ReplyMarkup {
 	}
 	markup.Inline(rows...)
 	return markup
+}
+
+func (s *Scheduler) persistScheduledMessageSent(ctx context.Context, id int64, messageID int64, rendered string, started time.Time) error {
+	preview := truncateRunes(rendered, 500)
+	duration := int32(time.Since(started).Milliseconds())
+	return s.queries.Transact(ctx, func(q *store.Queries) error {
+		if err := q.MarkScheduledMessageSent(ctx, id, messageID); err != nil {
+			return err
+		}
+		_, err := q.InsertScheduledMessageRun(ctx, store.InsertScheduledMessageRunParams{
+			ScheduledMessageID: id,
+			Success:            true,
+			TgMessageID:        &messageID,
+			RenderedPreview:    &preview,
+			Error:              nil,
+			DurationMs:         &duration,
+		})
+		return err
+	})
 }
 
 func (s *Scheduler) insertRun(ctx context.Context, id int64, success bool, messageID *int64, rendered *string, errText *string, started time.Time) {
