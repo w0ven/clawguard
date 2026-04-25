@@ -45,7 +45,7 @@ WHERE method = 'turnstile' AND payload->>'token' = $1
 
 const deletePendingVerificationByToken = `-- name: DeletePendingVerificationByToken :one
 DELETE FROM pending_verifications
-WHERE method = 'turnstile' AND payload->>'token' = $1
+WHERE method = 'turnstile' AND payload->>'token' = $1 AND expires_at > NOW()
 RETURNING id, chat_id, user_id, username, first_name, method, payload, join_message_id, expires_at, created_at
 `
 
