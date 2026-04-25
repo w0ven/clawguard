@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/labstack/echo/v4"
@@ -2029,10 +2030,10 @@ func truncateProfileCheckLogBio(value *string) *string {
 		return nil
 	}
 	trimmed := *value
-	if len(trimmed) <= 200 {
+	if utf8.RuneCountInString(trimmed) <= 200 {
 		return &trimmed
 	}
-	trimmed = trimmed[:200] + "…"
+	trimmed = string([]rune(trimmed)[:200]) + "…"
 	return &trimmed
 }
 

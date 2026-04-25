@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/redis/go-redis/v9"
@@ -285,8 +286,8 @@ func (p *LLMProber) emitTransition(ctx context.Context, ref ai.ModelRef, healthy
 func truncateError(s string) string {
 	s = strings.TrimSpace(s)
 	const max = 400
-	if len(s) > max {
-		return s[:max] + "…"
+	if utf8.RuneCountInString(s) > max {
+		return string([]rune(s)[:max]) + "…"
 	}
 	return s
 }
