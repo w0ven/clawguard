@@ -31,7 +31,8 @@ type Scheduler struct {
 		WaitChat(context.Context, int64) error
 		WaitGlobal(context.Context) error
 	}
-	logger *zap.Logger
+	logger  *zap.Logger
+	running sync.Map
 
 	mu      sync.Mutex
 	entries map[int64][]cron.EntryID
@@ -157,6 +158,16 @@ func (s *Scheduler) RunNow(ctx context.Context, id int64) error {
 
 func (s *Scheduler) run(ctx context.Context, id int64, manual bool) error {
 	started := time.Now()
+	if !s.acquireRun(id) {
+		if manual {
+			return errors.New("scheduled message is already running")
+		}
+		reason := "reentry skipped"
+		s.logger.Warn("skip scheduled message reentry", zap.Int64("scheduled_message_id", id))
+		s.insertRun(ctx, id, false, nil, nil, &reason, started)
+		return nil
+	}
+	defer s.releaseRun(id)
 	msg, err := s.queries.GetScheduledMessage(ctx, id)
 	if err != nil {
 		s.logger.Warn("load scheduled message before run failed", zap.Error(err), zap.Int64("scheduled_message_id", id))
@@ -234,6 +245,15 @@ func (s *Scheduler) run(ctx context.Context, id int64, manual bool) error {
 		go s.deleteLater(msg.ChatID, sent.ID, time.Duration(msg.AutoDeleteSeconds)*time.Second)
 	}
 	return nil
+}
+
+func (s *Scheduler) acquireRun(id int64) bool {
+	_, loaded := s.running.LoadOrStore(id, struct{}{})
+	return !loaded
+}
+
+func (s *Scheduler) releaseRun(id int64) {
+	s.running.Delete(id)
 }
 
 func (s *Scheduler) Render(msg store.ScheduledMessage) string {
