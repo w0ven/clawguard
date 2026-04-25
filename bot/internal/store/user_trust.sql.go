@@ -171,6 +171,7 @@ WHERE ($1::BIGINT IS NULL OR chat_id = $1)
   )
   AND ($5::TIMESTAMPTZ IS NULL OR joined_at >= $5::TIMESTAMPTZ)
   AND ($6::TIMESTAMPTZ IS NULL OR joined_at <= $6::TIMESTAMPTZ)
+  AND ($9::BOOLEAN OR chat_id = ANY($10::BIGINT[]))
 ORDER BY joined_at DESC, user_id DESC
 LIMIT $7
 OFFSET $8
@@ -232,14 +233,16 @@ type AdjustUserTrustScoreParams struct {
 }
 
 type ListUserTrustPaginatedParams struct {
-	ChatID      *int64
-	UserID      *int64
-	Status      string
-	Username    string
-	JoinedSince *string
-	JoinedUntil *string
-	Limit       int32
-	Offset      int32
+	ChatID       *int64
+	UserID       *int64
+	Status       string
+	Username     string
+	JoinedSince  *string
+	JoinedUntil  *string
+	Limit        int32
+	Offset       int32
+	ScopeGlobal  bool
+	ScopeChatIDs []int64
 }
 
 func (q *Queries) GetUserTrust(ctx context.Context, chatID, userID int64) (UserTrust, error) {
@@ -431,14 +434,14 @@ func (q *Queries) AdjustUserTrustScore(ctx context.Context, arg AdjustUserTrustS
 	return i, err
 }
 
-func (q *Queries) CountUserTrust(ctx context.Context, chatID *int64, userID *int64, status string, username string, joinedSince *string, joinedUntil *string) (int64, error) {
-	row := q.db.QueryRow(ctx, countUserTrust, chatID, userID, status, username, joinedSince, joinedUntil)
+func (q *Queries) CountUserTrust(ctx context.Context, chatID *int64, userID *int64, status string, username string, joinedSince *string, joinedUntil *string, scopeGlobal bool, scopeChatIDs []int64) (int64, error) {
+	row := q.db.QueryRow(ctx, countUserTrust, chatID, userID, status, username, joinedSince, joinedUntil, scopeGlobal, scopeChatIDs)
 	var count int64
 	err := row.Scan(&count)
 	return count, err
 }
 func (q *Queries) ListUserTrustPaginated(ctx context.Context, arg ListUserTrustPaginatedParams) ([]UserTrust, error) {
-	rows, err := q.db.Query(ctx, listUserTrustPaginated, arg.ChatID, arg.UserID, arg.Status, arg.Username, arg.JoinedSince, arg.JoinedUntil, arg.Limit, arg.Offset)
+	rows, err := q.db.Query(ctx, listUserTrustPaginated, arg.ChatID, arg.UserID, arg.Status, arg.Username, arg.JoinedSince, arg.JoinedUntil, arg.Limit, arg.Offset, arg.ScopeGlobal, arg.ScopeChatIDs)
 	if err != nil {
 		return nil, err
 	}

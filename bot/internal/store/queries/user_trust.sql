@@ -137,7 +137,8 @@ WHERE ($1::BIGINT IS NULL OR chat_id = $1)
     OR COALESCE(last_name, '') ILIKE '%' || $4 || '%'
   )
   AND ($5::TIMESTAMPTZ IS NULL OR joined_at >= $5::TIMESTAMPTZ)
-  AND ($6::TIMESTAMPTZ IS NULL OR joined_at <= $6::TIMESTAMPTZ);
+  AND ($6::TIMESTAMPTZ IS NULL OR joined_at <= $6::TIMESTAMPTZ)
+  AND ($7::BOOLEAN OR chat_id = ANY($8::BIGINT[]));
 
 -- name: ListUserTrustPaginated :many
 SELECT chat_id, user_id, username, first_name, last_name, joined_at, updated_at, status, score, messages_checked, messages_clean, graduated_at, banned_at, banned_reason, notes
@@ -156,6 +157,7 @@ WHERE ($1::BIGINT IS NULL OR chat_id = $1)
   )
   AND ($5::TIMESTAMPTZ IS NULL OR joined_at >= $5::TIMESTAMPTZ)
   AND ($6::TIMESTAMPTZ IS NULL OR joined_at <= $6::TIMESTAMPTZ)
+  AND ($9::BOOLEAN OR chat_id = ANY($10::BIGINT[]))
 ORDER BY joined_at DESC, user_id DESC
 LIMIT $7
 OFFSET $8;

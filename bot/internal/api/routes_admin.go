@@ -1311,19 +1311,22 @@ func (s *Server) handleListUserTrust(c echo.Context) error {
 	limit := parseLimit(c.QueryParam("limit"))
 	offset := parseOffset(c.QueryParam("offset"))
 
-	total, err := s.botService.Queries().CountUserTrust(c.Request().Context(), chatID, userID, status, username, joinedSince, joinedUntil)
+	scopeChatIDs, scopeGlobal := adminScopeFilter(admin)
+	total, err := s.botService.Queries().CountUserTrust(c.Request().Context(), chatID, userID, status, username, joinedSince, joinedUntil, scopeGlobal, scopeChatIDs)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "count user trust failed"})
 	}
 	items, err := s.botService.Queries().ListUserTrustPaginated(c.Request().Context(), store.ListUserTrustPaginatedParams{
-		ChatID:      chatID,
-		UserID:      userID,
-		Status:      status,
-		Username:    username,
-		JoinedSince: joinedSince,
-		JoinedUntil: joinedUntil,
-		Limit:       limit,
-		Offset:      offset,
+		ChatID:       chatID,
+		UserID:       userID,
+		Status:       status,
+		Username:     username,
+		JoinedSince:  joinedSince,
+		JoinedUntil:  joinedUntil,
+		Limit:        limit,
+		Offset:       offset,
+		ScopeGlobal:  scopeGlobal,
+		ScopeChatIDs: scopeChatIDs,
 	})
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "list user trust failed"})
@@ -1342,7 +1345,7 @@ func (s *Server) handleListUserTrust(c echo.Context) error {
 		if key != "all" {
 			countStatus = key
 		}
-		count, err := s.botService.Queries().CountUserTrust(c.Request().Context(), chatID, userID, countStatus, username, joinedSince, joinedUntil)
+		count, err := s.botService.Queries().CountUserTrust(c.Request().Context(), chatID, userID, countStatus, username, joinedSince, joinedUntil, scopeGlobal, scopeChatIDs)
 		if err != nil {
 			return c.JSON(http.StatusInternalServerError, map[string]string{"error": "count user trust status failed"})
 		}
