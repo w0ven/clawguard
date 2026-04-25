@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -16,6 +17,8 @@ import (
 )
 
 const magicLoginTTL = 60 * time.Minute
+
+var errConfigGroupOutOfScope = errors.New("config group out of scope")
 
 type magicLinkPayload struct {
 	TelegramID  int64  `json:"telegram_id"`
@@ -33,6 +36,9 @@ func (s *Service) handleConfigCommand(c tele.Context) error {
 
 	ctx := context.Background()
 	admin, scopeChatID, err := s.authorizeConfigCommand(ctx, chat, sender.ID)
+	if errors.Is(err, errConfigGroupOutOfScope) {
+		return c.Send("该群不在你的管理范围内", &tele.SendOptions{ParseMode: tele.ModeHTML})
+	}
 	if err != nil {
 		return err
 	}
@@ -104,12 +110,23 @@ func (s *Service) authorizeConfigCommand(ctx context.Context, chat *tele.Chat, t
 	}
 
 	if chat != nil && (chat.Type == tele.ChatGroup || chat.Type == tele.ChatSuperGroup) {
+		authorized, authErr := s.IsAuthorizedGroup(ctx, chat.ID)
+		if authErr != nil {
+			return nil, 0, authErr
+		}
+		if !authorized {
+			return nil, 0, nil
+		}
+
 		isAdmin, adminErr := s.isChatAdmin(ctx, chat.ID, telegramID)
 		if adminErr != nil {
 			return nil, 0, adminErr
 		}
 		if !isAdmin || err == pgx.ErrNoRows {
 			return nil, 0, nil
+		}
+		if !botAdminCanAccessChat(admin, chat.ID) {
+			return nil, 0, errConfigGroupOutOfScope
 		}
 		return &admin, chat.ID, nil
 	}

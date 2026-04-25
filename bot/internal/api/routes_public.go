@@ -68,6 +68,16 @@ func (s *Server) handleMagicExchange(c echo.Context) error {
 	if err != nil {
 		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "invalid token"})
 	}
+	if payload.ScopeChatID != 0 {
+		authorized, err := s.botService.IsAuthorizedGroup(ctx, payload.ScopeChatID)
+		if err != nil {
+			s.logger.Warn("magic token authorized group check failed", zap.Error(err), zap.Int64("chat_id", payload.ScopeChatID))
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": "token exchange failed"})
+		}
+		if !authorized || !adminCanAccessChat(admin, payload.ScopeChatID) {
+			return c.JSON(http.StatusForbidden, map[string]string{"error": "group out of scope"})
+		}
+	}
 
 	tokenString, err := s.signAdminJWT(admin)
 	if err != nil {
