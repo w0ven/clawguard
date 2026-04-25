@@ -16,9 +16,9 @@ export async function apiFetch<T>(
 ): Promise<T> {
   const method = (init?.method ?? "GET").toUpperCase();
   const csrfToken = typeof document !== "undefined" ? readCookie("cg_csrf") : "";
-  const headers: HeadersInit = {
+  const headers: Record<string, string> = {
     "Content-Type": "application/json",
-    ...(init?.headers ?? {}),
+    ...((init?.headers ?? {}) as Record<string, string>),
   };
   if (csrfToken && !["GET", "HEAD", "OPTIONS"].includes(method)) {
     headers["X-CSRF-Token"] = csrfToken;
