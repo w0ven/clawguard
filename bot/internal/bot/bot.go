@@ -462,6 +462,21 @@ func (s *Service) startVerification(chat *tele.Chat, user *tele.User, joinEventM
 		return nil
 	}
 
+	// 去重锁：避免 OnUserJoined 和 OnChatMember 对同一 join 事件双触发。
+	// 必须在任何 Telegram Restrict 前获取，锁命中或 Redis 异常都不得产生副作用。
+	if s.redis != nil {
+		lockKey := fmt.Sprintf("clawguard:verify:lock:%d:%d", chat.ID, user.ID)
+		set, lockErr := s.redis.SetNX(ctx, lockKey, "1", 10*time.Second).Result()
+		if lockErr != nil {
+			s.logger.Warn("acquire verification join lock failed, skip flow fail-safe", zap.Error(lockErr), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
+			return nil
+		}
+		if !set {
+			s.logger.Debug("skip duplicate join event", zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
+			return nil
+		}
+	}
+
 	member := tele.ChatMember{
 		User:   user,
 		Rights: tele.NoRights(),
@@ -479,16 +494,6 @@ func (s *Service) startVerification(chat *tele.Chat, user *tele.User, joinEventM
 		zap.String("step", "restrict"),
 		zap.Duration("elapsed", time.Since(restrictStartedAt)),
 	)
-
-	// 去重锁：避免 OnUserJoined 和 OnChatMember 对同一 join 事件双触发
-	if s.redis != nil {
-		lockKey := fmt.Sprintf("clawguard:verify:lock:%d:%d", chat.ID, user.ID)
-		set, lockErr := s.redis.SetNX(ctx, lockKey, "1", 10*time.Second).Result()
-		if lockErr == nil && !set {
-			s.logger.Debug("skip duplicate join event", zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
-			return nil
-		}
-	}
 
 	s.startAsyncVerificationChecks(chat, user, policy)
 
