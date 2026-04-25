@@ -19,6 +19,7 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import { apiFetch } from "@/lib/api";
 import type { Group, Nullable } from "@/lib/types";
+import { validateHttpURL } from "@/lib/url";
 import { useToast } from "@/components/providers";
 
 type ScheduledButton = {
@@ -482,6 +483,8 @@ function validateForm(form: FormState) {
   if (form.auto_delete_seconds < 0 || form.auto_delete_seconds > 3600) return "自动删除秒数必须在 0-3600 之间";
   for (const button of form.buttons) {
     if ((button.text.trim() && !button.url.trim()) || (!button.text.trim() && button.url.trim())) return "按钮文本和链接都必须填写";
+    const urlError = validateHttpURL(button.url);
+    if (urlError) return urlError;
   }
   return "";
 }

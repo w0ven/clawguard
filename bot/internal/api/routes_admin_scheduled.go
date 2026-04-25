@@ -333,6 +333,9 @@ func normalizeScheduledButtons(buttons []scheduledButton) ([]byte, error) {
 		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
 			return nil, fmt.Errorf("按钮链接必须是完整 URL")
 		}
+		if parsed.Scheme != "http" && parsed.Scheme != "https" {
+			return nil, fmt.Errorf("按钮链接不支持 %s://，仅支持 http:// 或 https://", parsed.Scheme)
+		}
 		clean = append(clean, scheduledButton{Text: text, URL: link})
 	}
 	if len(clean) == 0 {
