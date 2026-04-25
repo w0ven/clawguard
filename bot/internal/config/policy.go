@@ -203,7 +203,6 @@ type AIPolicy struct {
 	MaxRetries              int               `json:"max_retries"`
 	GraduateAfterMessages   int               `json:"graduate_after_messages"`
 	GraduateAfterDays       int               `json:"graduate_after_days"`
-	DailyBudgetCents        int               `json:"daily_budget_cents"`
 	PerUserDailyLimit       int               `json:"per_user_daily_limit"`
 	SkipMessagesShorterThan int               `json:"skip_messages_shorter_than"`
 	BatchWindowMs           int               `json:"batch_window_ms"`
@@ -309,7 +308,6 @@ var DefaultPolicy = GuardPolicy{
 		MaxRetries:              2,
 		GraduateAfterMessages:   10,
 		GraduateAfterDays:       7,
-		DailyBudgetCents:        500,
 		PerUserDailyLimit:       50,
 		SkipMessagesShorterThan: 5,
 		BatchWindowMs:           500,
@@ -558,9 +556,6 @@ func applyAIDefaults(policy *AIPolicy) {
 	}
 	if policy.GraduateAfterDays <= 0 {
 		policy.GraduateAfterDays = DefaultPolicy.AI.GraduateAfterDays
-	}
-	if policy.DailyBudgetCents <= 0 {
-		policy.DailyBudgetCents = DefaultPolicy.AI.DailyBudgetCents
 	}
 	if policy.PerUserDailyLimit <= 0 {
 		policy.PerUserDailyLimit = DefaultPolicy.AI.PerUserDailyLimit
