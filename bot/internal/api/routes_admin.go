@@ -62,7 +62,7 @@ func (s *Server) registerAdminRoutes() {
 	admin.GET("/audit", s.handleListAudit)
 	admin.GET("/stats", s.handleStats)
 	admin.GET("/admins", s.handleListAdmins)
-	admin.POST("/admins", s.handleCreateAdmin)
+	admin.POST("/admins", s.requireOwner(s.handleCreateAdmin))
 	admin.PUT("/admins/:id", s.requireOwner(s.handleUpdateAdmin))
 	admin.DELETE("/admins/:id", s.requireOwner(s.handleDeleteAdmin))
 	admin.GET("/ai-models", s.handleListAIModels)
