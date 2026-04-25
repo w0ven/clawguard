@@ -69,6 +69,14 @@ type reviewableContent struct {
 }
 
 func (s *Service) handleIncomingMessage(c tele.Context) error {
+	return s.handleIncomingMessageWithOptions(c, false)
+}
+
+func (s *Service) handleEditedMessage(c tele.Context) error {
+	return s.handleIncomingMessageWithOptions(c, true)
+}
+
+func (s *Service) handleIncomingMessageWithOptions(c tele.Context, isEdited bool) error {
 	s.MarkUpdateSeen()
 	msg := c.Message()
 	if msg == nil || msg.Chat == nil || msg.Sender == nil || msg.Private() {
@@ -155,10 +163,10 @@ func (s *Service) handleIncomingMessage(c tele.Context) error {
 		return nil
 	}
 
-	return s.applyAIModeration(ctx, msg, policy, isAdmin, content)
+	return s.applyAIModeration(ctx, msg, policy, isAdmin, content, isEdited)
 }
 
-func (s *Service) applyAIModeration(ctx context.Context, msg *tele.Message, policy config.GuardPolicy, isAdmin bool, content reviewableContent) error {
+func (s *Service) applyAIModeration(ctx context.Context, msg *tele.Message, policy config.GuardPolicy, isAdmin bool, content reviewableContent, isEdited bool) error {
 	if msg == nil || msg.Chat == nil || msg.Sender == nil || !policy.AI.Enabled || s.aiModerator == nil {
 		return nil
 	}
@@ -242,7 +250,7 @@ func (s *Service) applyAIModeration(ctx context.Context, msg *tele.Message, poli
 	if err := s.recordAIDecision(ctx, msg, content.Text, output, action); err != nil {
 		s.logger.Warn("record ai decision failed", zap.Error(err))
 	}
-	if err := s.applyAIAction(ctx, msg, policy, trust, output, action); err != nil {
+	if err := s.applyAIAction(ctx, msg, policy, trust, output, action, isEdited); err != nil {
 		return err
 	}
 	return nil
@@ -1272,7 +1280,7 @@ func quotedMessageSource(msg *tele.Message) string {
 	return strconv.FormatInt(msg.Sender.ID, 10)
 }
 
-func (s *Service) applyAIAction(ctx context.Context, msg *tele.Message, policy config.GuardPolicy, trust store.UserTrust, output ai.CheckOutput, action string) error {
+func (s *Service) applyAIAction(ctx context.Context, msg *tele.Message, policy config.GuardPolicy, trust store.UserTrust, output ai.CheckOutput, action string, isEdited bool) error {
 	checkedDelta := int32(1)
 	cleanDelta := int32(0)
 	nextStatus := trust.Status
@@ -1320,18 +1328,23 @@ func (s *Service) applyAIAction(ctx context.Context, msg *tele.Message, policy c
 		score = minFloat64(1, trust.Score+0.05)
 	}
 
-	updated, err := s.queries.IncrementUserTrustCounters(ctx, store.IncrementUserTrustCountersParams{
-		ChatID:       msg.Chat.ID,
-		UserID:       msg.Sender.ID,
-		CheckedDelta: checkedDelta,
-		CleanDelta:   cleanDelta,
-		Score:        score,
-	})
-	if err != nil {
-		return err
+	updated := trust
+	if !isEdited {
+		var err error
+		updated, err = s.queries.IncrementUserTrustCounters(ctx, store.IncrementUserTrustCountersParams{
+			ChatID:       msg.Chat.ID,
+			UserID:       msg.Sender.ID,
+			CheckedDelta: checkedDelta,
+			CleanDelta:   cleanDelta,
+			Score:        score,
+		})
+		if err != nil {
+			return err
+		}
 	}
 
 	if nextStatus != "" && nextStatus != updated.Status {
+		var err error
 		now := time.Now()
 		var graduatedAt *time.Time
 		var bannedAt *time.Time
@@ -1359,6 +1372,9 @@ func (s *Service) applyAIAction(ctx context.Context, msg *tele.Message, policy c
 	}
 
 	if action == "none" {
+		if isEdited {
+			return nil
+		}
 		return s.maybeGraduateUser(ctx, updated, policy.AI)
 	}
 

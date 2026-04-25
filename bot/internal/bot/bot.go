@@ -233,6 +233,9 @@ func (s *Service) registerHandlers() {
 	s.bot.Handle(tele.OnText, func(c tele.Context) error {
 		return s.runHandler("text", c, s.handleIncomingMessage)
 	})
+	s.bot.Handle(tele.OnEdited, func(c tele.Context) error {
+		return s.runHandler("edited", c, s.handleEditedMessage)
+	})
 	s.bot.Handle(tele.OnPhoto, func(c tele.Context) error {
 		return s.runHandler("photo", c, s.handleIncomingMessage)
 	})
