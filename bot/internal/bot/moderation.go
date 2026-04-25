@@ -2477,6 +2477,27 @@ func extractForwardSource(msg *tele.Message) string {
 	if msg == nil {
 		return ""
 	}
+	if msg.Origin != nil {
+		if msg.Origin.SenderChat != nil {
+			if source := chatDisplayName(msg.Origin.SenderChat); source != "" {
+				return source
+			}
+		}
+		if msg.Origin.Chat != nil {
+			if source := chatDisplayName(msg.Origin.Chat); source != "" {
+				return source
+			}
+		}
+		if msg.Origin.Sender != nil {
+			return displayName(msg.Origin.Sender)
+		}
+		if source := strings.TrimSpace(msg.Origin.SenderUsername); source != "" {
+			return source
+		}
+		if source := strings.TrimSpace(msg.Origin.Signature); source != "" {
+			return source
+		}
+	}
 	// 转发自频道
 	if msg.OriginalChat != nil && msg.OriginalChat.Title != "" {
 		return msg.OriginalChat.Title
@@ -2490,6 +2511,19 @@ func extractForwardSource(msg *tele.Message) string {
 		return msg.OriginalSenderName
 	}
 	return ""
+}
+
+func chatDisplayName(chat *tele.Chat) string {
+	if chat == nil {
+		return ""
+	}
+	if title := strings.TrimSpace(chat.Title); title != "" {
+		return title
+	}
+	if username := strings.TrimSpace(chat.Username); username != "" {
+		return "@" + username
+	}
+	return strings.TrimSpace(chat.FirstName + " " + chat.LastName)
 }
 
 // matchesTriggerKeywords checks if a message text/caption/forward source contains any of the trigger keywords (case-insensitive fuzzy match).
