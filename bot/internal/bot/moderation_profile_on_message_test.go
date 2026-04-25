@@ -122,12 +122,13 @@ func newModerationProfileMatchMockDB(chatID, userID int64) *moderationProfileMat
 	return &moderationProfileMatchMockDB{
 		now: now,
 		userTrust: store.UserTrust{
-			ChatID:    chatID,
-			UserID:    userID,
-			JoinedAt:  now,
-			UpdatedAt: now,
-			Status:    "new",
-			Score:     0.5,
+			ChatID:          chatID,
+			UserID:          userID,
+			JoinedAt:        now,
+			UpdatedAt:       now,
+			StatusChangedAt: now,
+			Status:          "new",
+			Score:           0.5,
 		},
 		systemState: store.SystemState{
 			ID:        1,
@@ -173,6 +174,7 @@ func (db *moderationProfileMatchMockDB) QueryRow(_ context.Context, query string
 			trust.LastName,
 			trust.JoinedAt,
 			trust.UpdatedAt,
+			trust.StatusChangedAt,
 			trust.Status,
 			trust.Score,
 			trust.MessagesChecked,
@@ -299,6 +301,7 @@ func (db *moderationProfileMatchMockDB) QueryRow(_ context.Context, query string
 			trust.LastName,
 			trust.JoinedAt,
 			trust.UpdatedAt,
+			trust.StatusChangedAt,
 			trust.Status,
 			trust.Score,
 			trust.MessagesChecked,
@@ -316,6 +319,7 @@ func (db *moderationProfileMatchMockDB) QueryRow(_ context.Context, query string
 		db.userTrust.BannedAt = args[5].(*time.Time)
 		db.userTrust.BannedReason = args[6].([]byte)
 		db.userTrust.Notes = args[7].(*string)
+		db.userTrust.StatusChangedAt = db.now.Add(3 * time.Minute)
 		db.userTrust.UpdatedAt = db.now.Add(3 * time.Minute)
 		trust := db.userTrust
 		db.mu.Unlock()
@@ -327,6 +331,7 @@ func (db *moderationProfileMatchMockDB) QueryRow(_ context.Context, query string
 			trust.LastName,
 			trust.JoinedAt,
 			trust.UpdatedAt,
+			trust.StatusChangedAt,
 			trust.Status,
 			trust.Score,
 			trust.MessagesChecked,
