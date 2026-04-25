@@ -125,7 +125,9 @@ function AIReviewPageInner() {
     router.replace("/ai-review");
   }
 
-  async function applyDecision(item: AIDecision, override: string) {
+  async function applyDecision(item: AIDecision, override: string, options?: { reload?: boolean; toast?: boolean }) {
+    const shouldReload = options?.reload ?? true;
+    const shouldToast = options?.toast ?? true;
     try {
       const res = await apiFetch<{
         unban_performed?: boolean;
@@ -134,9 +136,10 @@ function AIReviewPageInner() {
         method: "PUT",
         body: JSON.stringify({ admin_override: override }),
       });
-      await load();
+      if (shouldReload) await load();
 
       // friendly toast based on real effect
+      if (!shouldToast) return;
       if (override === "false_positive") {
         if (res.unban_performed) {
           pushToast("已解封用户", "success");
@@ -149,15 +152,18 @@ function AIReviewPageInner() {
         pushToast("已标记为漏判", "success");
       }
     } catch (e) {
-      pushToast(e instanceof Error ? e.message : "操作失败", "error");
+      if (shouldToast) pushToast(e instanceof Error ? e.message : "操作失败", "error");
+      throw e;
     }
   }
 
   async function batchOverride(override: string) {
     const entries = Object.values(selected);
-    const results = await Promise.allSettled(entries.map((item) => applyDecision(item, override)));
+    const results = await Promise.allSettled(entries.map((item) => applyDecision(item, override, { reload: false, toast: false })));
     const success = results.filter((item) => item.status === "fulfilled").length;
-    pushToast(`成功 ${success} 条，失败 ${results.length - success} 条`, success ? "success" : "error");
+    const failed = results.length - success;
+    if (results.length > 0) await load();
+    pushToast(`批量操作完成：成功 ${success} 条，失败 ${failed} 条`, failed === 0 ? "success" : "error");
   }
 
   return (
