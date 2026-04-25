@@ -163,6 +163,7 @@ type UserTrust struct {
 	LastName        *string
 	JoinedAt        time.Time
 	UpdatedAt       time.Time
+	StatusChangedAt time.Time
 	Status          string
 	Score           float64
 	MessagesChecked int32

@@ -1545,10 +1545,14 @@ func normalizeTrustPenaltyAction(action string) string {
 }
 
 func (s *Service) maybeGraduateUser(ctx context.Context, trust store.UserTrust, policy config.AIPolicy) error {
-	if trust.Status == "trusted" || trust.Status == "banned" || trust.Status == "suspicious" {
+	if trust.Status == "trusted" || trust.Status == "banned" {
 		return nil
 	}
-	if int(trust.MessagesClean) < policy.GraduateAfterMessages && time.Since(trust.JoinedAt) < time.Duration(policy.GraduateAfterDays)*24*time.Hour {
+	if trust.Status == "suspicious" {
+		if trust.MessagesClean < 5 && time.Since(trust.StatusChangedAt) < 30*24*time.Hour {
+			return nil
+		}
+	} else if int(trust.MessagesClean) < policy.GraduateAfterMessages && time.Since(trust.JoinedAt) < time.Duration(policy.GraduateAfterDays)*24*time.Hour {
 		return nil
 	}
 	now := time.Now()
