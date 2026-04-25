@@ -100,13 +100,10 @@ func TestAsyncProfileCheck_ProfileOnMessageHit_RecordsAIDecisionAndBansTrust(t *
 	}
 
 	methods := transport.Methods()
-	for _, want := range []string{"getChat", "kickChatMember"} {
+	for _, want := range []string{"getChat", "kickChatMember", "deleteMessage"} {
 		if !containsString(methods, want) {
 			t.Fatalf("telegram methods = %v, missing %q", methods, want)
 		}
-	}
-	if containsString(methods, "deleteMessage") {
-		t.Fatalf("telegram methods = %v, should not delete triggering message in async path", methods)
 	}
 }
 

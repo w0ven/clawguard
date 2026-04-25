@@ -2190,7 +2190,14 @@ func (s *Service) handleProfileOnMessageViolation(
 		s.logger.Warn("record profile violation ai_decision failed", zap.Error(err))
 	}
 
-	// 方案 C：bio 审核改为异步后，不回溯删除触发消息，正文仍由消息 AI 正常审核。
+	if err := s.deleteMessage(msg); err != nil {
+		s.logger.Warn("delete on-message profile violation trigger failed",
+			zap.Error(err),
+			zap.Int64("chat_id", msg.Chat.ID),
+			zap.Int64("user_id", msg.Sender.ID),
+			zap.Int("message_id", msg.ID))
+	}
+
 	s.resetTrustAfterViolation(ctx, msg, "ban", stringPtr("profile_match_on_message: "+matched))
 	s.sendActionFeedback(msg.Chat, nil, policy.Feedback.Ban, map[string]string{
 		"user":         feedbackUserLabel(msg.Sender, policy.Feedback.Ban.ParseMode),
