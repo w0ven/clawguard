@@ -1775,7 +1775,6 @@ func (s *Service) handleStatusCommand(c tele.Context) error {
 		fmt.Sprintf("入群: %d  验证通过: %d  验证失败: %d", stats.JoinedCount, stats.VerificationPassedCount, stats.VerificationFailedCount),
 		fmt.Sprintf("AI 判定: %d 条 (ad: %d, scam: %d, clean: %d)", stats.AICalls, stats.AIAdCount, stats.AIScamCount, stats.AICleanCount),
 		fmt.Sprintf("封禁/移出: %d  警告: %d", stats.BanKickCount, stats.WarnCount),
-		fmt.Sprintf("AI 成本: %s", formatCents(stats.AICostCents)),
 	}
 	return c.Send(strings.Join(lines, "\n"), &tele.SendOptions{ParseMode: tele.ModeHTML})
 }

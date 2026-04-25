@@ -82,13 +82,7 @@ SELECT
         WHERE v.chat_id = $1
           AND v.created_at >= day_start.ts
           AND v.action LIKE '%warn%'
-    ), 0) AS warn_count,
-    COALESCE((
-        SELECT SUM(ad.cost_cents)::DOUBLE PRECISION
-        FROM ai_decisions ad, day_start
-        WHERE ad.chat_id = $1
-          AND ad.created_at >= day_start.ts
-    ), 0) AS ai_cost_cents
+    ), 0) AS warn_count
 `
 
 const countRecentViolationsByUser = `-- name: CountRecentViolationsByUser :one
@@ -131,7 +125,6 @@ func (q *Queries) GetTodayChatStats(ctx context.Context, chatID int64) (ChatToda
 		&stats.AICleanCount,
 		&stats.BanKickCount,
 		&stats.WarnCount,
-		&stats.AICostCents,
 	)
 	return stats, err
 }

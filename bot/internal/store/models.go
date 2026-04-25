@@ -74,15 +74,13 @@ type GlobalConfig struct {
 }
 
 type SystemState struct {
-	ID                 int32
-	AIPaused           bool
-	ActionsPaused      bool
-	Frozen             bool
-	AIPausedReason     string
-	AIBudgetLocked     bool
-	AIBudgetLockedDate *time.Time
-	UpdatedAt          time.Time
-	UpdatedBy          *int64
+	ID             int32
+	AIPaused       bool
+	ActionsPaused  bool
+	Frozen         bool
+	AIPausedReason string
+	UpdatedAt      time.Time
+	UpdatedBy      *int64
 }
 
 type PendingVerification struct {
@@ -191,34 +189,23 @@ type AIDecision struct {
 	ActionTaken   string
 	AdminOverride *string
 	LatencyMs     int32
-	CostCents     float64
 	CreatedAt     time.Time
 }
 
-type AICostStat struct {
-	Day       time.Time
-	Calls     int64
-	CostCents float64
-	Model     string
+type AICallDaily struct {
+	Date  time.Time
+	Calls int64
 }
 
-type AICostDaily struct {
-	Date      time.Time
-	CostCents float64
-	Calls     int64
+type AICallPerModel struct {
+	Model string
+	Calls int64
 }
 
-type AICostPerModel struct {
-	Model     string
-	CostCents float64
-	Calls     int64
-}
-
-type AICostPerChat struct {
-	ChatID    int64
-	Title     *string
-	CostCents float64
-	Calls     int64
+type AICallPerChat struct {
+	ChatID int64
+	Title  *string
+	Calls  int64
 }
 
 type LlmProvider struct {
@@ -311,7 +298,6 @@ type ChatTodayStats struct {
 	AICleanCount            int64
 	BanKickCount            int64
 	WarnCount               int64
-	AICostCents             float64
 }
 
 type ResolvedChatUser struct {

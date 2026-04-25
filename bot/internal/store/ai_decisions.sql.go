@@ -18,14 +18,13 @@ INSERT INTO ai_decisions (
     reason,
     action_taken,
     admin_override,
-    latency_ms,
-    cost_cents
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
-RETURNING id, chat_id, user_id, message_id, message_text, provider_id, model_id, model, prompt_version, verdict, confidence, category, reason, action_taken, admin_override, latency_ms, cost_cents, created_at
+    latency_ms
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+RETURNING id, chat_id, user_id, message_id, message_text, provider_id, model_id, model, prompt_version, verdict, confidence, category, reason, action_taken, admin_override, latency_ms, created_at
 `
 
 const listAIDecisions = `-- name: ListAIDecisions :many
-SELECT id, chat_id, user_id, message_id, message_text, provider_id, model_id, model, prompt_version, verdict, confidence, category, reason, action_taken, admin_override, latency_ms, cost_cents, created_at
+SELECT id, chat_id, user_id, message_id, message_text, provider_id, model_id, model, prompt_version, verdict, confidence, category, reason, action_taken, admin_override, latency_ms, created_at
 FROM ai_decisions
 WHERE ($1::BIGINT IS NULL OR chat_id = $1)
   AND ($2::BIGINT IS NULL OR user_id = $2)
@@ -44,7 +43,7 @@ LIMIT $9
 `
 
 const getAIDecisionByID = `-- name: GetAIDecisionByID :one
-SELECT id, chat_id, user_id, message_id, message_text, provider_id, model_id, model, prompt_version, verdict, confidence, category, reason, action_taken, admin_override, latency_ms, cost_cents, created_at
+SELECT id, chat_id, user_id, message_id, message_text, provider_id, model_id, model, prompt_version, verdict, confidence, category, reason, action_taken, admin_override, latency_ms, created_at
 FROM ai_decisions
 WHERE id = $1
 `
@@ -53,19 +52,7 @@ const updateAIDecisionOverride = `-- name: UpdateAIDecisionOverride :one
 UPDATE ai_decisions
 SET admin_override = $2
 WHERE id = $1
-RETURNING id, chat_id, user_id, message_id, message_text, provider_id, model_id, model, prompt_version, verdict, confidence, category, reason, action_taken, admin_override, latency_ms, cost_cents, created_at
-`
-
-const listAICostsByDay = `-- name: ListAICostsByDay :many
-SELECT
-    date_trunc('day', created_at) AS day,
-    COUNT(*)::BIGINT AS calls,
-    COALESCE(SUM(cost_cents), 0)::DOUBLE PRECISION AS cost_cents,
-    model
-FROM ai_decisions
-WHERE ($1::BIGINT IS NULL OR chat_id = $1)
-GROUP BY day, model
-ORDER BY day DESC, model ASC
+RETURNING id, chat_id, user_id, message_id, message_text, provider_id, model_id, model, prompt_version, verdict, confidence, category, reason, action_taken, admin_override, latency_ms, created_at
 `
 
 type InsertAIDecisionParams struct {
@@ -84,7 +71,6 @@ type InsertAIDecisionParams struct {
 	ActionTaken   string
 	AdminOverride *string
 	LatencyMs     int32
-	CostCents     float64
 }
 
 type ListAIDecisionsParams struct {
@@ -99,10 +85,14 @@ type ListAIDecisionsParams struct {
 	Limit         int32
 }
 
+func scanAIDecision(row interface{ Scan(...any) error }, i *AIDecision) error {
+	return row.Scan(&i.ID, &i.ChatID, &i.UserID, &i.MessageID, &i.MessageText, &i.ProviderID, &i.ModelID, &i.Model, &i.PromptVersion, &i.Verdict, &i.Confidence, &i.Category, &i.Reason, &i.ActionTaken, &i.AdminOverride, &i.LatencyMs, &i.CreatedAt)
+}
+
 func (q *Queries) InsertAIDecision(ctx context.Context, arg InsertAIDecisionParams) (AIDecision, error) {
-	row := q.db.QueryRow(ctx, insertAIDecision, arg.ChatID, arg.UserID, arg.MessageID, arg.MessageText, arg.ProviderID, arg.ModelID, arg.Model, arg.PromptVersion, arg.Verdict, arg.Confidence, arg.Category, arg.Reason, arg.ActionTaken, arg.AdminOverride, arg.LatencyMs, arg.CostCents)
+	row := q.db.QueryRow(ctx, insertAIDecision, arg.ChatID, arg.UserID, arg.MessageID, arg.MessageText, arg.ProviderID, arg.ModelID, arg.Model, arg.PromptVersion, arg.Verdict, arg.Confidence, arg.Category, arg.Reason, arg.ActionTaken, arg.AdminOverride, arg.LatencyMs)
 	var i AIDecision
-	err := row.Scan(&i.ID, &i.ChatID, &i.UserID, &i.MessageID, &i.MessageText, &i.ProviderID, &i.ModelID, &i.Model, &i.PromptVersion, &i.Verdict, &i.Confidence, &i.Category, &i.Reason, &i.ActionTaken, &i.AdminOverride, &i.LatencyMs, &i.CostCents, &i.CreatedAt)
+	err := scanAIDecision(row, &i)
 	return i, err
 }
 
@@ -116,7 +106,7 @@ func (q *Queries) ListAIDecisions(ctx context.Context, arg ListAIDecisionsParams
 	var items []AIDecision
 	for rows.Next() {
 		var i AIDecision
-		if err := rows.Scan(&i.ID, &i.ChatID, &i.UserID, &i.MessageID, &i.MessageText, &i.ProviderID, &i.ModelID, &i.Model, &i.PromptVersion, &i.Verdict, &i.Confidence, &i.Category, &i.Reason, &i.ActionTaken, &i.AdminOverride, &i.LatencyMs, &i.CostCents, &i.CreatedAt); err != nil {
+		if err := scanAIDecision(rows, &i); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -130,36 +120,15 @@ func (q *Queries) ListAIDecisions(ctx context.Context, arg ListAIDecisionsParams
 func (q *Queries) GetAIDecisionByID(ctx context.Context, id int64) (AIDecision, error) {
 	row := q.db.QueryRow(ctx, getAIDecisionByID, id)
 	var i AIDecision
-	err := row.Scan(&i.ID, &i.ChatID, &i.UserID, &i.MessageID, &i.MessageText, &i.ProviderID, &i.ModelID, &i.Model, &i.PromptVersion, &i.Verdict, &i.Confidence, &i.Category, &i.Reason, &i.ActionTaken, &i.AdminOverride, &i.LatencyMs, &i.CostCents, &i.CreatedAt)
+	err := scanAIDecision(row, &i)
 	return i, err
 }
 
 func (q *Queries) UpdateAIDecisionOverride(ctx context.Context, id int64, adminOverride *string) (AIDecision, error) {
 	row := q.db.QueryRow(ctx, updateAIDecisionOverride, id, adminOverride)
 	var i AIDecision
-	err := row.Scan(&i.ID, &i.ChatID, &i.UserID, &i.MessageID, &i.MessageText, &i.ProviderID, &i.ModelID, &i.Model, &i.PromptVersion, &i.Verdict, &i.Confidence, &i.Category, &i.Reason, &i.ActionTaken, &i.AdminOverride, &i.LatencyMs, &i.CostCents, &i.CreatedAt)
+	err := scanAIDecision(row, &i)
 	return i, err
-}
-
-func (q *Queries) ListAICostsByDay(ctx context.Context, chatID *int64) ([]AICostStat, error) {
-	rows, err := q.db.Query(ctx, listAICostsByDay, chatID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var items []AICostStat
-	for rows.Next() {
-		var i AICostStat
-		if err := rows.Scan(&i.Day, &i.Calls, &i.CostCents, &i.Model); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
 }
 
 const aggregateAIDecisionsByModel = `-- name: AggregateAIDecisionsByModel :many

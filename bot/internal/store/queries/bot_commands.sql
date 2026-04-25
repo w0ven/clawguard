@@ -78,13 +78,7 @@ SELECT
         WHERE v.chat_id = $1
           AND v.created_at >= day_start.ts
           AND v.action LIKE '%warn%'
-    ), 0) AS warn_count,
-    COALESCE((
-        SELECT SUM(ad.cost_cents)::DOUBLE PRECISION
-        FROM ai_decisions ad, day_start
-        WHERE ad.chat_id = $1
-          AND ad.created_at >= day_start.ts
-    ), 0) AS ai_cost_cents;
+    ), 0) AS warn_count;
 
 -- name: CountRecentViolationsByUser :one
 SELECT COUNT(*)::BIGINT

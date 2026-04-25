@@ -824,7 +824,6 @@ func (s *Service) recordAIDecision(ctx context.Context, msg *tele.Message, messa
 		Reason:        stringPtr(output.Verdict.Reason),
 		ActionTaken:   normalizeAIAction(action),
 		LatencyMs:     int32(output.LatencyMs),
-		CostCents:     output.CostCents,
 	})
 	return err
 }
@@ -851,7 +850,6 @@ func (s *Service) recordProfileViolationDecision(
 	var providerID *int64
 	var modelID *int64
 	var latencyMs int32
-	var costCents float64
 
 	if aiOutput != nil {
 		if value := strings.TrimSpace(strings.ToLower(aiOutput.Verdict.Verdict)); value != "" {
@@ -873,7 +871,6 @@ func (s *Service) recordProfileViolationDecision(
 		}
 		promptVersion = aiOutput.PromptVersion
 		latencyMs = int32(aiOutput.LatencyMs)
-		costCents = aiOutput.CostCents
 	}
 
 	messageID := int64(0)
@@ -900,7 +897,6 @@ func (s *Service) recordProfileViolationDecision(
 		Reason:        stringPtr(reason),
 		ActionTaken:   "ban",
 		LatencyMs:     latencyMs,
-		CostCents:     costCents,
 	})
 	return err
 }
@@ -928,7 +924,6 @@ func (s *Service) recordAIDecisionError(ctx context.Context, msg *tele.Message, 
 		Reason:        stringPtr(reason),
 		ActionTaken:   "error",
 		LatencyMs:     0,
-		CostCents:     0,
 	})
 	return err
 }

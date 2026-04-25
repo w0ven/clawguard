@@ -157,8 +157,6 @@ func (db *moderationProfileMatchMockDB) QueryRow(_ context.Context, query string
 			state.ActionsPaused,
 			state.Frozen,
 			state.AIPausedReason,
-			state.AIBudgetLocked,
-			state.AIBudgetLockedDate,
 			state.UpdatedAt,
 			state.UpdatedBy,
 		)
@@ -201,7 +199,6 @@ func (db *moderationProfileMatchMockDB) QueryRow(_ context.Context, query string
 			ActionTaken:   args[12].(string),
 			AdminOverride: args[13].(*string),
 			LatencyMs:     args[14].(int32),
-			CostCents:     args[15].(float64),
 		}
 		db.mu.Lock()
 		db.aiDecisions = append(db.aiDecisions, params)
@@ -225,7 +222,6 @@ func (db *moderationProfileMatchMockDB) QueryRow(_ context.Context, query string
 			params.ActionTaken,
 			params.AdminOverride,
 			params.LatencyMs,
-			params.CostCents,
 			createdAt,
 		)
 	case strings.Contains(query, "INSERT INTO violations"):

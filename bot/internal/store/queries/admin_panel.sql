@@ -82,8 +82,8 @@ SELECT
     (SELECT COUNT(*)::BIGINT FROM pending_verifications WHERE expires_at > NOW()) AS active_verifications,
     (SELECT COUNT(*)::BIGINT FROM violations WHERE created_at >= date_trunc('day', NOW())) AS today_violations;
 
--- name: GetTodayAICostCents :one
-SELECT COALESCE(SUM(cost_cents), 0)::DOUBLE PRECISION
+-- name: GetTodayAICallCount :one
+SELECT COUNT(*)::BIGINT
 FROM ai_decisions
 WHERE created_at >= CURRENT_DATE;
 

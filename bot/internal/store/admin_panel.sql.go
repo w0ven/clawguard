@@ -95,8 +95,8 @@ SELECT
     (SELECT COUNT(*)::BIGINT FROM violations WHERE created_at >= date_trunc('day', NOW())) AS today_violations
 `
 
-const getTodayAICostCents = `-- name: GetTodayAICostCents :one
-SELECT COALESCE(SUM(cost_cents), 0)::DOUBLE PRECISION
+const getTodayAICallCount = `-- name: GetTodayAICallCount :one
+SELECT COUNT(*)::BIGINT
 FROM ai_decisions
 WHERE created_at >= CURRENT_DATE
 `
@@ -334,8 +334,8 @@ func (q *Queries) GetAdminStats(ctx context.Context) (AdminStats, error) {
 	return i, err
 }
 
-func (q *Queries) GetTodayAICostCents(ctx context.Context) (float64, error) {
-	row := q.db.QueryRow(ctx, getTodayAICostCents)
+func (q *Queries) GetTodayAICallCount(ctx context.Context) (float64, error) {
+	row := q.db.QueryRow(ctx, getTodayAICallCount)
 	var value float64
 	err := row.Scan(&value)
 	return value, err
