@@ -1252,9 +1252,13 @@ func extractReviewableContent(msg *tele.Message) reviewableContent {
 		if msg.Photo != nil {
 			return reviewableContent{Text: "[图片]", Kind: "photo", HasImage: true}
 		}
-		return reviewableContent{Skip: true}
+		return reviewableContent{Text: "[视频]", Kind: "video"}
 	case msg.Document != nil:
-		return reviewableContent{Skip: true}
+		text := "[文件]"
+		if value := strings.TrimSpace(msg.Document.FileName); value != "" {
+			text += " " + value
+		}
+		return reviewableContent{Text: text, Kind: "document"}
 	default:
 		return reviewableContent{Skip: true}
 	}
