@@ -425,6 +425,26 @@ func (s *Service) startVerification(chat *tele.Chat, user *tele.User, joinEventM
 
 	flowStartedAt := time.Now()
 	ctx := context.Background()
+	authorized, err := s.IsAuthorizedGroup(ctx, chat.ID)
+	if err != nil {
+		s.logger.Warn("authorized group check failed for verification, skip flow", zap.Error(err), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
+		return nil
+	}
+	if !authorized {
+		s.logger.Info("verification skipped for unauthorized group", zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
+		return nil
+	}
+
+	state, err := s.GetSystemState(ctx)
+	if err != nil {
+		s.logger.Warn("load system state failed for verification, skip flow", zap.Error(err), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
+		return nil
+	}
+	if state.Frozen {
+		s.logger.Info("verification skipped because system is frozen", zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
+		return nil
+	}
+
 	policyStartedAt := time.Now()
 	policy, err := config.LoadPolicy(ctx, s.queries, chat.ID)
 	if err != nil {
