@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/rand"
 	"strconv"
@@ -382,6 +383,11 @@ func (s *Service) handleChatMemberUpdate(c tele.Context) error {
 	}
 
 	if member.User.IsBot {
+		return nil
+	}
+
+	if isLeaveTransition(update.OldChatMember, member) {
+		s.cleanupVerificationStateOnLeave(context.Background(), update.Chat, member.User)
 		return nil
 	}
 
@@ -1019,6 +1025,45 @@ func (s *Service) storePendingVerification(ctx context.Context, chatID int64, us
 		zap.Time("expires_at", expiresAt),
 	)
 	return nil
+}
+
+func (s *Service) cleanupVerificationStateOnLeave(ctx context.Context, chat *tele.Chat, user *tele.User) {
+	if chat == nil || user == nil {
+		return
+	}
+	pending, err := s.queries.GetPendingVerification(ctx, store.GetPendingVerificationParams{
+		ChatID: chat.ID,
+		UserID: user.ID,
+	})
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		s.logger.Warn("load pending verification on leave failed", zap.Error(err), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
+	}
+	if err == nil {
+		s.deleteVerificationMessage(chat, pending.JoinMessageID)
+	}
+	if err := s.queries.DeletePendingVerification(ctx, store.DeletePendingVerificationParams{
+		ChatID: chat.ID,
+		UserID: user.ID,
+	}); err != nil {
+		s.logger.Warn("delete pending verification on leave failed", zap.Error(err), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
+	}
+	if s.redis != nil {
+		lockKey := fmt.Sprintf("clawguard:verify:lock:%d:%d", chat.ID, user.ID)
+		if err := s.redis.Del(ctx, lockKey).Err(); err != nil {
+			s.logger.Warn("delete verification join lock on leave failed", zap.Error(err), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
+		}
+	}
+	s.bioCheckInFlight.Delete(user.ID)
+}
+
+func isLeaveTransition(oldMember, newMember *tele.ChatMember) bool {
+	if oldMember == nil || newMember == nil {
+		return false
+	}
+	if oldMember.Role == tele.Left || oldMember.Role == tele.Kicked {
+		return false
+	}
+	return newMember.Role == tele.Left || newMember.Role == tele.Kicked
 }
 
 func isJoinTransition(oldMember, newMember *tele.ChatMember) bool {
