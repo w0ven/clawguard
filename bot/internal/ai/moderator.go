@@ -27,31 +27,17 @@ const (
 
 const reserveQuotaScript = `
 local userLimit = tonumber(ARGV[1]) or 0
-local budgetLimit = tonumber(ARGV[2]) or 0
-local ttl = tonumber(ARGV[3]) or 172800
+local ttl = tonumber(ARGV[2]) or 172800
 if userLimit > 0 then
 	local current = tonumber(redis.call("GET", KEYS[1]) or "0")
 	if current >= userLimit then
 		return {0, "user"}
 	end
-end
-if budgetLimit > 0 then
-	local current = tonumber(redis.call("GET", KEYS[2]) or "0")
-	if current >= budgetLimit then
-		return {0, "budget"}
-	end
-end
-if userLimit > 0 then
 	redis.call("INCR", KEYS[1])
 	redis.call("EXPIRE", KEYS[1], ttl)
 end
-if budgetLimit > 0 then
-	redis.call("INCRBYFLOAT", KEYS[2], "1")
-	redis.call("EXPIRE", KEYS[2], ttl)
-end
 return {1, "ok"}
 `
-
 const messageBasePrompt = `你是一个中文群聊反垃圾审核员。判断下面的消息属于哪类：
 - normal（正常对话）
 - ad（商业广告、引流、招聘、交友、币圈、刷单等）
@@ -209,14 +195,6 @@ func (m *Moderator) saveCacheWithTimeout(input CheckInput, output CheckOutput) {
 	}
 }
 
-func (m *Moderator) bumpBudgetWithTimeout(chatID int64, costCents float64) {
-	budgetCtx, cancel := m.persistenceContext()
-	defer cancel()
-	if err := m.BumpBudget(budgetCtx, chatID, costCents); err != nil {
-		m.logger.Debug("bump ai budget failed", zap.Error(err), zap.Int64("chat_id", chatID))
-	}
-}
-
 func (m *Moderator) CheckMessage(ctx context.Context, input CheckInput) (CheckOutput, error) {
 	if strings.TrimSpace(input.Text) == "" && strings.TrimSpace(input.ImageBase64) == "" {
 		return CheckOutput{Skipped: true}, nil
@@ -240,17 +218,12 @@ func (m *Moderator) CheckMessage(ctx context.Context, input CheckInput) (CheckOu
 			m.logger.Warn("load ai cache failed", zap.Error(err))
 		}
 	}
-	reserved, reserveReason, err := m.reserveQuota(ctx, input)
+	reserved, _, err := m.reserveQuota(ctx, input)
 	if err != nil {
 		m.logger.Warn("reserve ai quota failed, skip ai", zap.Error(err), zap.Int64("chat_id", input.ChatID), zap.Int64("user_id", input.UserID))
 		return CheckOutput{Skipped: true}, nil
 	}
 	if !reserved {
-		if reserveReason == "budget" {
-			if lockErr := m.lockBudget(ctx); lockErr != nil {
-				m.logger.Warn("lock ai budget failed", zap.Error(lockErr))
-			}
-		}
 		return CheckOutput{Skipped: true}, nil
 	}
 
@@ -396,11 +369,10 @@ func (m *Moderator) checkBatch(ctx context.Context, inputs []CheckInput) ([]Chec
 					ModelID:       model.ID,
 					PromptVersion: promptVersion,
 					LatencyMs:     result.LatencyMs,
-					CostCents:     result.CostCents / float64(maxInt(1, len(inputs))),
+					CostCents:     result.CostCents / float64(max(1, len(inputs))),
 					FlagOnly:      flagOnly,
 				}
 				m.saveCacheWithTimeout(inputs[index], outputs[index])
-				m.bumpBudgetWithTimeout(inputs[index].ChatID, outputs[index].CostCents)
 			}
 			if m.status != nil {
 				m.status.MarkAISuccess()
@@ -522,7 +494,6 @@ func (m *Moderator) checkSingle(ctx context.Context, input CheckInput) (CheckOut
 				FlagOnly:      flagOnly,
 			}
 			m.saveCacheWithTimeout(input, output)
-			m.bumpBudgetWithTimeout(input.ChatID, output.CostCents)
 			if m.status != nil {
 				m.status.MarkAISuccess()
 			}
@@ -775,16 +746,12 @@ func (m *Moderator) saveCache(ctx context.Context, input CheckInput, output Chec
 }
 
 func (m *Moderator) reserveQuota(ctx context.Context, input CheckInput) (bool, string, error) {
-	if m.redis == nil {
-		return false, "redis_unavailable", errors.New("redis unavailable for ai quota reservation")
-	}
-	if input.Policy.PerUserDailyLimit <= 0 && input.Policy.DailyBudgetCents <= 0 {
+	if m.redis == nil || input.Policy.PerUserDailyLimit <= 0 {
 		return true, "ok", nil
 	}
 	date := time.Now().Format("2006-01-02")
 	userKey := "ai:usercount:" + date + ":" + strconv.FormatInt(input.ChatID, 10) + ":" + strconv.FormatInt(input.UserID, 10)
-	budgetKey := "ai:budget:" + date + ":" + strconv.FormatInt(input.ChatID, 10)
-	result, err := m.redis.Eval(ctx, reserveQuotaScript, []string{userKey, budgetKey}, input.Policy.PerUserDailyLimit, input.Policy.DailyBudgetCents, int((48 * time.Hour).Seconds())).Slice()
+	result, err := m.redis.Eval(ctx, reserveQuotaScript, []string{userKey}, input.Policy.PerUserDailyLimit, int((48 * time.Hour).Seconds())).Slice()
 	if err != nil {
 		return false, "redis_error", err
 	}
@@ -818,22 +785,6 @@ func (m *Moderator) acquireInflight(chatID int64) (func(), bool) {
 	}, true
 }
 
-func (m *Moderator) overBudget(ctx context.Context, chatID int64, policy config.AIPolicy) (bool, error) {
-	if m.redis == nil || policy.DailyBudgetCents <= 0 {
-		return false, nil
-	}
-	key := "ai:budget:" + time.Now().Format("2006-01-02") + ":" + strconv.FormatInt(chatID, 10)
-	value, err := m.redis.Get(ctx, key).Result()
-	if err != nil {
-		if errors.Is(err, redis.Nil) {
-			return false, nil
-		}
-		return false, err
-	}
-	used, _ := strconv.ParseFloat(value, 64)
-	return int(used) >= policy.DailyBudgetCents, nil
-}
-
 func (m *Moderator) overPerUserLimit(ctx context.Context, input CheckInput) (bool, error) {
 	if m.redis == nil || input.Policy.PerUserDailyLimit <= 0 {
 		return false, nil
@@ -862,70 +813,9 @@ func (m *Moderator) bumpUserCounter(ctx context.Context, input CheckInput) error
 	return err
 }
 
-func (m *Moderator) BumpBudget(ctx context.Context, chatID int64, costCents float64) error {
-	if m.redis == nil || costCents <= 0 {
-		return nil
-	}
-	key := "ai:budget:" + time.Now().Format("2006-01-02") + ":" + strconv.FormatInt(chatID, 10)
-	pipe := m.redis.TxPipeline()
-	pipe.IncrByFloat(ctx, key, costCents)
-	pipe.Expire(ctx, key, 48*time.Hour)
-	_, err := pipe.Exec(ctx)
-	return err
-}
-
 func (m *Moderator) getSystemState(ctx context.Context) (store.SystemState, error) {
 	if m.queries == nil {
 		return store.SystemState{}, pgx.ErrNoRows
 	}
 	return m.queries.GetSystemState(ctx)
-}
-
-func (m *Moderator) lockBudget(ctx context.Context) error {
-	if m.queries == nil {
-		return nil
-	}
-	state, err := m.queries.GetSystemState(ctx)
-	if err != nil {
-		return err
-	}
-	if state.AIBudgetLocked && state.AIPaused {
-		return nil
-	}
-	today := time.Now().Truncate(24 * time.Hour)
-	updated, err := m.queries.UpdateSystemState(ctx, store.UpdateSystemStateParams{
-		AIPaused:           true,
-		ActionsPaused:      state.ActionsPaused,
-		Frozen:             state.Frozen,
-		AIPausedReason:     "daily budget exhausted",
-		AIBudgetLocked:     true,
-		AIBudgetLockedDate: &today,
-		UpdatedBy:          nil,
-	})
-	if err != nil {
-		return err
-	}
-	diff := "changed keys: ai_paused, ai_paused_reason, ai_budget_locked, ai_budget_locked_date"
-	beforeRaw, _ := json.Marshal(state)
-	afterRaw, _ := json.Marshal(updated)
-	_, auditErr := m.queries.InsertAuditEntry(ctx, store.InsertAuditEntryParams{
-		Scope:   "global",
-		ChatID:  nil,
-		AdminID: 0,
-		Action:  "ai_budget_lock",
-		Before:  beforeRaw,
-		After:   afterRaw,
-		Diff:    &diff,
-	})
-	if auditErr != nil {
-		m.logger.Warn("write ai budget audit failed", zap.Error(auditErr))
-	}
-	return nil
-}
-
-func maxInt(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
 }
