@@ -3,5 +3,4 @@ ALTER TABLE ai_decisions
 ADD COLUMN IF NOT EXISTS action_taken TEXT NOT NULL DEFAULT 'none';
 
 -- +goose Down
-ALTER TABLE ai_decisions
-DROP COLUMN IF EXISTS action_taken;
+-- action_taken belongs to 00006_user_trust.sql; down must preserve the 00006 schema.
