@@ -2,6 +2,10 @@ package bot
 
 import (
 	"context"
+	"crypto/hmac"
+	crand "crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"math/rand"
@@ -45,8 +49,12 @@ type Service struct {
 }
 
 type buttonPayload struct {
-	ButtonUnique string    `json:"button_unique"`
-	CreatedAt    time.Time `json:"created_at"`
+	ButtonUnique  string    `json:"button_unique"`
+	CreatedAt     time.Time `json:"created_at"`
+	Nonce         string    `json:"nonce"`
+	Signature     string    `json:"signature"`
+	MessageID     int64     `json:"message_id"`
+	ExpiresAtUnix int64     `json:"expires_at_unix"`
 }
 
 type mathPayload struct {
@@ -61,6 +69,11 @@ type randomPayload struct {
 type verifyCallbackPayload struct {
 	UserID int64
 	Value  string
+}
+
+type signedButtonCallbackPayload struct {
+	Nonce     string
+	Signature string
 }
 
 // computeProfileCheckTimeout gives the AI fallback chain enough budget to complete
@@ -860,24 +873,45 @@ func (s *Service) awaitPendingVerification(ctx context.Context, chatID, userID i
 }
 
 func (s *Service) startButtonVerification(ctx context.Context, chat *tele.Chat, user *tele.User, policy config.GuardPolicy) error {
-	markup := &tele.ReplyMarkup{}
-	button := markup.Data("我是人类 ✅", s.verifyBtn.Unique, strconv.FormatInt(user.ID, 10))
-	markup.Inline(markup.Row(button))
-
 	prompt := fmt.Sprintf(`<a href="tg://user?id=%d">%s</a> 你好，请在 %s 内<b>先阅读下面文字 3 秒</b>后再点击按钮`, user.ID, htmlEscape(displayName(user)), formatTimeout(policy.Verify.TimeoutSeconds))
 	sent, err := s.bot.Send(chat, prompt, &tele.SendOptions{
 		ParseMode:             tele.ModeHTML,
 		DisableWebPagePreview: true,
-		ReplyMarkup:           markup,
 	})
 	if err != nil {
 		s.logger.Error("send verification prompt", zap.Error(err), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
 		return err
 	}
 
+	createdAt := time.Now()
+	expiresAt := createdAt.Add(time.Duration(policy.Verify.TimeoutSeconds) * time.Second)
+	nonce, err := generateShortNonce()
+	if err != nil {
+		s.deleteVerificationMessage(chat, int64Ptr(int64(sent.ID)))
+		return err
+	}
+	signature := s.signVerificationCallback(chat.ID, user.ID, int64(sent.ID), "button", expiresAt.Unix(), nonce)
+	callbackData := formatSignedButtonCallbackData(nonce, signature)
+	if len("\f"+s.verifyBtn.Unique+"|"+callbackData) > 64 {
+		s.deleteVerificationMessage(chat, int64Ptr(int64(sent.ID)))
+		return fmt.Errorf("button callback_data too long")
+	}
+
+	markup := &tele.ReplyMarkup{}
+	button := markup.Data("我是人类 ✅", s.verifyBtn.Unique, callbackData)
+	markup.Inline(markup.Row(button))
+	if _, err := s.bot.EditReplyMarkup(sent, markup); err != nil {
+		s.deleteVerificationMessage(chat, int64Ptr(int64(sent.ID)))
+		return err
+	}
+
 	payload, err := json.Marshal(buttonPayload{
-		ButtonUnique: s.verifyBtn.Unique,
-		CreatedAt:    time.Now(),
+		ButtonUnique:  s.verifyBtn.Unique,
+		CreatedAt:     createdAt,
+		Nonce:         nonce,
+		Signature:     signature,
+		MessageID:     int64(sent.ID),
+		ExpiresAtUnix: expiresAt.Unix(),
 	})
 	if err != nil {
 		s.deleteVerificationMessage(chat, int64Ptr(int64(sent.ID)))
@@ -1014,14 +1048,10 @@ func (s *Service) handleVerifyButton(c tele.Context) error {
 		return nil
 	}
 
-	expectedUserID, err := strconv.ParseInt(c.Data(), 10, 64)
+	callbackPayload, err := parseSignedButtonCallbackData(c.Data())
 	if err != nil {
 		s.logger.Warn("invalid button callback payload", zap.Error(err))
 		return c.Respond(&tele.CallbackResponse{Text: "验证参数无效", ShowAlert: true})
-	}
-
-	if expectedUserID != sender.ID {
-		return c.Respond(&tele.CallbackResponse{Text: "只能由加入群组的本人点击", ShowAlert: true})
 	}
 
 	pending, err := s.queries.GetPendingVerification(context.Background(), store.GetPendingVerificationParams{
@@ -1042,7 +1072,24 @@ func (s *Service) handleVerifyButton(c tele.Context) error {
 
 	payload := buttonPayload{}
 	if err := json.Unmarshal(pending.Payload, &payload); err != nil {
-		s.logger.Warn("decode button payload failed, fallback to pending timestamp", zap.Error(err), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", sender.ID))
+		s.logger.Warn("decode button payload failed", zap.Error(err), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", sender.ID))
+		return c.Respond(&tele.CallbackResponse{Text: "验证参数无效", ShowAlert: true})
+	}
+	if callback.Message == nil || int64(callback.Message.ID) != payload.MessageID {
+		return c.Respond(&tele.CallbackResponse{Text: "验证按钮已失效", ShowAlert: true})
+	}
+	if payload.Nonce == "" || payload.Signature == "" || payload.ExpiresAtUnix == 0 {
+		return c.Respond(&tele.CallbackResponse{Text: "验证参数无效", ShowAlert: true})
+	}
+	if callbackPayload.Nonce != payload.Nonce || callbackPayload.Signature != payload.Signature {
+		return c.Respond(&tele.CallbackResponse{Text: "验证按钮已失效", ShowAlert: true})
+	}
+	if time.Now().Unix() >= payload.ExpiresAtUnix {
+		return c.Respond(&tele.CallbackResponse{Text: "验证已超时", ShowAlert: true})
+	}
+	expectedSignature := s.signVerificationCallback(chat.ID, sender.ID, payload.MessageID, pending.Method, payload.ExpiresAtUnix, payload.Nonce)
+	if !hmac.Equal([]byte(payload.Signature), []byte(expectedSignature)) {
+		return c.Respond(&tele.CallbackResponse{Text: "验证按钮已失效", ShowAlert: true})
 	}
 
 	createdAt := pending.CreatedAt
@@ -1426,6 +1473,40 @@ func buildRandomEmojiChallenge() ([]string, string) {
 	})
 
 	return options, answer
+}
+
+func generateShortNonce() (string, error) {
+	raw := make([]byte, 8)
+	if _, err := crand.Read(raw); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(raw), nil
+}
+
+func (s *Service) signVerificationCallback(chatID, userID, messageID int64, method string, expiresAtUnix int64, nonce string) string {
+	secret := s.cfg.JWTSecret
+	if strings.TrimSpace(secret) == "" {
+		secret = s.cfg.WebhookSecret
+	}
+	if strings.TrimSpace(secret) == "" {
+		secret = s.cfg.BotToken
+	}
+	mac := hmac.New(sha256.New, []byte(secret))
+	_, _ = fmt.Fprintf(mac, "%d:%d:%d:%s:%d:%s", chatID, userID, messageID, method, expiresAtUnix, nonce)
+	sum := mac.Sum(nil)
+	return base64.RawURLEncoding.EncodeToString(sum[:12])
+}
+
+func formatSignedButtonCallbackData(nonce, signature string) string {
+	return "b." + nonce + "." + signature
+}
+
+func parseSignedButtonCallbackData(raw string) (signedButtonCallbackPayload, error) {
+	parts := strings.Split(raw, ".")
+	if len(parts) != 3 || parts[0] != "b" || parts[1] == "" || parts[2] == "" {
+		return signedButtonCallbackPayload{}, fmt.Errorf("invalid signed button callback payload")
+	}
+	return signedButtonCallbackPayload{Nonce: parts[1], Signature: parts[2]}, nil
 }
 
 func parseVerifyCallbackData(raw string) (verifyCallbackPayload, error) {
