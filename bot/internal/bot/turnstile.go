@@ -88,7 +88,7 @@ func (s *Service) startTurnstileVerification(ctx context.Context, chat *tele.Cha
 	markup.Inline(markup.Row(button))
 
 	prompt := fmt.Sprintf(`%s 你好，请在 %s 内点击下方链接完成人机验证`, mentionHTML(user), formatTimeout(policy.Verify.TimeoutSeconds))
-	sent, err := s.bot.Send(chat, prompt, &tele.SendOptions{
+	sent, err := s.sendThrottled(ctx, chat, prompt, &tele.SendOptions{
 		ParseMode:             tele.ModeHTML,
 		DisableWebPagePreview: true,
 		ReplyMarkup:           markup,

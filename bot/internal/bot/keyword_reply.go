@@ -78,7 +78,7 @@ func (s *Service) tryKeywordReply(ctx context.Context, msg *tele.Message, policy
 
 		rendered := renderKeywordReply(msg, keyword, replyText, rule.ParseMode)
 		parseMode := resolveParseMode(rule.ParseMode)
-		sent, sendErr := s.bot.Send(msg.Chat, rendered, &tele.SendOptions{
+		sent, sendErr := s.sendThrottled(ctx, msg.Chat, rendered, &tele.SendOptions{
 			ParseMode:             parseMode,
 			DisableWebPagePreview: true,
 			ReplyTo:               msg,

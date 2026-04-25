@@ -3,6 +3,7 @@ package scheduler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -23,22 +24,30 @@ type Button struct {
 }
 
 type Scheduler struct {
-	cron    *cron.Cron
-	queries *store.Queries
-	bot     *tele.Bot
-	logger  *zap.Logger
+	cron        *cron.Cron
+	queries     *store.Queries
+	bot         *tele.Bot
+	sendLimiter interface {
+		WaitChat(context.Context, int64) error
+		WaitGlobal(context.Context) error
+	}
+	logger *zap.Logger
 
 	mu      sync.Mutex
 	entries map[int64][]cron.EntryID
 }
 
-func New(logger *zap.Logger, queries *store.Queries, bot *tele.Bot) *Scheduler {
+func New(logger *zap.Logger, queries *store.Queries, bot *tele.Bot, sendLimiter interface {
+	WaitChat(context.Context, int64) error
+	WaitGlobal(context.Context) error
+}) *Scheduler {
 	return &Scheduler{
-		cron:    cron.New(cron.WithLocation(time.UTC), cron.WithSeconds()),
-		queries: queries,
-		bot:     bot,
-		logger:  logger,
-		entries: make(map[int64][]cron.EntryID),
+		cron:        cron.New(cron.WithLocation(time.UTC), cron.WithSeconds()),
+		queries:     queries,
+		bot:         bot,
+		sendLimiter: sendLimiter,
+		logger:      logger,
+		entries:     make(map[int64][]cron.EntryID),
 	}
 }
 
@@ -190,7 +199,7 @@ func (s *Scheduler) run(ctx context.Context, id int64, manual bool) error {
 			case <-timer.C:
 			}
 		}
-		sent, sendErr = s.bot.Send(chat, rendered, options)
+		sent, sendErr = s.sendThrottled(ctx, chat, rendered, options)
 		if sendErr == nil {
 			break
 		}
@@ -332,6 +341,52 @@ func (s *Scheduler) deleteLater(chatID int64, messageID int, delay time.Duration
 	<-timer.C
 	if err := s.bot.Delete(&tele.Message{ID: messageID, Chat: &tele.Chat{ID: chatID}}); err != nil {
 		s.logger.Warn("auto delete scheduled message failed", zap.Error(err), zap.Int64("chat_id", chatID), zap.Int("message_id", messageID))
+	}
+}
+
+func (s *Scheduler) sendThrottled(ctx context.Context, chat *tele.Chat, what interface{}, opts ...interface{}) (*tele.Message, error) {
+	if s.sendLimiter != nil {
+		if err := s.sendLimiter.WaitChat(ctx, chat.ID); err != nil {
+			return nil, err
+		}
+		if err := s.sendLimiter.WaitGlobal(ctx); err != nil {
+			return nil, err
+		}
+	}
+	sent, err := s.bot.Send(chat, what, opts...)
+	if err == nil {
+		return sent, nil
+	}
+	retryAfter, ok := floodRetryAfter(err)
+	if !ok {
+		return nil, err
+	}
+	if err := sleepContext(ctx, time.Duration(retryAfter+1)*time.Second); err != nil {
+		return nil, err
+	}
+	return s.bot.Send(chat, what, opts...)
+}
+
+func floodRetryAfter(err error) (int, bool) {
+	var flood *tele.FloodError
+	if errors.As(err, &flood) && flood != nil {
+		return flood.RetryAfter, true
+	}
+	var teleErr *tele.Error
+	if errors.As(err, &teleErr) && teleErr != nil && teleErr.Code == 429 {
+		return 0, true
+	}
+	return 0, false
+}
+
+func sleepContext(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
 	}
 }
 

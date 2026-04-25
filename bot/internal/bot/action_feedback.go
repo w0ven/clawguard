@@ -45,7 +45,7 @@ func (s *Service) sendActionFeedback(
 		opts.ReplyTo = replyTo
 	}
 
-	sent, err := s.bot.Send(chat, rendered, opts)
+	sent, err := s.sendThrottled(context.Background(), chat, rendered, opts)
 	if err != nil {
 		s.logger.Warn("send action feedback failed",
 			zap.Error(err),

@@ -38,6 +38,8 @@ type Service struct {
 	aiResolver       *ai.Resolver
 	aiModerator      *ai.Moderator
 	bot              *tele.Bot
+	sender           telegramSender
+	sendLimiter      *SendLimiter
 	verifyBtn        tele.Btn
 	verifyMathBtn    tele.Btn
 	verifyRandBtn    tele.Btn
@@ -132,6 +134,8 @@ func New(cfg config.Config, logger *zap.Logger, queries *store.Queries, rdb redi
 		redis:         rdb,
 		casClient:     casclient.New(nil, rdb),
 		bot:           b,
+		sender:        b,
+		sendLimiter:   NewSendLimiter(),
 		verifyBtn:     verifyBtn,
 		verifyMathBtn: verifyMathBtn,
 		verifyRandBtn: verifyRandBtn,
@@ -215,7 +219,7 @@ func (s *Service) SendHTMLPrivateMessage(telegramID int64, text string) error {
 	if telegramID == 0 || strings.TrimSpace(text) == "" {
 		return nil
 	}
-	_, err := s.bot.Send(&tele.User{ID: telegramID}, text, &tele.SendOptions{ParseMode: tele.ModeHTML})
+	_, err := s.sendThrottled(context.Background(), &tele.User{ID: telegramID}, text, &tele.SendOptions{ParseMode: tele.ModeHTML})
 	return err
 }
 
@@ -880,7 +884,7 @@ func (s *Service) awaitPendingVerification(ctx context.Context, chatID, userID i
 
 func (s *Service) startButtonVerification(ctx context.Context, chat *tele.Chat, user *tele.User, policy config.GuardPolicy) error {
 	prompt := fmt.Sprintf(`<a href="tg://user?id=%d">%s</a> 你好，请在 %s 内<b>先阅读下面文字 3 秒</b>后再点击按钮`, user.ID, htmlEscape(displayName(user)), formatTimeout(policy.Verify.TimeoutSeconds))
-	sent, err := s.bot.Send(chat, prompt, &tele.SendOptions{
+	sent, err := s.sendThrottled(ctx, chat, prompt, &tele.SendOptions{
 		ParseMode:             tele.ModeHTML,
 		DisableWebPagePreview: true,
 	})
@@ -942,7 +946,7 @@ func (s *Service) startMathVerification(ctx context.Context, chat *tele.Chat, us
 	markup.Inline(row)
 
 	prompt := fmt.Sprintf(`<a href="tg://user?id=%d">%s</a> 你好，请在 %s 内回答：%s`, user.ID, htmlEscape(displayName(user)), formatTimeout(policy.Verify.TimeoutSeconds), htmlEscape(question))
-	sent, err := s.bot.Send(chat, prompt, &tele.SendOptions{
+	sent, err := s.sendThrottled(ctx, chat, prompt, &tele.SendOptions{
 		ParseMode:             tele.ModeHTML,
 		DisableWebPagePreview: true,
 		ReplyMarkup:           markup,
@@ -976,7 +980,7 @@ func (s *Service) startRandomVerification(ctx context.Context, chat *tele.Chat, 
 	markup.Inline(row)
 
 	prompt := fmt.Sprintf(`%s 你好，请在 %s 内点击 %s ✅`, mentionHTML(user), formatTimeout(policy.Verify.TimeoutSeconds), htmlEscape(answer))
-	sent, err := s.bot.Send(chat, prompt, &tele.SendOptions{
+	sent, err := s.sendThrottled(ctx, chat, prompt, &tele.SendOptions{
 		ParseMode:             tele.ModeHTML,
 		DisableWebPagePreview: true,
 		ReplyMarkup:           markup,
@@ -1945,7 +1949,7 @@ func (s *Service) handleSpamCommand(c tele.Context) error {
 	}
 
 	// 9. Send confirmation then auto-delete after 5s
-	confirm, _ := s.bot.Send(chat, "\U0001f6a8 已将 "+htmlEscape(target.Display)+" 封禁", &tele.SendOptions{ParseMode: tele.ModeHTML})
+	confirm, _ := s.sendThrottled(ctx, chat, "\U0001f6a8 已将 "+htmlEscape(target.Display)+" 封禁", &tele.SendOptions{ParseMode: tele.ModeHTML})
 	if confirm != nil {
 		go func() {
 			time.Sleep(5 * time.Second)
@@ -2261,7 +2265,7 @@ func (s *Service) sendBotPermissionWarningToChat(chat *tele.Chat, message string
 	if chat == nil {
 		return
 	}
-	if _, err := s.bot.Send(chat, message, &tele.SendOptions{ParseMode: tele.ModeHTML, DisableWebPagePreview: true}); err != nil {
+	if _, err := s.sendThrottled(context.Background(), chat, message, &tele.SendOptions{ParseMode: tele.ModeHTML, DisableWebPagePreview: true}); err != nil {
 		s.logger.Warn("send bot permission warning to chat failed", zap.Error(err), zap.Int64("chat_id", chat.ID))
 	}
 }

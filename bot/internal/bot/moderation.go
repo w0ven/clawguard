@@ -2361,7 +2361,7 @@ func (s *Service) sendWelcomeMessage(ctx context.Context, chat *tele.Chat, user 
 
 	parseMode := resolveParseMode(welcome.ParseMode)
 
-	message, err := s.bot.Send(chat, text, &tele.SendOptions{
+	message, err := s.sendThrottled(ctx, chat, text, &tele.SendOptions{
 		ParseMode:             parseMode,
 		DisableWebPagePreview: true,
 	})

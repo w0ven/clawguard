@@ -100,7 +100,7 @@ func main() {
 		logger.Fatal("register webhook", zap.Error(err))
 	}
 
-	scheduledMessages := scheduler.New(logger, queries, botService.TelegramBot())
+	scheduledMessages := scheduler.New(logger, queries, botService.TelegramBot(), botService.SendLimiter())
 	if err := scheduledMessages.LoadActive(ctx); err != nil {
 		logger.Fatal("load scheduled messages", zap.Error(err))
 	}
