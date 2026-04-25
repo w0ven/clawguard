@@ -1923,7 +1923,10 @@ func adminCanAccessChat(admin store.Admin, chatID int64) bool {
 
 func adminScopeFilter(admin store.Admin) ([]int64, bool) {
 	if adminHasGlobalAccess(admin) {
-		return nil, true
+		// Keep a typed, non-nil slice for pgx array parameters even when scope is global.
+		// The SQL short-circuits on scope_global=true, but pgx still has to encode
+		// the array argument for $N::BIGINT[]. A nil slice can fail at runtime.
+		return []int64{}, true
 	}
 	return decodeGroupScope(admin.GroupScope), false
 }
