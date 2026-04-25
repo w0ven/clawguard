@@ -69,7 +69,8 @@ func (s *Service) tryKeywordReply(ctx context.Context, msg *tele.Message, policy
 			cdKey := fmt.Sprintf("kwreply:cd:%d:%s", msg.Chat.ID, ruleID)
 			ok, redisErr := s.redis.SetNX(ctx, cdKey, "1", time.Duration(rule.CooldownSeconds)*time.Second).Result()
 			if redisErr != nil {
-				return false, fmt.Errorf("set keyword reply cooldown: %w", redisErr)
+				s.logger.Warn("keyword reply cooldown unavailable, suppress reply fail-closed", zap.Error(redisErr), zap.Int64("chat_id", msg.Chat.ID), zap.String("rule_id", ruleID))
+				return true, nil
 			}
 			if !ok {
 				return true, nil

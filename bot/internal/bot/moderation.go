@@ -2217,13 +2217,20 @@ func (s *Service) acquireProfileCheckInFlight(userID int64) (func(), bool) {
 		}
 	}
 
-	if _, loaded := s.bioCheckInFlight.LoadOrStore(userID, struct{}{}); loaded {
+	timer := time.AfterFunc(bioCheckInFlightLocalTTL, func() {
+		s.bioCheckInFlight.Delete(userID)
+	})
+	if _, loaded := s.bioCheckInFlight.LoadOrStore(userID, timer); loaded {
+		timer.Stop()
 		return func() {}, false
 	}
 	return func() {
+		timer.Stop()
 		s.bioCheckInFlight.Delete(userID)
 	}, true
 }
+
+var bioCheckInFlightLocalTTL = 60 * time.Second
 
 func (s *Service) handleProfileOnMessageViolation(
 	ctx context.Context,
