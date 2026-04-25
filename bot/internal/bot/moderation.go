@@ -27,6 +27,8 @@ end
 return 0
 `
 
+const defaultAIModerationTotalTimeout = 25 * time.Second
+
 func buildUserTrustBanReason(rule, matched, source string) []byte {
 	return mustJSONBytes(map[string]any{
 		"rule":    strings.TrimSpace(rule),
@@ -113,6 +115,8 @@ func (s *Service) handleIncomingMessageWithOptions(c tele.Context, isEdited bool
 		s.logger.Warn("load guard policy failed for message filter, using defaults", zap.Error(err), zap.Int64("chat_id", msg.Chat.ID))
 		policy = config.DefaultPolicy
 	}
+	ctx, cancel := context.WithTimeout(ctx, defaultAIModerationTotalTimeout)
+	defer cancel()
 
 	isAdmin := false
 	adminStatus, err := s.isChatAdmin(ctx, msg.Chat.ID, msg.Sender.ID)

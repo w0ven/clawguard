@@ -113,6 +113,7 @@ type CheckOutput struct {
 }
 
 type pendingBatch struct {
+	ctx     context.Context
 	inputs  []CheckInput
 	waiters []chan batchResult
 }
@@ -187,7 +188,7 @@ func (m *Moderator) CheckMessage(ctx context.Context, input CheckInput) (CheckOu
 	m.mu.Lock()
 	batch := m.batches[key]
 	if batch == nil {
-		batch = &pendingBatch{}
+		batch = &pendingBatch{ctx: ctx}
 		m.batches[key] = batch
 		window := input.Policy.BatchWindowMs
 		if window <= 0 {
@@ -219,7 +220,11 @@ func (m *Moderator) flushBatch(key string, window time.Duration) {
 		return
 	}
 
-	batchCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	batchCtx := batch.ctx
+	if batchCtx == nil {
+		batchCtx = context.Background()
+	}
+	batchCtx, cancel := context.WithTimeout(batchCtx, 30*time.Second)
 	defer cancel()
 
 	outputs, err := m.checkBatch(batchCtx, batch.inputs)
@@ -270,7 +275,10 @@ func (m *Moderator) checkBatch(ctx context.Context, inputs []CheckInput) ([]Chec
 				m.warnAICallFailed(ref, model, attempt, 0, lastErr)
 				continue
 			}
-			timeout := effectiveTimeout(policy.TimeoutMs, model.ProviderTimeout)
+			timeout, ok := timeoutWithinContext(ctx, effectiveTimeout(policy.TimeoutMs, model.ProviderTimeout))
+			if !ok {
+				return nil, contextDeadlineError(ctx)
+			}
 			callCtx, cancel := context.WithTimeout(ctx, timeout)
 			result, err := client.Check(callCtx, CheckRequest{
 				Model:        model.ModelKey,
@@ -385,7 +393,10 @@ func (m *Moderator) checkSingle(ctx context.Context, input CheckInput) (CheckOut
 				m.warnAICallFailed(ref, model, attempt, 0, lastErr)
 				continue
 			}
-			timeout := effectiveTimeout(policy.TimeoutMs, model.ProviderTimeout)
+			timeout, ok := timeoutWithinContext(ctx, effectiveTimeout(policy.TimeoutMs, model.ProviderTimeout))
+			if !ok {
+				return CheckOutput{}, contextDeadlineError(ctx)
+			}
 
 			callCtx, cancel := context.WithTimeout(ctx, timeout)
 			result, err := client.Check(callCtx, CheckRequest{
@@ -459,6 +470,26 @@ func effectiveTimeout(policyMs int, providerTimeout time.Duration) time.Duration
 		return providerTimeout
 	}
 	return policyTimeout
+}
+
+func timeoutWithinContext(ctx context.Context, timeout time.Duration) (time.Duration, bool) {
+	if deadline, ok := ctx.Deadline(); ok {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return 0, false
+		}
+		if remaining < timeout {
+			return remaining, true
+		}
+	}
+	return timeout, true
+}
+
+func contextDeadlineError(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return context.DeadlineExceeded
 }
 
 func (m *Moderator) warnAICallFailed(ref ModelRef, model Model, attempt int, timeout time.Duration, err error) {
