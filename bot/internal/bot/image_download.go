@@ -7,14 +7,34 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	tele "gopkg.in/telebot.v3"
 )
 
 const maxVisionImageBytes = 3 * 1024 * 1024
+
+var imageDownloadHTTPClient = &http.Client{
+	Transport: &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   10 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   10,
+		MaxConnsPerHost:       50,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+		ResponseHeaderTimeout: 30 * time.Second,
+	},
+}
 
 func (s *Service) loadPhotoForModeration(ctx context.Context, msg *tele.Message) (string, string, error) {
 	if msg == nil || msg.Photo == nil {
@@ -49,7 +69,7 @@ func (s *Service) fetchTelegramFilePath(ctx context.Context, fileID string) (str
 		return "", err
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := imageDownloadHTTPClient.Do(req)
 	if err != nil {
 		return "", err
 	}
@@ -82,7 +102,7 @@ func (s *Service) downloadTelegramFile(ctx context.Context, filePath string) ([]
 		return nil, err
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := imageDownloadHTTPClient.Do(req)
 	if err != nil {
 		return nil, err
 	}

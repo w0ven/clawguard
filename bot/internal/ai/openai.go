@@ -6,10 +6,30 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"time"
 )
+
+var openAIHTTPClient = &http.Client{
+	Timeout: 5 * time.Minute,
+	Transport: &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   10 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   10,
+		MaxConnsPerHost:       50,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+		ResponseHeaderTimeout: 30 * time.Second,
+	},
+}
 
 type OpenAICompatibleClient struct {
 	baseURL        string
@@ -27,7 +47,7 @@ func NewOpenAICompatibleClient(baseURL, apiKey string, timeout time.Duration, ex
 		baseURL:        strings.TrimRight(baseURL, "/"),
 		apiKey:         strings.TrimSpace(apiKey),
 		extraHeaders:   cloneHeaders(extraHeaders),
-		client:         &http.Client{Timeout: 5 * time.Minute},
+		client:         openAIHTTPClient,
 		defaultTimeout: timeout,
 	}
 }
