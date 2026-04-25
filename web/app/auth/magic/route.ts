@@ -40,7 +40,7 @@ export async function GET(req: NextRequest) {
     return NextResponse.redirect(publicURL("/?error=invalid_token", req));
   }
 
-  const data = (await res.json()) as { jwt?: string; redirect_to?: string };
+  const data = (await res.json()) as { jwt?: string; csrf_token?: string; redirect_to?: string };
   if (!data.jwt) {
     return NextResponse.redirect(publicURL("/?error=invalid_token", req));
   }
@@ -51,9 +51,18 @@ export async function GET(req: NextRequest) {
   response.cookies.set("cg_admin", data.jwt, {
     httpOnly: true,
     secure: true,
-    sameSite: "lax",
+    sameSite: "strict",
     maxAge: cookieMaxAge,
     path: "/",
   });
+  if (data.csrf_token) {
+    response.cookies.set("cg_csrf", data.csrf_token, {
+      httpOnly: false,
+      secure: true,
+      sameSite: "strict",
+      maxAge: cookieMaxAge,
+      path: "/",
+    });
+  }
   return response;
 }

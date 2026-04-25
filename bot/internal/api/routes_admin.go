@@ -38,7 +38,7 @@ func stringValue(v *string) string {
 }
 
 func (s *Server) registerAdminRoutes() {
-	admin := s.echo.Group("/api/admin", s.requireAdminJWT)
+	admin := s.echo.Group("/api/admin", s.requireAdminJWT, s.requireCSRF)
 	admin.GET("/groups", s.handleListGroups)
 	admin.GET("/groups/:chat_id", s.handleGetGroup)
 	admin.PUT("/groups/:chat_id/config", s.handlePutGroupConfig)

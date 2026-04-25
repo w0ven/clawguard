@@ -74,6 +74,10 @@ func (s *Server) handleMagicExchange(c echo.Context) error {
 		s.logger.Warn("sign magic login jwt failed", zap.Error(err), zap.Int64("admin_id", admin.ID))
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "sign token failed"})
 	}
+	csrfToken, err := newCSRFToken()
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "csrf token failed"})
+	}
 
 	redirectTo := "/dashboard"
 	if payload.ScopeChatID != 0 {
@@ -95,6 +99,7 @@ func (s *Server) handleMagicExchange(c echo.Context) error {
 
 	return c.JSON(http.StatusOK, map[string]any{
 		"jwt":         tokenString,
+		"csrf_token":  csrfToken,
 		"redirect_to": redirectTo,
 	})
 }

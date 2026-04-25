@@ -2,7 +2,9 @@ package api
 
 import (
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -19,6 +21,7 @@ import (
 )
 
 const adminCookieName = "cg_admin"
+const csrfCookieName = "cg_csrf"
 const adminContextKey = "cg_admin_actor"
 
 type adminClaims struct {
@@ -121,20 +124,27 @@ func (s *Server) handleTelegramLogin(c echo.Context) error {
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "sign token failed"})
 	}
+	csrfToken, err := newCSRFToken()
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "csrf token failed"})
+	}
 
 	setAdminCookie(c, tokenString)
+	setCSRFCookie(c, csrfToken)
 
 	if c.Request().Method == http.MethodGet {
 		return c.Redirect(http.StatusFound, "/dashboard")
 	}
 
 	return c.JSON(http.StatusOK, map[string]any{
-		"admin": serializeAdmin(admin),
+		"admin":      serializeAdmin(admin),
+		"csrf_token": csrfToken,
 	})
 }
 
 func (s *Server) handleLogout(c echo.Context) error {
 	clearAdminCookie(c)
+	clearCSRFCookie(c)
 	return c.NoContent(http.StatusNoContent)
 }
 
@@ -186,7 +196,7 @@ func setAdminCookie(c echo.Context, token string) {
 		MaxAge:   86400,
 		HttpOnly: true,
 		Secure:   true,
-		SameSite: http.SameSiteLaxMode,
+		SameSite: http.SameSiteStrictMode,
 	})
 }
 
@@ -198,8 +208,63 @@ func clearAdminCookie(c echo.Context) {
 		MaxAge:   -1,
 		HttpOnly: true,
 		Secure:   true,
-		SameSite: http.SameSiteLaxMode,
+		SameSite: http.SameSiteStrictMode,
 	})
+}
+
+func setCSRFCookie(c echo.Context, token string) {
+	c.SetCookie(&http.Cookie{
+		Name:     csrfCookieName,
+		Value:    token,
+		Path:     "/",
+		MaxAge:   86400,
+		HttpOnly: false,
+		Secure:   true,
+		SameSite: http.SameSiteStrictMode,
+	})
+}
+
+func clearCSRFCookie(c echo.Context) {
+	c.SetCookie(&http.Cookie{
+		Name:     csrfCookieName,
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		HttpOnly: false,
+		Secure:   true,
+		SameSite: http.SameSiteStrictMode,
+	})
+}
+
+func newCSRFToken() (string, error) {
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(buf), nil
+}
+
+func (s *Server) requireCSRF(next echo.HandlerFunc) echo.HandlerFunc {
+	return func(c echo.Context) error {
+		method := c.Request().Method
+		if method == http.MethodGet || method == http.MethodHead || method == http.MethodOptions {
+			return next(c)
+		}
+		if authz := strings.TrimSpace(c.Request().Header.Get("Authorization")); strings.HasPrefix(authz, "Bearer ") {
+			if _, err := c.Cookie(adminCookieName); err != nil {
+				return next(c)
+			}
+		}
+		cookie, err := c.Cookie(csrfCookieName)
+		if err != nil || cookie.Value == "" {
+			return c.JSON(http.StatusForbidden, map[string]string{"error": "missing csrf token"})
+		}
+		header := strings.TrimSpace(c.Request().Header.Get("X-CSRF-Token"))
+		if header == "" || !hmac.Equal([]byte(header), []byte(cookie.Value)) {
+			return c.JSON(http.StatusForbidden, map[string]string{"error": "invalid csrf token"})
+		}
+		return next(c)
+	}
 }
 
 func parseTelegramLoginPayload(c echo.Context) (telegramLoginPayload, error) {

@@ -14,13 +14,20 @@ export async function apiFetch<T>(
   input: string,
   init?: RequestInit,
 ): Promise<T> {
+  const method = (init?.method ?? "GET").toUpperCase();
+  const csrfToken = typeof document !== "undefined" ? readCookie("cg_csrf") : "";
+  const headers: HeadersInit = {
+    "Content-Type": "application/json",
+    ...(init?.headers ?? {}),
+  };
+  if (csrfToken && !["GET", "HEAD", "OPTIONS"].includes(method)) {
+    headers["X-CSRF-Token"] = csrfToken;
+  }
+
   const response = await fetch(input, {
     ...init,
     credentials: "include",
-    headers: {
-      "Content-Type": "application/json",
-      ...(init?.headers ?? {}),
-    },
+    headers,
   });
 
   if (response.status === 401) {
@@ -46,6 +53,15 @@ export async function apiFetch<T>(
   }
 
   return (await response.json()) as T;
+}
+
+function readCookie(name: string): string {
+  const prefix = `${name}=`;
+  const found = document.cookie
+    .split(";")
+    .map((part) => part.trim())
+    .find((part) => part.startsWith(prefix));
+  return found ? decodeURIComponent(found.slice(prefix.length)) : "";
 }
 
 type FetchProfileCheckLogsParams = {
