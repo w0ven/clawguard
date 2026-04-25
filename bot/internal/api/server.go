@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"net/http"
+	"time"
 
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
@@ -12,6 +13,14 @@ import (
 	"github.com/openclaw/clawguard/internal/bot"
 	"github.com/openclaw/clawguard/internal/config"
 	"github.com/openclaw/clawguard/internal/scheduler"
+)
+
+const (
+	serverReadHeaderTimeout = 10 * time.Second
+	serverReadTimeout       = 30 * time.Second
+	serverWriteTimeout      = 60 * time.Second
+	serverIdleTimeout       = 120 * time.Second
+	serverMaxHeaderBytes    = 1 << 20 // bytes
 )
 
 type Server struct {
@@ -47,7 +56,19 @@ func NewServer(cfg config.Config, logger *zap.Logger, botService *bot.Service, s
 }
 
 func (s *Server) Start() error {
-	return s.echo.Start(s.cfg.ListenAddr())
+	return s.echo.StartServer(s.httpServer())
+}
+
+func (s *Server) httpServer() *http.Server {
+	return &http.Server{
+		Addr:              s.cfg.ListenAddr(),
+		Handler:           s.echo,
+		ReadHeaderTimeout: serverReadHeaderTimeout,
+		ReadTimeout:       serverReadTimeout,
+		WriteTimeout:      serverWriteTimeout,
+		IdleTimeout:       serverIdleTimeout,
+		MaxHeaderBytes:    serverMaxHeaderBytes,
+	}
 }
 
 func (s *Server) Shutdown(ctx context.Context) error {
