@@ -1,13 +1,13 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 
-const protectedPrefixes = ["/dashboard", "/groups", "/violations", "/audit"];
+const publicPrefixes = ["/auth", "/verify", "/api"];
 
 export function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
-  const requiresAuth = protectedPrefixes.some((prefix) => pathname.startsWith(prefix));
+  const isPublic = pathname === "/" || publicPrefixes.some((prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`));
 
-  if (!requiresAuth) {
+  if (isPublic) {
     return NextResponse.next();
   }
 
@@ -20,5 +20,5 @@ export function middleware(request: NextRequest) {
 }
 
 export const config = {
-  matcher: ["/dashboard/:path*", "/groups/:path*", "/violations/:path*", "/audit/:path*"],
+  matcher: ["/((?!_next/static|_next/image|favicon\\.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp|ico|css|js|map|woff|woff2|ttf)$).*)"],
 };
