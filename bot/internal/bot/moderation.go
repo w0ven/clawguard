@@ -1725,8 +1725,11 @@ func (s *Service) isChatAdmin(ctx context.Context, chatID, userID int64) (bool, 
 	cacheKey := "chat_admin:" + strconv.FormatInt(chatID, 10) + ":" + strconv.FormatInt(userID, 10)
 	if s.redis != nil {
 		cached, err := s.redis.Get(ctx, cacheKey).Result()
-		if err == nil {
-			return cached == "1", nil
+		if err == nil && cached == "0" {
+			return false, nil
+		}
+		if err == nil && cached == "1" {
+			_ = s.redis.Del(ctx, cacheKey).Err()
 		}
 		if err != nil && !errors.Is(err, redis.Nil) {
 			s.logger.Debug("load admin cache failed", zap.Error(err), zap.String("key", cacheKey))
@@ -1740,13 +1743,11 @@ func (s *Service) isChatAdmin(ctx context.Context, chatID, userID int64) (bool, 
 
 	isAdmin := member != nil && (member.Role == tele.Creator || member.Role == tele.Administrator)
 	if s.redis != nil {
-		value := "0"
-		ttl := 10 * time.Second
 		if isAdmin {
-			value = "1"
-			ttl = 5 * time.Minute
+			_ = s.redis.Del(ctx, cacheKey).Err()
+		} else {
+			_ = s.redis.Set(ctx, cacheKey, "0", 10*time.Second).Err()
 		}
-		_ = s.redis.Set(ctx, cacheKey, value, ttl).Err()
 	}
 
 	return isAdmin, nil
