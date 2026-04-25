@@ -32,6 +32,12 @@ FROM pending_verifications
 WHERE chat_id = $1 AND user_id = $2
 `
 
+const getActivePendingVerification = `-- name: GetActivePendingVerification :one
+SELECT id, chat_id, user_id, username, first_name, method, payload, join_message_id, expires_at, created_at
+FROM pending_verifications
+WHERE chat_id = $1 AND user_id = $2 AND expires_at > NOW()
+`
+
 const deletePendingVerification = `-- name: DeletePendingVerification :exec
 DELETE FROM pending_verifications
 WHERE chat_id = $1 AND user_id = $2
@@ -121,6 +127,11 @@ func (q *Queries) UpsertPendingVerification(ctx context.Context, arg UpsertPendi
 
 func (q *Queries) GetPendingVerification(ctx context.Context, arg GetPendingVerificationParams) (PendingVerification, error) {
 	row := q.db.QueryRow(ctx, getPendingVerification, arg.ChatID, arg.UserID)
+	return scanPendingVerification(row)
+}
+
+func (q *Queries) GetActivePendingVerification(ctx context.Context, arg GetPendingVerificationParams) (PendingVerification, error) {
+	row := q.db.QueryRow(ctx, getActivePendingVerification, arg.ChatID, arg.UserID)
 	return scanPendingVerification(row)
 }
 

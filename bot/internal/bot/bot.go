@@ -1054,7 +1054,7 @@ func (s *Service) handleVerifyButton(c tele.Context) error {
 		return c.Respond(&tele.CallbackResponse{Text: "验证参数无效", ShowAlert: true})
 	}
 
-	pending, err := s.queries.GetPendingVerification(context.Background(), store.GetPendingVerificationParams{
+	pending, err := s.queries.GetActivePendingVerification(context.Background(), store.GetPendingVerificationParams{
 		ChatID: chat.ID,
 		UserID: sender.ID,
 	})
@@ -1132,7 +1132,7 @@ func (s *Service) handleVerifyMath(c tele.Context) error {
 		return c.Respond(&tele.CallbackResponse{Text: "答案格式无效", ShowAlert: true})
 	}
 
-	pending, err := s.queries.GetPendingVerification(context.Background(), store.GetPendingVerificationParams{
+	pending, err := s.queries.GetActivePendingVerification(context.Background(), store.GetPendingVerificationParams{
 		ChatID: chat.ID,
 		UserID: sender.ID,
 	})
@@ -1200,7 +1200,7 @@ func (s *Service) handleVerifyRandom(c tele.Context) error {
 		return c.Respond(&tele.CallbackResponse{Text: "只能由加入群组的本人作答", ShowAlert: true})
 	}
 
-	pending, err := s.queries.GetPendingVerification(context.Background(), store.GetPendingVerificationParams{
+	pending, err := s.queries.GetActivePendingVerification(context.Background(), store.GetPendingVerificationParams{
 		ChatID: chat.ID,
 		UserID: sender.ID,
 	})

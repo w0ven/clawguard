@@ -23,6 +23,12 @@ SELECT id, chat_id, user_id, username, first_name, method, payload, join_message
 FROM pending_verifications
 WHERE chat_id = $1 AND user_id = $2;
 
+
+-- name: GetActivePendingVerification :one
+SELECT id, chat_id, user_id, username, first_name, method, payload, join_message_id, expires_at, created_at
+FROM pending_verifications
+WHERE chat_id = $1 AND user_id = $2 AND expires_at > NOW();
+
 -- name: DeletePendingVerification :exec
 DELETE FROM pending_verifications
 WHERE chat_id = $1 AND user_id = $2;
