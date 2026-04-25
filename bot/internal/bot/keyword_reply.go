@@ -173,7 +173,7 @@ func (s *Service) matchKeywordReplyRule(rule config.KeywordReplyRule, messageTex
 func resolveParseMode(mode string) string {
 	switch strings.ToLower(strings.TrimSpace(mode)) {
 	case "markdown", "md":
-		return tele.ModeMarkdown
+		return tele.ModeMarkdownV2
 	case "markdownv2", "mdv2":
 		return tele.ModeMarkdownV2
 	case "html":

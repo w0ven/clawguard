@@ -48,7 +48,7 @@ func TestRenderFeedbackTemplateUserLabelAcrossParseModes(t *testing.T) {
 			parseMode:         "markdown",
 			wantUserLabel:     "42",
 			wantAdminLabel:    "99",
-			wantReasonSnippet: "括号(需要转义)!",
+			wantReasonSnippet: "括号\\(需要转义\\)\\!",
 		},
 	}
 

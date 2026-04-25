@@ -20,7 +20,8 @@ func RenderMessageTemplate(template string, parseMode string, structuralVars map
 	case tele.ModeHTML:
 		text = replaceTemplatePlaceholders(template, structuralVars, plainVars, html.EscapeString)
 	case tele.ModeMarkdown:
-		text = replaceTemplatePlaceholders(template, structuralVars, plainVars, func(s string) string { return s })
+		text = replaceTemplatePlaceholdersMarkdownV2(template, structuralVars, plainVars)
+		resolvedMode = tele.ModeMarkdownV2
 	case tele.ModeMarkdownV2:
 		text = replaceTemplatePlaceholdersMarkdownV2(template, structuralVars, plainVars)
 	default:

@@ -68,7 +68,7 @@ func TestRenderMessageTemplateHTMLKeepsTemplateTagsAndEscapesPlainVars(t *testin
 	}
 }
 
-func TestRenderMessageTemplateMarkdownLegacyLeavesTemplateAndVarsRaw(t *testing.T) {
+func TestRenderMessageTemplateMarkdownLegacyMigratesToMarkdownV2(t *testing.T) {
 	rendered := RenderMessageTemplate(
 		"*欢迎* {user} [群](link): {reason}",
 		"markdown",
@@ -80,11 +80,14 @@ func TestRenderMessageTemplateMarkdownLegacyLeavesTemplateAndVarsRaw(t *testing.
 		},
 	)
 
-	if rendered.ParseMode != tele.ModeMarkdown {
-		t.Fatalf("parse mode = %q, want %q", rendered.ParseMode, tele.ModeMarkdown)
+	if rendered.ParseMode != tele.ModeMarkdownV2 {
+		t.Fatalf("parse mode = %q, want %q", rendered.ParseMode, tele.ModeMarkdownV2)
 	}
-	if rendered.Text != "*欢迎* @kele [群](link): <b>[test](x)</b>" {
-		t.Fatalf("legacy markdown should remain raw, got %q", rendered.Text)
+	if strings.Contains(rendered.Text, "[test](x)") {
+		t.Fatalf("legacy markdown plain var was not escaped after migration: %q", rendered.Text)
+	}
+	if !strings.Contains(rendered.Text, `\[test\]\(x\)`) {
+		t.Fatalf("legacy markdown plain var missing MarkdownV2 escaping: %q", rendered.Text)
 	}
 }
 
@@ -178,8 +181,8 @@ func TestRenderWelcomeMessageUserMentionAcrossParseModes(t *testing.T) {
 			name:              "markdown username",
 			parseMode:         "markdown",
 			user:              &tele.User{ID: 42, Username: "my_name", FirstName: "可乐[测试]"},
-			wantMention:       "@my_name",
-			wantGroupSnippet:  "高级群(测试)",
+			wantMention:       "@my\\_name",
+			wantGroupSnippet:  "高级群\\(测试\\)",
 			unwantedSubstring: "tg://user?id=42",
 		},
 		{
@@ -187,7 +190,7 @@ func TestRenderWelcomeMessageUserMentionAcrossParseModes(t *testing.T) {
 			parseMode:        "markdown",
 			user:             &tele.User{ID: 42, FirstName: "可乐[测试]"},
 			wantMention:      "[可乐\\[测试\\]](tg://user?id=42)",
-			wantGroupSnippet: "高级群(测试)",
+			wantGroupSnippet: "高级群\\(测试\\)",
 		},
 	}
 
