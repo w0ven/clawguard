@@ -174,17 +174,6 @@ func (s *Service) applyAIModeration(ctx context.Context, msg *tele.Message, poli
 
 	switch trust.Status {
 	case "trusted":
-		// AI 触发关键词：trusted 用户命中关键词时仍走 AI 审核
-		if policy.AI.Enabled && len(policy.AI.TriggerKeywords) > 0 {
-			if s.matchesTriggerKeywords(msg, policy.AI.TriggerKeywords) {
-				s.logger.Info("trusted user hit AI trigger keyword, sending to AI",
-					zap.Int64("chat_id", msg.Chat.ID),
-					zap.Int64("user_id", msg.Sender.ID),
-					zap.String("text", truncateString(msg.Text, 100)),
-				)
-				break // fall through to AI moderation below
-			}
-		}
 		return nil
 	case "banned":
 		if err := s.deleteMessage(msg); err != nil {
