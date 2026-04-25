@@ -11,8 +11,12 @@ import (
 )
 
 func (s *Server) registerVerifyRoutes() {
-	s.echo.GET("/api/verify/turnstile/:token", s.handleVerifyTurnstile, s.apiRateLimit(s.ipRateLimitKey("verify:turnstile_ip"), turnstileVerifyIPLimit, apiRateLimitWindow), s.apiRateLimit(s.turnstileTokenRateLimitKey, turnstileVerifyTokenLimit, apiRateLimitWindow))
-	s.echo.POST("/api/verify/turnstile/:token", s.handleVerifyTurnstile, s.apiRateLimit(s.ipRateLimitKey("verify:turnstile_ip"), turnstileVerifyIPLimit, apiRateLimitWindow), s.apiRateLimit(s.turnstileTokenRateLimitKey, turnstileVerifyTokenLimit, apiRateLimitWindow))
+	s.echo.POST(
+		"/api/verify/turnstile/:token",
+		s.handleVerifyTurnstile,
+		s.apiRateLimit(s.ipRateLimitKey("verify:turnstile_ip"), turnstileVerifyIPLimit, apiRateLimitWindow),
+		s.apiRateLimit(s.turnstileTokenRateLimitKey, turnstileVerifyTokenLimit, apiRateLimitWindow),
+	)
 }
 
 func (s *Server) handleVerifyTurnstile(c echo.Context) error {
