@@ -261,34 +261,34 @@ func (s *Service) registerHandlers() {
 		return s.runHandler("video_note", c, s.handleIncomingMessage)
 	})
 	s.bot.Handle("/cas", func(c tele.Context) error {
-		return s.runHandler("cas", c, s.handleCASCommand)
+		return s.runCommandHandler("cas", c, s.handleCASCommand)
 	})
 	s.bot.Handle("/start", func(c tele.Context) error {
-		return s.runHandler("start", c, s.handleStartCommand)
+		return s.runCommandHandler("start", c, s.handleStartCommand)
 	})
 	s.bot.Handle("/help", func(c tele.Context) error {
-		return s.runHandler("help", c, s.handleHelpCommand)
+		return s.runCommandHandler("help", c, s.handleHelpCommand)
 	})
 	s.bot.Handle("/warn_status", func(c tele.Context) error {
-		return s.runHandler("warn_status", c, s.handleWarnStatusCommand)
+		return s.runCommandHandler("warn_status", c, s.handleWarnStatusCommand)
 	})
 	s.bot.Handle("/status", func(c tele.Context) error {
-		return s.runHandler("status", c, s.handleStatusCommand)
+		return s.runCommandHandler("status", c, s.handleStatusCommand)
 	})
 	s.bot.Handle("/trust", func(c tele.Context) error {
-		return s.runHandler("trust", c, s.handleTrustCommand)
+		return s.runCommandHandler("trust", c, s.handleTrustCommand)
 	})
 	s.bot.Handle("/config", func(c tele.Context) error {
-		return s.runHandler("config", c, s.handleConfigCommand)
+		return s.runCommandHandler("config", c, s.handleConfigCommand)
 	})
 	s.bot.Handle("/warn", func(c tele.Context) error {
-		return s.runHandler("warn", c, s.handleWarnCommand)
+		return s.runCommandHandler("warn", c, s.handleWarnCommand)
 	})
 	s.bot.Handle("/unban", func(c tele.Context) error {
-		return s.runHandler("unban", c, s.handleUnbanCommand)
+		return s.runCommandHandler("unban", c, s.handleUnbanCommand)
 	})
 	s.bot.Handle("/spam", func(c tele.Context) error {
-		return s.runHandler("spam", c, s.handleSpamCommand)
+		return s.runCommandHandler("spam", c, s.handleSpamCommand)
 	})
 }
 
@@ -300,6 +300,41 @@ func (s *Service) runHandler(name string, c tele.Context, handler func(tele.Cont
 		}
 	}()
 	return handler(c)
+}
+
+func (s *Service) runCommandHandler(name string, c tele.Context, handler func(tele.Context) error) error {
+	return s.runHandler(name, c, func(c tele.Context) error {
+		ignored, err := s.ignoreUnauthorizedGroupCommand(c)
+		if err != nil || ignored {
+			return err
+		}
+		return handler(c)
+	})
+}
+
+func (s *Service) ignoreUnauthorizedGroupCommand(c tele.Context) (bool, error) {
+	if c == nil || c.Chat() == nil {
+		return true, nil
+	}
+	chat := c.Chat()
+	if chat.Type != tele.ChatGroup && chat.Type != tele.ChatSuperGroup {
+		return false, nil
+	}
+	ctx := context.Background()
+	authorized, err := s.IsAuthorizedGroup(ctx, chat.ID)
+	if err != nil {
+		s.logger.Warn("authorized group check failed for command", zap.Error(err), zap.Int64("chat_id", chat.ID))
+		return true, nil
+	}
+	if !authorized {
+		return true, nil
+	}
+	state, err := s.GetSystemState(ctx)
+	if err != nil {
+		s.logger.Warn("load system state failed for command", zap.Error(err), zap.Int64("chat_id", chat.ID))
+		return false, nil
+	}
+	return state.Frozen, nil
 }
 
 func (s *Service) handleUserJoined(c tele.Context) error {
