@@ -20,6 +20,13 @@ import (
 	"github.com/openclaw/clawguard/internal/store"
 )
 
+const redisCompareAndDeleteScript = `
+if redis.call("GET", KEYS[1]) == ARGV[1] then
+	return redis.call("DEL", KEYS[1])
+end
+return 0
+`
+
 func buildUserTrustBanReason(rule, matched, source string) []byte {
 	return mustJSONBytes(map[string]any{
 		"rule":    strings.TrimSpace(rule),
@@ -2185,16 +2192,21 @@ func (s *Service) acquireProfileCheckInFlight(userID int64) (func(), bool) {
 
 	if s.redis != nil {
 		inflightKey := "bio_check_inflight:" + strconv.FormatInt(userID, 10)
-		ok, err := s.redis.SetNX(context.Background(), inflightKey, "1", 60*time.Second).Result()
-		if err == nil {
-			if !ok {
-				return func() {}, false
+		token, tokenErr := generateShortNonce()
+		if tokenErr != nil {
+			s.logger.Warn("generate bio check inflight token failed", zap.Error(tokenErr), zap.Int64("user_id", userID))
+		} else {
+			ok, err := s.redis.SetNX(context.Background(), inflightKey, token, 60*time.Second).Result()
+			if err == nil {
+				if !ok {
+					return func() {}, false
+				}
+				return func() {
+					_ = s.redis.Eval(context.Background(), redisCompareAndDeleteScript, []string{inflightKey}, token).Err()
+				}, true
 			}
-			return func() {
-				_ = s.redis.Del(context.Background(), inflightKey).Err()
-			}, true
+			s.logger.Warn("acquire bio check inflight via redis failed", zap.Error(err), zap.Int64("user_id", userID))
 		}
-		s.logger.Warn("acquire bio check inflight via redis failed", zap.Error(err), zap.Int64("user_id", userID))
 	}
 
 	if _, loaded := s.bioCheckInFlight.LoadOrStore(userID, struct{}{}); loaded {
