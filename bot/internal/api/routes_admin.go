@@ -38,7 +38,7 @@ func stringValue(v *string) string {
 }
 
 func (s *Server) registerAdminRoutes() {
-	admin := s.echo.Group("/api/admin", s.requireAdminJWT, s.requireCSRF)
+	admin := s.echo.Group("/api/admin", s.requireAdminJWT, s.requireCSRF, s.adminWriteRateLimit())
 	admin.GET("/groups", s.handleListGroups)
 	admin.GET("/groups/:chat_id", s.handleGetGroup)
 	admin.PUT("/groups/:chat_id/config", s.handlePutGroupConfig)
@@ -57,8 +57,8 @@ func (s *Server) registerAdminRoutes() {
 	admin.DELETE("/profile-check-logs", s.handleDeleteOldProfileCheckLogs)
 	admin.GET("/warnings", s.handleListWarnings)
 	admin.POST("/warnings/clear", s.handleClearWarnings)
-	admin.POST("/ban", s.handleBan)
-	admin.POST("/unban", s.handleUnban)
+	admin.POST("/ban", s.handleBan, s.apiRateLimit(s.adminRateLimitKey("admin:ban"), adminBanLimit, apiRateLimitWindow))
+	admin.POST("/unban", s.handleUnban, s.apiRateLimit(s.adminRateLimitKey("admin:ban"), adminBanLimit, apiRateLimitWindow))
 	admin.GET("/audit", s.handleListAudit)
 	admin.GET("/stats", s.handleStats)
 	admin.GET("/admins", s.handleListAdmins)

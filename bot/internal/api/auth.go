@@ -44,8 +44,8 @@ type telegramLoginPayload struct {
 
 func (s *Server) registerAuthRoutes() {
 	s.echo.GET("/api/auth/telegram-login", s.handleTelegramLogin)
-	s.echo.POST("/api/auth/telegram-login", s.handleTelegramLogin)
-	s.echo.POST("/api/auth/logout", s.handleLogout)
+	s.echo.POST("/api/auth/telegram-login", s.handleTelegramLogin, s.apiRateLimit(s.ipRateLimitKey("auth:telegram_login_ip"), telegramLoginIPLimit, apiRateLimitWindow), s.apiRateLimit(s.telegramLoginUserRateLimitKey, telegramLoginUserLimit, apiRateLimitWindow))
+	s.echo.POST("/api/auth/logout", s.handleLogout, s.apiRateLimit(s.ipRateLimitKey("auth:logout_ip"), logoutIPLimit, apiRateLimitWindow))
 	s.echo.GET("/api/auth/me", s.requireAdminJWT(s.handleMe))
 }
 
