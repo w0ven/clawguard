@@ -2,7 +2,7 @@
 SELECT COALESCE(SUM(cost_cents), 0)::DOUBLE PRECISION
 FROM ai_decisions
 WHERE created_at >= CURRENT_DATE
-  AND ($1::BIGINT[] IS NULL OR chat_id = ANY($1::BIGINT[]));
+  AND ($1::BIGINT[] IS NULL OR cardinality($1::BIGINT[]) = 0 OR chat_id = ANY($1::BIGINT[]));
 
 -- name: ListDailyAICostsLast30Days :many
 SELECT
@@ -23,7 +23,7 @@ LEFT JOIN (
         COUNT(*)::BIGINT AS calls
     FROM ai_decisions
     WHERE created_at >= CURRENT_DATE - INTERVAL '29 day'
-      AND ($1::BIGINT[] IS NULL OR chat_id = ANY($1::BIGINT[]))
+      AND ($1::BIGINT[] IS NULL OR cardinality($1::BIGINT[]) = 0 OR chat_id = ANY($1::BIGINT[]))
     GROUP BY 1
 ) stats USING (day)
 ORDER BY date ASC;
@@ -35,7 +35,7 @@ SELECT
     COUNT(*)::BIGINT AS calls
 FROM ai_decisions
 WHERE created_at >= CURRENT_DATE - INTERVAL '29 day'
-  AND ($1::BIGINT[] IS NULL OR chat_id = ANY($1::BIGINT[]))
+  AND ($1::BIGINT[] IS NULL OR cardinality($1::BIGINT[]) = 0 OR chat_id = ANY($1::BIGINT[]))
 GROUP BY model
 ORDER BY cost_cents DESC, calls DESC, model ASC;
 
@@ -48,7 +48,7 @@ SELECT
 FROM ai_decisions d
 LEFT JOIN groups g ON g.chat_id = d.chat_id
 WHERE d.created_at >= CURRENT_DATE - INTERVAL '29 day'
-  AND ($1::BIGINT[] IS NULL OR d.chat_id = ANY($1::BIGINT[]))
+  AND ($1::BIGINT[] IS NULL OR cardinality($1::BIGINT[]) = 0 OR d.chat_id = ANY($1::BIGINT[]))
 GROUP BY d.chat_id, g.title
 ORDER BY cost_cents DESC, calls DESC, d.chat_id ASC
 LIMIT $2;
