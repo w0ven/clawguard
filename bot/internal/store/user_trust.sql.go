@@ -152,6 +152,7 @@ WHERE ($1::BIGINT IS NULL OR chat_id = $1)
   )
   AND ($5::TIMESTAMPTZ IS NULL OR joined_at >= $5::TIMESTAMPTZ)
   AND ($6::TIMESTAMPTZ IS NULL OR joined_at <= $6::TIMESTAMPTZ)
+  AND ($7::BOOLEAN OR chat_id = ANY($8::BIGINT[]))
 `
 
 const listUserTrustPaginated = `-- name: ListUserTrustPaginated :many
@@ -435,13 +436,13 @@ func (q *Queries) AdjustUserTrustScore(ctx context.Context, arg AdjustUserTrustS
 }
 
 func (q *Queries) CountUserTrust(ctx context.Context, chatID *int64, userID *int64, status string, username string, joinedSince *string, joinedUntil *string, scopeGlobal bool, scopeChatIDs []int64) (int64, error) {
-	row := q.db.QueryRow(ctx, countUserTrust, chatID, userID, status, username, joinedSince, joinedUntil, scopeGlobal, scopeChatIDs)
+	row := q.db.QueryRow(ctx, countUserTrust, chatID, userID, status, username, joinedSince, joinedUntil, scopeGlobal, pgInt64Array(scopeChatIDs))
 	var count int64
 	err := row.Scan(&count)
 	return count, err
 }
 func (q *Queries) ListUserTrustPaginated(ctx context.Context, arg ListUserTrustPaginatedParams) ([]UserTrust, error) {
-	rows, err := q.db.Query(ctx, listUserTrustPaginated, arg.ChatID, arg.UserID, arg.Status, arg.Username, arg.JoinedSince, arg.JoinedUntil, arg.Limit, arg.Offset, arg.ScopeGlobal, arg.ScopeChatIDs)
+	rows, err := q.db.Query(ctx, listUserTrustPaginated, arg.ChatID, arg.UserID, arg.Status, arg.Username, arg.JoinedSince, arg.JoinedUntil, arg.Limit, arg.Offset, arg.ScopeGlobal, pgInt64Array(arg.ScopeChatIDs))
 	if err != nil {
 		return nil, err
 	}
