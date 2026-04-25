@@ -99,6 +99,13 @@ func New(cfg config.Config, logger *zap.Logger, queries *store.Queries, rdb redi
 	b, err := tele.NewBot(tele.Settings{
 		Token:       cfg.BotToken,
 		Synchronous: true,
+		OnError: func(err error, c tele.Context) {
+			if c != nil && c.Message() != nil && c.Message().Chat != nil {
+				logger.Error("telegram handler error", zap.Error(err), zap.Int64("chat_id", c.Message().Chat.ID), zap.Int("message_id", c.Message().ID))
+				return
+			}
+			logger.Error("telegram handler error", zap.Error(err))
+		},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("new telebot: %w", err)
@@ -181,6 +188,11 @@ func (s *Service) setupCommandMenu() error {
 }
 
 func (s *Service) ProcessUpdate(update tele.Update) error {
+	defer func() {
+		if r := recover(); r != nil {
+			s.logger.Error("telegram update panic recovered", zap.Any("panic", r))
+		}
+	}()
 	s.bot.ProcessUpdate(update)
 	return nil
 }
@@ -195,89 +207,99 @@ func (s *Service) SendHTMLPrivateMessage(telegramID int64, text string) error {
 
 func (s *Service) registerHandlers() {
 	s.bot.Handle(tele.OnUserJoined, func(c tele.Context) error {
-		return s.handleUserJoined(c)
+		return s.runHandler("user_joined", c, s.handleUserJoined)
 	})
 
 	s.bot.Handle(tele.OnMyChatMember, func(c tele.Context) error {
-		return s.handleMyChatMemberUpdate(c)
+		return s.runHandler("my_chat_member", c, s.handleMyChatMemberUpdate)
 	})
 
 	s.bot.Handle(tele.OnChatMember, func(c tele.Context) error {
-		return s.handleChatMemberUpdate(c)
+		return s.runHandler("chat_member", c, s.handleChatMemberUpdate)
 	})
 
 	s.bot.Handle(&s.verifyBtn, func(c tele.Context) error {
-		return s.handleVerifyButton(c)
+		return s.runHandler("verify_button", c, s.handleVerifyButton)
 	})
 
 	s.bot.Handle(&s.verifyMathBtn, func(c tele.Context) error {
-		return s.handleVerifyMath(c)
+		return s.runHandler("verify_math", c, s.handleVerifyMath)
 	})
 
 	s.bot.Handle(&s.verifyRandBtn, func(c tele.Context) error {
-		return s.handleVerifyRandom(c)
+		return s.runHandler("verify_random", c, s.handleVerifyRandom)
 	})
 
 	s.bot.Handle(tele.OnText, func(c tele.Context) error {
-		return s.handleIncomingMessage(c)
+		return s.runHandler("text", c, s.handleIncomingMessage)
 	})
 	s.bot.Handle(tele.OnPhoto, func(c tele.Context) error {
-		return s.handleIncomingMessage(c)
+		return s.runHandler("photo", c, s.handleIncomingMessage)
 	})
 	s.bot.Handle(tele.OnVideo, func(c tele.Context) error {
-		return s.handleIncomingMessage(c)
+		return s.runHandler("video", c, s.handleIncomingMessage)
 	})
 	s.bot.Handle(tele.OnDocument, func(c tele.Context) error {
-		return s.handleIncomingMessage(c)
+		return s.runHandler("document", c, s.handleIncomingMessage)
 	})
 	s.bot.Handle(tele.OnContact, func(c tele.Context) error {
-		return s.handleIncomingMessage(c)
+		return s.runHandler("contact", c, s.handleIncomingMessage)
 	})
 	s.bot.Handle(tele.OnSticker, func(c tele.Context) error {
-		return s.handleIncomingMessage(c)
+		return s.runHandler("sticker", c, s.handleIncomingMessage)
 	})
 	s.bot.Handle(tele.OnAnimation, func(c tele.Context) error {
-		return s.handleIncomingMessage(c)
+		return s.runHandler("animation", c, s.handleIncomingMessage)
 	})
 	s.bot.Handle(tele.OnVoice, func(c tele.Context) error {
-		return s.handleIncomingMessage(c)
+		return s.runHandler("voice", c, s.handleIncomingMessage)
 	})
 	s.bot.Handle(tele.OnAudio, func(c tele.Context) error {
-		return s.handleIncomingMessage(c)
+		return s.runHandler("audio", c, s.handleIncomingMessage)
 	})
 	s.bot.Handle(tele.OnVideoNote, func(c tele.Context) error {
-		return s.handleIncomingMessage(c)
+		return s.runHandler("video_note", c, s.handleIncomingMessage)
 	})
 	s.bot.Handle("/cas", func(c tele.Context) error {
-		return s.handleCASCommand(c)
+		return s.runHandler("cas", c, s.handleCASCommand)
 	})
 	s.bot.Handle("/start", func(c tele.Context) error {
-		return s.handleStartCommand(c)
+		return s.runHandler("start", c, s.handleStartCommand)
 	})
 	s.bot.Handle("/help", func(c tele.Context) error {
-		return s.handleHelpCommand(c)
+		return s.runHandler("help", c, s.handleHelpCommand)
 	})
 	s.bot.Handle("/warn_status", func(c tele.Context) error {
-		return s.handleWarnStatusCommand(c)
+		return s.runHandler("warn_status", c, s.handleWarnStatusCommand)
 	})
 	s.bot.Handle("/status", func(c tele.Context) error {
-		return s.handleStatusCommand(c)
+		return s.runHandler("status", c, s.handleStatusCommand)
 	})
 	s.bot.Handle("/trust", func(c tele.Context) error {
-		return s.handleTrustCommand(c)
+		return s.runHandler("trust", c, s.handleTrustCommand)
 	})
 	s.bot.Handle("/config", func(c tele.Context) error {
-		return s.handleConfigCommand(c)
+		return s.runHandler("config", c, s.handleConfigCommand)
 	})
 	s.bot.Handle("/warn", func(c tele.Context) error {
-		return s.handleWarnCommand(c)
+		return s.runHandler("warn", c, s.handleWarnCommand)
 	})
 	s.bot.Handle("/unban", func(c tele.Context) error {
-		return s.handleUnbanCommand(c)
+		return s.runHandler("unban", c, s.handleUnbanCommand)
 	})
 	s.bot.Handle("/spam", func(c tele.Context) error {
-		return s.handleSpamCommand(c)
+		return s.runHandler("spam", c, s.handleSpamCommand)
 	})
+}
+
+func (s *Service) runHandler(name string, c tele.Context, handler func(tele.Context) error) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			s.logger.Error("telegram handler panic recovered", zap.String("handler", name), zap.Any("panic", r))
+			err = nil
+		}
+	}()
+	return handler(c)
 }
 
 func (s *Service) handleUserJoined(c tele.Context) error {
@@ -1776,6 +1798,9 @@ func (s *Service) resolveCommandTarget(ctx context.Context, msg *tele.Message, c
 	}
 	fields := strings.Fields(strings.TrimSpace(msg.Text))
 	if msg.ReplyTo != nil && len(fields) <= argIndex {
+		if msg.ReplyTo.Sender == nil {
+			return commandTarget{}, fmt.Errorf("不支持处理匿名/频道身份消息，请用 user_id")
+		}
 		return commandTarget{
 			UserID:    msg.ReplyTo.Sender.ID,
 			Username:  msg.ReplyTo.Sender.Username,
@@ -1812,6 +1837,9 @@ func (s *Service) resolveWarnTargetAndReason(ctx context.Context, msg *tele.Mess
 			}
 			reason = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(msg.Text), fields[0]+" "+fields[1]))
 		} else {
+			if msg.ReplyTo.Sender == nil {
+				return commandTarget{}, "", fmt.Errorf("不支持处理匿名/频道身份消息，请用 user_id")
+			}
 			target = commandTarget{
 				UserID:   msg.ReplyTo.Sender.ID,
 				Username: msg.ReplyTo.Sender.Username,
