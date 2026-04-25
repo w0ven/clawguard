@@ -91,7 +91,10 @@ func main() {
 		logger.Fatal("seed admins", zap.Error(err))
 	}
 
-	botService, err := bot.New(cfg, logger, queries, rdb, providerRegistry, modelRegistry, resolver)
+	workerCtx, workerCancel := context.WithCancel(ctx)
+	defer workerCancel()
+
+	botService, err := bot.New(workerCtx, cfg, logger, queries, rdb, providerRegistry, modelRegistry, resolver)
 	if err != nil {
 		logger.Fatal("create bot", zap.Error(err))
 	}
@@ -114,9 +117,6 @@ func main() {
 			logger.Warn("scheduled messages scheduler stop timeout")
 		}
 	}()
-
-	workerCtx, workerCancel := context.WithCancel(ctx)
-	defer workerCancel()
 
 	expiryWorker := worker.NewVerificationExpiry(logger, queries, botService)
 	go expiryWorker.Run(workerCtx)

@@ -110,7 +110,7 @@ func computeProfileCheckTimeout(policy config.GuardPolicy) time.Duration {
 	return total
 }
 
-func New(cfg config.Config, logger *zap.Logger, queries *store.Queries, rdb redis.Cmdable, providers ai.ProviderRegistry, models ai.ModelRegistry, resolver *ai.Resolver) (*Service, error) {
+func New(ctx context.Context, cfg config.Config, logger *zap.Logger, queries *store.Queries, rdb redis.Cmdable, providers ai.ProviderRegistry, models ai.ModelRegistry, resolver *ai.Resolver) (*Service, error) {
 	verifyBtn := tele.Btn{Unique: "verify_human"}
 	verifyMathBtn := tele.Btn{Unique: "verify_math"}
 	verifyRandBtn := tele.Btn{Unique: "verify_random"}
@@ -152,7 +152,7 @@ func New(cfg config.Config, logger *zap.Logger, queries *store.Queries, rdb redi
 	svc.aiProviders = providers
 	svc.aiModels = models
 	svc.aiResolver = resolver
-	svc.aiModerator = ai.NewModerator(logger, rdb, queries, providers, models, resolver, svc)
+	svc.aiModerator = ai.NewModerator(ctx, logger, rdb, queries, providers, models, resolver, svc)
 
 	svc.registerHandlers()
 

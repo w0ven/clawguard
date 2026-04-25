@@ -1,8 +1,10 @@
 package ai
 
 import (
+	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/openclaw/clawguard/internal/config"
 )
@@ -110,5 +112,39 @@ func TestCacheKeyIncludesScene(t *testing.T) {
 	}
 	if !strings.Contains(bioKey, ":bio:") {
 		t.Fatalf("expected bio cache key to include scene, got %q", bioKey)
+	}
+}
+
+func TestPersistenceContextUsesLifecycleAndTimeout(t *testing.T) {
+	lifeCtx, cancel := context.WithCancel(context.Background())
+	moderator := NewModerator(lifeCtx, nil, nil, nil, nil, nil, nil, nil)
+
+	persistCtx, persistCancel := moderator.persistenceContext()
+	defer persistCancel()
+
+	deadline, ok := persistCtx.Deadline()
+	if !ok {
+		t.Fatalf("expected persistence context to have deadline")
+	}
+	remaining := time.Until(deadline)
+	if remaining <= 0 || remaining > 5*time.Second {
+		t.Fatalf("expected persistence deadline within 5s, got %v", remaining)
+	}
+
+	cancel()
+	select {
+	case <-persistCtx.Done():
+	case <-time.After(time.Second):
+		t.Fatalf("expected persistence context to follow lifecycle cancellation")
+	}
+}
+
+func TestPersistenceContextFallsBackToBackground(t *testing.T) {
+	moderator := &Moderator{}
+	persistCtx, cancel := moderator.persistenceContext()
+	defer cancel()
+
+	if _, ok := persistCtx.Deadline(); !ok {
+		t.Fatalf("expected fallback persistence context to have deadline")
 	}
 }

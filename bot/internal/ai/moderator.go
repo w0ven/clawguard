@@ -103,6 +103,7 @@ const bioBasePrompt = `你是一个中文 Telegram 用户资料简介审核员�
 %s`
 
 type Moderator struct {
+	lifeCtx   context.Context
 	logger    *zap.Logger
 	redis     redis.Cmdable
 	queries   *store.Queries
@@ -165,14 +166,18 @@ func normalizeScene(scene string) string {
 	return "message"
 }
 
-func NewModerator(logger *zap.Logger, redis redis.Cmdable, queries *store.Queries, providers ProviderRegistry, models ModelRegistry, resolver *Resolver, status interface {
+func NewModerator(lifeCtx context.Context, logger *zap.Logger, redis redis.Cmdable, queries *store.Queries, providers ProviderRegistry, models ModelRegistry, resolver *Resolver, status interface {
 	MarkAISuccess()
 	MarkAIFailure(error)
 }) *Moderator {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
+	if lifeCtx == nil {
+		lifeCtx = context.Background()
+	}
 	return &Moderator{
+		lifeCtx:        lifeCtx,
 		logger:         logger,
 		redis:          redis,
 		queries:        queries,
@@ -182,6 +187,33 @@ func NewModerator(logger *zap.Logger, redis redis.Cmdable, queries *store.Querie
 		batches:        map[string]*pendingBatch{},
 		inflightByChat: map[int64]int{},
 		status:         status,
+	}
+}
+
+func (m *Moderator) lifeContext() context.Context {
+	if m != nil && m.lifeCtx != nil {
+		return m.lifeCtx
+	}
+	return context.Background()
+}
+
+func (m *Moderator) persistenceContext() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(m.lifeContext(), 5*time.Second)
+}
+
+func (m *Moderator) saveCacheWithTimeout(input CheckInput, output CheckOutput) {
+	cacheCtx, cancel := m.persistenceContext()
+	defer cancel()
+	if err := m.saveCache(cacheCtx, input, output); err != nil {
+		m.logger.Debug("save ai cache failed", zap.Error(err))
+	}
+}
+
+func (m *Moderator) bumpBudgetWithTimeout(chatID int64, costCents float64) {
+	budgetCtx, cancel := m.persistenceContext()
+	defer cancel()
+	if err := m.BumpBudget(budgetCtx, chatID, costCents); err != nil {
+		m.logger.Debug("bump ai budget failed", zap.Error(err), zap.Int64("chat_id", chatID))
 	}
 }
 
@@ -233,7 +265,7 @@ func (m *Moderator) CheckMessage(ctx context.Context, input CheckInput) (CheckOu
 		if window <= 0 {
 			window = 500
 		}
-		safeGo(context.Background(), m.logger, func() {
+		safeGo(m.lifeContext(), m.logger, func() {
 			m.flushBatch(key, time.Duration(window)*time.Millisecond)
 		})
 	}
@@ -261,7 +293,7 @@ func (m *Moderator) flushBatch(key string, window time.Duration) {
 
 	batchCtx := batch.ctx
 	if batchCtx == nil {
-		batchCtx = context.Background()
+		batchCtx = m.lifeContext()
 	}
 	batchCtx, cancel := context.WithTimeout(batchCtx, 30*time.Second)
 	defer cancel()
@@ -367,8 +399,8 @@ func (m *Moderator) checkBatch(ctx context.Context, inputs []CheckInput) ([]Chec
 					CostCents:     result.CostCents / float64(maxInt(1, len(inputs))),
 					FlagOnly:      flagOnly,
 				}
-				_ = m.saveCache(context.Background(), inputs[index], outputs[index])
-				_ = m.BumpBudget(context.Background(), inputs[index].ChatID, outputs[index].CostCents)
+				m.saveCacheWithTimeout(inputs[index], outputs[index])
+				m.bumpBudgetWithTimeout(inputs[index].ChatID, outputs[index].CostCents)
 			}
 			if m.status != nil {
 				m.status.MarkAISuccess()
@@ -489,8 +521,8 @@ func (m *Moderator) checkSingle(ctx context.Context, input CheckInput) (CheckOut
 				CostCents:     result.CostCents,
 				FlagOnly:      flagOnly,
 			}
-			_ = m.saveCache(context.Background(), input, output)
-			_ = m.BumpBudget(context.Background(), input.ChatID, output.CostCents)
+			m.saveCacheWithTimeout(input, output)
+			m.bumpBudgetWithTimeout(input.ChatID, output.CostCents)
 			if m.status != nil {
 				m.status.MarkAISuccess()
 			}

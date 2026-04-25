@@ -57,7 +57,7 @@ func TestCheckSingleLogsFallbackFailureAndReturnsNextModel(t *testing.T) {
 		"p2": moderatorCheckClient{result: &CheckResult{Verdicts: []Verdict{{Verdict: "clean", Confidence: 0.9, Category: "正常"}}, Model: "m2"}},
 	}}
 	observedCore, logs := observer.New(zap.WarnLevel)
-	moderator := NewModerator(zap.New(observedCore), nil, nil, providers, models, NewResolver(models), nil)
+	moderator := NewModerator(context.Background(), zap.New(observedCore), nil, nil, providers, models, NewResolver(models), nil)
 
 	output, err := moderator.checkSingle(context.Background(), CheckInput{
 		ChatID: 1,
