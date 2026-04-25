@@ -67,7 +67,11 @@ func (s *Service) startTurnstileVerification(ctx context.Context, chat *tele.Cha
 		return err
 	}
 
-	return s.storePendingVerification(ctx, chat.ID, user, "turnstile", payload, sent.ID, policy.Verify.TimeoutSeconds)
+	if err := s.storePendingVerification(ctx, chat.ID, user, "turnstile", payload, sent.ID, policy.Verify.TimeoutSeconds); err != nil {
+		s.deleteVerificationMessage(chat, int64Ptr(int64(sent.ID)))
+		return err
+	}
+	return nil
 }
 
 func (s *Service) VerifyTurnstileToken(ctx context.Context, token, cfResponse, remoteIP string) error {

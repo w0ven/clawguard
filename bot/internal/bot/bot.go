@@ -503,6 +503,7 @@ func (s *Service) startVerification(chat *tele.Chat, user *tele.User, joinEventM
 
 	verifyStartedAt := time.Now()
 	if err := s.startVerificationPrompt(ctx, chat, user, policy); err != nil {
+		s.rollbackVerificationRestriction(chat, user, "prompt_failed")
 		return err
 	}
 	s.logger.Info("verification step completed",
@@ -541,6 +542,22 @@ func (s *Service) startVerificationPrompt(ctx context.Context, chat *tele.Chat, 
 		)
 		return s.startButtonVerification(ctx, chat, user, policy)
 	}
+}
+
+func (s *Service) rollbackVerificationRestriction(chat *tele.Chat, user *tele.User, reason string) {
+	member := tele.ChatMember{
+		User:   user,
+		Rights: tele.NoRestrictions(),
+	}
+	if err := s.bot.Restrict(chat, &member); err != nil {
+		s.logger.Error("rollback verification restriction failed", zap.Error(err), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID), zap.String("reason", reason))
+		return
+	}
+	s.logger.Warn("verification restriction rolled back", zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID), zap.String("reason", reason))
+}
+
+func int64Ptr(v int64) *int64 {
+	return &v
 }
 
 func (s *Service) startAsyncVerificationChecks(chat *tele.Chat, user *tele.User, policy config.GuardPolicy) {
@@ -863,10 +880,15 @@ func (s *Service) startButtonVerification(ctx context.Context, chat *tele.Chat, 
 		CreatedAt:    time.Now(),
 	})
 	if err != nil {
+		s.deleteVerificationMessage(chat, int64Ptr(int64(sent.ID)))
 		return err
 	}
 
-	return s.storePendingVerification(ctx, chat.ID, user, "button", payload, sent.ID, policy.Verify.TimeoutSeconds)
+	if err := s.storePendingVerification(ctx, chat.ID, user, "button", payload, sent.ID, policy.Verify.TimeoutSeconds); err != nil {
+		s.deleteVerificationMessage(chat, int64Ptr(int64(sent.ID)))
+		return err
+	}
+	return nil
 }
 
 func (s *Service) startMathVerification(ctx context.Context, chat *tele.Chat, user *tele.User, policy config.GuardPolicy) error {
@@ -892,10 +914,15 @@ func (s *Service) startMathVerification(ctx context.Context, chat *tele.Chat, us
 
 	payload, err := json.Marshal(mathPayload{Answer: answer})
 	if err != nil {
+		s.deleteVerificationMessage(chat, int64Ptr(int64(sent.ID)))
 		return err
 	}
 
-	return s.storePendingVerification(ctx, chat.ID, user, "math", payload, sent.ID, policy.Verify.TimeoutSeconds)
+	if err := s.storePendingVerification(ctx, chat.ID, user, "math", payload, sent.ID, policy.Verify.TimeoutSeconds); err != nil {
+		s.deleteVerificationMessage(chat, int64Ptr(int64(sent.ID)))
+		return err
+	}
+	return nil
 }
 
 func (s *Service) startRandomVerification(ctx context.Context, chat *tele.Chat, user *tele.User, policy config.GuardPolicy) error {
@@ -921,10 +948,15 @@ func (s *Service) startRandomVerification(ctx context.Context, chat *tele.Chat, 
 
 	payload, err := json.Marshal(randomPayload{CorrectEmoji: answer})
 	if err != nil {
+		s.deleteVerificationMessage(chat, int64Ptr(int64(sent.ID)))
 		return err
 	}
 
-	return s.storePendingVerification(ctx, chat.ID, user, "random", payload, sent.ID, policy.Verify.TimeoutSeconds)
+	if err := s.storePendingVerification(ctx, chat.ID, user, "random", payload, sent.ID, policy.Verify.TimeoutSeconds); err != nil {
+		s.deleteVerificationMessage(chat, int64Ptr(int64(sent.ID)))
+		return err
+	}
+	return nil
 }
 
 func (s *Service) storePendingVerification(ctx context.Context, chatID int64, user *tele.User, method string, payload []byte, messageID int, timeoutSeconds int) error {
