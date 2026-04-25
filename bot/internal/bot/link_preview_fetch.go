@@ -188,7 +188,7 @@ func normalizeTmeURL(raw string) (string, error) {
 		}
 	}
 	host := strings.TrimPrefix(strings.ToLower(parsed.Hostname()), "www.")
-	if host != "t.me" {
+	if host != "t.me" && host != "telegram.me" {
 		return "", fmt.Errorf("unsupported host %q", host)
 	}
 	path := strings.TrimSpace(parsed.EscapedPath())

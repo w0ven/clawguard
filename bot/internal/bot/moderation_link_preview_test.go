@@ -103,6 +103,38 @@ func TestExtractTmeURLs_FiltersNonTme(t *testing.T) {
 	}
 }
 
+func TestExtractTmeURLs_NormalizesTelegramHostVariants(t *testing.T) {
+	raws := []string{
+		"https://t.me/test/1?single",
+		"http://t.me/test/1?single",
+		"https://www.t.me/test/1?single",
+		"https://telegram.me/test/1?single",
+		"http://telegram.me/test/1?single",
+		"https://www.telegram.me/test/1?single",
+	}
+	for _, raw := range raws {
+		msg := &tele.Message{
+			Text: raw,
+			Entities: tele.Entities{
+				{Type: tele.EntityURL, Offset: 0, Length: len(raw)},
+			},
+		}
+		urls := extractTmeURLs(msg)
+		if len(urls) != 1 {
+			t.Fatalf("%s: len(urls) = %d, want 1 (%v)", raw, len(urls), urls)
+		}
+		if urls[0] != "https://t.me/test/1?single" {
+			t.Fatalf("%s: url = %q", raw, urls[0])
+		}
+	}
+}
+
+func TestNormalizeTmeURLRejectsNonTelegramHosts(t *testing.T) {
+	if _, err := normalizeTmeURL("https://example.com/test/1"); err == nil {
+		t.Fatal("expected non Telegram host to be rejected")
+	}
+}
+
 func TestBuildReviewableContent_MultipleURLsFetchedConcurrently(t *testing.T) {
 	msg := &tele.Message{
 		Text: "https://t.me/a/1 https://t.me/b/2 https://t.me/c/3",
