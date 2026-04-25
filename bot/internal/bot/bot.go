@@ -448,8 +448,10 @@ func (s *Service) startVerification(chat *tele.Chat, user *tele.User, joinEventM
 	}
 	restrictStartedAt := time.Now()
 	if err := s.bot.Restrict(chat, &member); err != nil {
-		s.logger.Error("restrict new member", zap.Error(err), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
-		return err
+		readable := normalizeTelegramActionError("restrict", err)
+		s.logger.Error("restrict new member", zap.Error(readable), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
+		s.sendBotPermissionWarningToChat(chat, "⚠️ 新人入群验证启动失败："+htmlEscape(readable.Error())+"。请检查 bot 是否拥有封禁/禁言成员权限。")
+		return readable
 	}
 	s.logger.Info("verification step completed",
 		zap.Int64("chat_id", chat.ID),
@@ -2021,5 +2023,89 @@ func (s *Service) handleMyChatMemberUpdate(c tele.Context) error {
 	if update == nil || update.Chat == nil || update.NewChatMember == nil || update.OldChatMember == nil {
 		return nil
 	}
+	ctx := context.Background()
+	s.checkBotAdminPermissions(ctx, update)
 	return s.handleBotChatMemberUpdate(update)
+}
+
+func (s *Service) checkBotAdminPermissions(ctx context.Context, update *tele.ChatMemberUpdate) {
+	if update == nil || update.Chat == nil || update.NewChatMember == nil {
+		return
+	}
+	member := update.NewChatMember
+	if member.Role != tele.Administrator && member.Role != tele.Creator {
+		s.warnMissingBotPermissions(ctx, update.Chat, []string{"管理员身份", "删除消息", "封禁/禁言成员"})
+		return
+	}
+	missing := requiredBotPermissionNames(member)
+	if len(missing) == 0 {
+		return
+	}
+	s.warnMissingBotPermissions(ctx, update.Chat, missing)
+}
+
+func requiredBotPermissionNames(member *tele.ChatMember) []string {
+	if member == nil || member.Role == tele.Creator {
+		return nil
+	}
+	missing := []string{}
+	if !member.CanDeleteMessages {
+		missing = append(missing, "删除消息")
+	}
+	if !member.CanRestrictMembers {
+		missing = append(missing, "封禁/禁言成员")
+	}
+	return missing
+}
+
+func (s *Service) warnMissingBotPermissions(ctx context.Context, chat *tele.Chat, missing []string) {
+	if chat == nil || len(missing) == 0 {
+		return
+	}
+	chatID := chat.ID
+	s.WriteRuntimeAudit(ctx, "bot_permissions", &chatID, "missing_required_permissions", map[string]any{
+		"chat_id": chat.ID,
+		"title":   chat.Title,
+	}, map[string]any{
+		"missing": missing,
+	})
+	message := fmt.Sprintf("⚠️ ClawGuard 缺少必要管理权限：%s。请授予 bot 管理员身份、删除消息、封禁/禁言成员权限，否则入群验证和违规处置可能失效。", htmlEscape(strings.Join(missing, "、")))
+	s.sendBotPermissionWarningToChat(chat, message)
+	s.sendBotPermissionWarningToOwners(ctx, chat, message)
+}
+
+func (s *Service) sendBotPermissionWarningToChat(chat *tele.Chat, message string) {
+	if chat == nil {
+		return
+	}
+	if _, err := s.bot.Send(chat, message, &tele.SendOptions{ParseMode: tele.ModeHTML, DisableWebPagePreview: true}); err != nil {
+		s.logger.Warn("send bot permission warning to chat failed", zap.Error(err), zap.Int64("chat_id", chat.ID))
+	}
+}
+
+func (s *Service) sendBotPermissionWarningToOwners(ctx context.Context, chat *tele.Chat, message string) {
+	recipients := map[int64]struct{}{}
+	if s.queries != nil {
+		if owner, err := s.queries.GetFirstOwnerAdmin(ctx); err == nil && owner.TelegramID != 0 {
+			recipients[owner.TelegramID] = struct{}{}
+		}
+	}
+	for _, id := range s.cfg.AdminTelegramIDs {
+		if id != 0 {
+			recipients[id] = struct{}{}
+		}
+	}
+	if len(recipients) == 0 {
+		return
+	}
+	title := "未知群"
+	if chat != nil && strings.TrimSpace(chat.Title) != "" {
+		title = chat.Title
+	}
+	text := fmt.Sprintf("%s\n群：%s (%d)", message, htmlEscape(title), chat.ID)
+	for id := range recipients {
+		if err := s.SendHTMLPrivateMessage(id, text); err != nil {
+			s.logger.Warn("send bot permission warning to owner failed", zap.Error(err), zap.Int64("telegram_id", id))
+		}
+	}
 }

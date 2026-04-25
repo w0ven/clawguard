@@ -1773,7 +1773,7 @@ func (s *Service) deleteMessage(msg *tele.Message) error {
 		s.logger.Warn("load system state failed before delete", zap.Error(err))
 	}
 	if err := s.bot.Delete(msg); err != nil {
-		return fmt.Errorf("delete message: %w", err)
+		return normalizeTelegramActionError("delete", err)
 	}
 	return nil
 }
@@ -1796,7 +1796,10 @@ func (s *Service) muteUser(chat *tele.Chat, user *tele.User, seconds int) error 
 		Rights:          tele.NoRights(),
 		RestrictedUntil: time.Now().Add(time.Duration(seconds) * time.Second).Unix(),
 	}
-	return s.bot.Restrict(chat, member)
+	if err := s.bot.Restrict(chat, member); err != nil {
+		return normalizeTelegramActionError("restrict", err)
+	}
+	return nil
 }
 
 func (s *Service) kickUser(chat *tele.Chat, user *tele.User) error {
@@ -1811,9 +1814,12 @@ func (s *Service) kickUser(chat *tele.Chat, user *tele.User) error {
 	}
 	member := &tele.ChatMember{User: user}
 	if err := s.bot.Ban(chat, member); err != nil {
-		return err
+		return normalizeTelegramActionError("ban", err)
 	}
-	return s.bot.Unban(chat, user)
+	if err := s.bot.Unban(chat, user); err != nil {
+		return normalizeTelegramActionError("unban", err)
+	}
+	return nil
 }
 
 func (s *Service) banUser(chat *tele.Chat, user *tele.User) error {
@@ -1826,7 +1832,30 @@ func (s *Service) banUser(chat *tele.Chat, user *tele.User) error {
 	} else if err != nil {
 		s.logger.Warn("load system state failed before ban", zap.Error(err))
 	}
-	return s.bot.Ban(chat, &tele.ChatMember{User: user})
+	if err := s.bot.Ban(chat, &tele.ChatMember{User: user}); err != nil {
+		return normalizeTelegramActionError("ban", err)
+	}
+	return nil
+}
+
+func normalizeTelegramActionError(action string, err error) error {
+	if err == nil {
+		return nil
+	}
+	message := strings.ToLower(err.Error())
+	var tgErr *tele.Error
+	if errors.As(err, &tgErr) {
+		message = strings.ToLower(tgErr.Description + " " + tgErr.Message)
+	}
+	if strings.Contains(message, "not enough rights") || strings.Contains(message, "administrator rights") || strings.Contains(message, "can't restrict") || strings.Contains(message, "can't remove") || strings.Contains(message, "have no rights") {
+		switch action {
+		case "delete":
+			return fmt.Errorf("bot 缺删除消息权限: %w", err)
+		case "ban", "unban", "restrict":
+			return fmt.Errorf("bot 缺 ban/禁言权限: %w", err)
+		}
+	}
+	return fmt.Errorf("telegram %s failed: %w", action, err)
 }
 
 func (s *Service) actionsPaused(ctx context.Context) (bool, error) {
