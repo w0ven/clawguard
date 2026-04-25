@@ -79,6 +79,11 @@ func (s *Scheduler) Add(msg store.ScheduledMessage) error {
 	}
 
 	var ids []cron.EntryID
+	rollback := func() {
+		for _, id := range ids {
+			s.cron.Remove(id)
+		}
+	}
 	switch msg.ScheduleType {
 	case "interval":
 		if msg.IntervalMinutes == nil || *msg.IntervalMinutes < 1 {
@@ -95,6 +100,7 @@ func (s *Scheduler) Add(msg store.ScheduledMessage) error {
 		for _, value := range msg.DailyTimes {
 			hour, minute, err := parseHHMM(value)
 			if err != nil {
+				rollback()
 				return err
 			}
 			spec := fmt.Sprintf("0 %d %d * * *", minute, hour)
@@ -102,6 +108,7 @@ func (s *Scheduler) Add(msg store.ScheduledMessage) error {
 				return func() { _ = s.run(context.Background(), id, false) }
 			}(msg.ID))
 			if err != nil {
+				rollback()
 				return err
 			}
 			ids = append(ids, id)

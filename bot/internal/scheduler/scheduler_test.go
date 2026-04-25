@@ -1,6 +1,13 @@
 package scheduler
 
-import "testing"
+import (
+	"testing"
+	"time"
+
+	"github.com/robfig/cron/v3"
+
+	"github.com/openclaw/clawguard/internal/store"
+)
 
 func TestRenderScheduledTemplateEscapesKnownVarsAndKeepsUnknown(t *testing.T) {
 	got := RenderScheduledTemplate("群：{group_title} 未知：{missing}", map[string]string{
@@ -33,5 +40,28 @@ func TestSchedulerAcquireRunAllowsDifferentIDs(t *testing.T) {
 	}
 	if !s.acquireRun(2) {
 		t.Fatal("different id acquire rejected")
+	}
+}
+
+func TestSchedulerAddDailyRollsBackOnInvalidLaterTime(t *testing.T) {
+	s := &Scheduler{
+		cron:    cron.New(cron.WithLocation(time.UTC), cron.WithSeconds()),
+		entries: make(map[int64][]cron.EntryID),
+	}
+	err := s.Add(store.ScheduledMessage{
+		ID:           99,
+		ScheduleType: "daily",
+		DailyTimes:   []string{"08:00", "INVALID"},
+		Enabled:      true,
+		Status:       "active",
+	})
+	if err == nil {
+		t.Fatal("Add succeeded, want invalid daily time error")
+	}
+	if got := len(s.entries[99]); got != 0 {
+		t.Fatalf("entries length = %d, want 0", got)
+	}
+	if got := len(s.cron.Entries()); got != 0 {
+		t.Fatalf("cron entries length = %d, want 0", got)
 	}
 }
