@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/labstack/echo/v4"
+	"go.uber.org/zap"
 
 	"github.com/openclaw/clawguard/internal/store"
 )
@@ -67,6 +69,14 @@ func (s *Server) requireAdminJWT(next echo.HandlerFunc) echo.HandlerFunc {
 		claims, ok := token.Claims.(*adminClaims)
 		if !ok {
 			return c.JSON(http.StatusUnauthorized, map[string]string{"error": "invalid claims"})
+		}
+		if claims.ID == "" {
+			return c.JSON(http.StatusUnauthorized, map[string]string{"error": "invalid token id"})
+		}
+		if revoked, err := s.isAdminJWTRevoked(c.Request().Context(), claims.ID); err != nil {
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": "token check failed"})
+		} else if revoked {
+			return c.JSON(http.StatusUnauthorized, map[string]string{"error": "token revoked"})
 		}
 
 		adminID, err := strconv.ParseInt(claims.Subject, 10, 64)
@@ -143,6 +153,21 @@ func (s *Server) handleTelegramLogin(c echo.Context) error {
 }
 
 func (s *Server) handleLogout(c echo.Context) error {
+	tokenString := readAdminToken(c)
+	if tokenString != "" {
+		claims := &adminClaims{}
+		token, err := jwt.ParseWithClaims(tokenString, claims, func(token *jwt.Token) (any, error) {
+			if token.Method.Alg() != jwt.SigningMethodHS256.Alg() {
+				return nil, fmt.Errorf("unexpected signing method %s", token.Method.Alg())
+			}
+			return []byte(s.cfg.JWTSecret), nil
+		})
+		if err == nil && token.Valid && claims.ID != "" {
+			if err := s.revokeAdminJWT(c.Request().Context(), claims); err != nil {
+				return c.JSON(http.StatusInternalServerError, map[string]string{"error": "logout failed"})
+			}
+		}
+	}
 	clearAdminCookie(c)
 	clearCSRFCookie(c)
 	return c.NoContent(http.StatusNoContent)
@@ -157,10 +182,15 @@ func (s *Server) handleMe(c echo.Context) error {
 }
 
 func (s *Server) signAdminJWT(admin store.Admin) (string, error) {
+	jti, err := newCSRFToken()
+	if err != nil {
+		return "", err
+	}
 	claims := adminClaims{
 		Role: admin.Role,
 		TgID: admin.TelegramID,
 		RegisteredClaims: jwt.RegisteredClaims{
+			ID:        jti,
 			Subject:   strconv.FormatInt(admin.ID, 10),
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(24 * time.Hour)),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
@@ -169,6 +199,39 @@ func (s *Server) signAdminJWT(admin store.Admin) (string, error) {
 
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	return token.SignedString([]byte(s.cfg.JWTSecret))
+}
+
+func adminJWTRevokedKey(jti string) string {
+	return "admin_jwt_revoked:" + jti
+}
+
+func (s *Server) isAdminJWTRevoked(ctx context.Context, jti string) (bool, error) {
+	rdb := s.botService.Redis()
+	if rdb == nil || jti == "" {
+		return false, nil
+	}
+	count, err := rdb.Exists(ctx, adminJWTRevokedKey(jti)).Result()
+	if err != nil {
+		s.logger.Warn("check revoked admin jwt failed", zap.Error(err))
+		return false, err
+	}
+	return count > 0, nil
+}
+
+func (s *Server) revokeAdminJWT(ctx context.Context, claims *adminClaims) error {
+	rdb := s.botService.Redis()
+	if rdb == nil || claims == nil || claims.ID == "" || claims.ExpiresAt == nil {
+		return nil
+	}
+	ttl := time.Until(claims.ExpiresAt.Time)
+	if ttl <= 0 {
+		return nil
+	}
+	if err := rdb.Set(ctx, adminJWTRevokedKey(claims.ID), "1", ttl).Err(); err != nil {
+		s.logger.Warn("revoke admin jwt failed", zap.Error(err))
+		return err
+	}
+	return nil
 }
 
 func currentAdmin(c echo.Context) (store.Admin, bool) {
