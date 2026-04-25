@@ -265,16 +265,15 @@ func (s *Service) sendMathImageChallenge(ctx context.Context, chat *tele.Chat, u
 				zap.Error(sendErr),
 			)
 		} else if sent != nil {
-			go func() {
-				time.Sleep(30 * time.Second)
-				if err := s.bot.Delete(sent); err != nil {
+			s.runDelayed(30*time.Second, func() {
+				if err := s.deleteDelayedMessage(sent); err != nil {
 					s.logger.Debug(
 						"delete math image failure notice failed",
 						zap.Int64("chat_id", chat.ID),
 						zap.Error(err),
 					)
 				}
-			}()
+			})
 		}
 		return err
 	}

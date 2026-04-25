@@ -1,6 +1,7 @@
 package scheduler
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -84,5 +85,17 @@ func TestCanRunScheduledMessageAllowsAutomaticActive(t *testing.T) {
 	err := canRunScheduledMessage(store.ScheduledMessage{Enabled: true, Status: "active"}, false)
 	if err != nil {
 		t.Fatalf("automatic active returned error: %v", err)
+	}
+}
+
+func TestSchedulerStopCancelsDeleteLater(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	s := &Scheduler{ctx: ctx, cancel: cancel, cron: cron.New(cron.WithLocation(time.UTC), cron.WithSeconds())}
+	s.deleteLater(42, 1, time.Hour)
+	stopCtx := s.Stop()
+	select {
+	case <-stopCtx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("Stop did not finish after canceling deleteLater")
 	}
 }

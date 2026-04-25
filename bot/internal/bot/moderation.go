@@ -2374,8 +2374,8 @@ func (s *Service) sendWelcomeMessage(ctx context.Context, chat *tele.Chat, user 
 		return
 	}
 
-	time.AfterFunc(time.Duration(welcome.DeleteAfterSeconds)*time.Second, func() {
-		if err := s.bot.Delete(message); err != nil {
+	s.runDelayed(time.Duration(welcome.DeleteAfterSeconds)*time.Second, func() {
+		if err := s.deleteDelayedMessage(message); err != nil {
 			s.logger.Warn("delete welcome message failed", zap.Error(err), zap.Int64("chat_id", chat.ID), zap.Int("message_id", message.ID))
 		}
 	})

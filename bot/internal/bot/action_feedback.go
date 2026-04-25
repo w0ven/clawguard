@@ -55,16 +55,13 @@ func (s *Service) sendActionFeedback(
 
 	if feedback.AutoDeleteSeconds > 0 && sent != nil {
 		secs := feedback.AutoDeleteSeconds
-		go func() {
-			timer := time.NewTimer(time.Duration(secs) * time.Second)
-			defer timer.Stop()
-			<-timer.C
-			if delErr := s.bot.Delete(sent); delErr != nil {
+		s.runDelayed(time.Duration(secs)*time.Second, func() {
+			if delErr := s.deleteDelayedMessage(sent); delErr != nil {
 				s.logger.Debug("auto delete feedback failed",
 					zap.Error(delErr),
 					zap.Int("message_id", sent.ID))
 			}
-		}()
+		})
 	}
 }
 

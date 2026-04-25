@@ -33,6 +33,9 @@ type Scheduler struct {
 	}
 	logger  *zap.Logger
 	running sync.Map
+	ctx     context.Context
+	cancel  context.CancelFunc
+	wg      sync.WaitGroup
 
 	mu      sync.Mutex
 	entries map[int64][]cron.EntryID
@@ -42,12 +45,15 @@ func New(logger *zap.Logger, queries *store.Queries, bot *tele.Bot, sendLimiter 
 	WaitChat(context.Context, int64) error
 	WaitGlobal(context.Context) error
 }) *Scheduler {
+	ctx, cancel := context.WithCancel(context.Background())
 	return &Scheduler{
 		cron:        cron.New(cron.WithLocation(time.UTC), cron.WithSeconds()),
 		queries:     queries,
 		bot:         bot,
 		sendLimiter: sendLimiter,
 		logger:      logger,
+		ctx:         ctx,
+		cancel:      cancel,
 		entries:     make(map[int64][]cron.EntryID),
 	}
 }
@@ -57,7 +63,28 @@ func (s *Scheduler) Start() {
 }
 
 func (s *Scheduler) Stop() context.Context {
-	return s.cron.Stop()
+	if s.cancel != nil {
+		s.cancel()
+	}
+	cronCtx := s.cron.Stop()
+	done := make(chan struct{})
+	go func() {
+		<-cronCtx.Done()
+		s.wg.Wait()
+		close(done)
+	}()
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		defer cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			if s.logger != nil {
+				s.logger.Warn("scheduler stop timeout waiting delayed jobs")
+			}
+		}
+	}()
+	return ctx
 }
 
 func (s *Scheduler) LoadActive(ctx context.Context) error {
@@ -252,7 +279,7 @@ func (s *Scheduler) run(ctx context.Context, id int64, manual bool) error {
 	}
 
 	if msg.AutoDeleteSeconds > 0 {
-		go s.deleteLater(msg.ChatID, sent.ID, time.Duration(msg.AutoDeleteSeconds)*time.Second)
+		s.deleteLater(msg.ChatID, sent.ID, time.Duration(msg.AutoDeleteSeconds)*time.Second)
 	}
 	return nil
 }
@@ -376,12 +403,27 @@ func (s *Scheduler) insertRun(ctx context.Context, id int64, success bool, messa
 }
 
 func (s *Scheduler) deleteLater(chatID int64, messageID int, delay time.Duration) {
-	timer := time.NewTimer(delay)
-	defer timer.Stop()
-	<-timer.C
-	if err := s.bot.Delete(&tele.Message{ID: messageID, Chat: &tele.Chat{ID: chatID}}); err != nil {
-		s.logger.Warn("auto delete scheduled message failed", zap.Error(err), zap.Int64("chat_id", chatID), zap.Int("message_id", messageID))
+	ctx := s.ctx
+	if ctx == nil {
+		ctx = context.Background()
 	}
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+			if ctx.Err() != nil {
+				return
+			}
+		case <-ctx.Done():
+			return
+		}
+		if err := s.bot.Delete(&tele.Message{ID: messageID, Chat: &tele.Chat{ID: chatID}}); err != nil {
+			s.logger.Warn("auto delete scheduled message failed", zap.Error(err), zap.Int64("chat_id", chatID), zap.Int("message_id", messageID))
+		}
+	}()
 }
 
 func (s *Scheduler) sendThrottled(ctx context.Context, chat *tele.Chat, what interface{}, opts ...interface{}) (*tele.Message, error) {

@@ -302,7 +302,7 @@ func mdv2EscapeChars(s string) string {
 }
 
 func (s *Service) scheduleKeywordReplyDelete(chat *tele.Chat, sent *tele.Message, rule config.KeywordReplyRule) {
-	time.AfterFunc(time.Duration(rule.AutoDeleteSeconds)*time.Second, func() {
+	s.runDelayed(time.Duration(rule.AutoDeleteSeconds)*time.Second, func() {
 		defer func() {
 			if recovered := recover(); recovered != nil {
 				s.logger.Warn("keyword reply auto delete panic", zap.Any("panic", recovered), zap.String("rule_id", rule.ID))
@@ -311,7 +311,7 @@ func (s *Service) scheduleKeywordReplyDelete(chat *tele.Chat, sent *tele.Message
 		if sent == nil || chat == nil {
 			return
 		}
-		if err := s.bot.Delete(sent); err != nil {
+		if err := s.deleteDelayedMessage(sent); err != nil {
 			s.logger.Warn("auto delete keyword reply failed", zap.Error(err), zap.Int64("chat_id", chat.ID), zap.Int("message_id", sent.ID), zap.String("rule_id", rule.ID))
 		}
 	})

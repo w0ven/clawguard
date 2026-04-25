@@ -40,6 +40,9 @@ type Service struct {
 	bot              *tele.Bot
 	sender           telegramSender
 	sendLimiter      *SendLimiter
+	lifecycleCtx     context.Context
+	lifecycleCancel  context.CancelFunc
+	wg               sync.WaitGroup
 	verifyBtn        tele.Btn
 	verifyMathBtn    tele.Btn
 	verifyRandBtn    tele.Btn
@@ -127,19 +130,23 @@ func New(cfg config.Config, logger *zap.Logger, queries *store.Queries, rdb redi
 		return nil, fmt.Errorf("new telebot: %w", err)
 	}
 
+	lifecycleCtx, lifecycleCancel := context.WithCancel(context.Background())
+
 	svc := &Service{
-		cfg:           cfg,
-		logger:        logger,
-		queries:       queries,
-		redis:         rdb,
-		casClient:     casclient.New(nil, rdb),
-		bot:           b,
-		sender:        b,
-		sendLimiter:   NewSendLimiter(),
-		verifyBtn:     verifyBtn,
-		verifyMathBtn: verifyMathBtn,
-		verifyRandBtn: verifyRandBtn,
-		startedAt:     time.Now().UTC(),
+		cfg:             cfg,
+		logger:          logger,
+		queries:         queries,
+		redis:           rdb,
+		casClient:       casclient.New(nil, rdb),
+		bot:             b,
+		sender:          b,
+		sendLimiter:     NewSendLimiter(),
+		lifecycleCtx:    lifecycleCtx,
+		lifecycleCancel: lifecycleCancel,
+		verifyBtn:       verifyBtn,
+		verifyMathBtn:   verifyMathBtn,
+		verifyRandBtn:   verifyRandBtn,
+		startedAt:       time.Now().UTC(),
 	}
 
 	svc.aiProviders = providers
@@ -203,6 +210,52 @@ func (s *Service) setupCommandMenu() error {
 		return fmt.Errorf("set private commands: %w", err)
 	}
 	return nil
+}
+
+func (s *Service) Stop() {
+	if s.lifecycleCancel != nil {
+		s.lifecycleCancel()
+	}
+	done := make(chan struct{})
+	go func() {
+		s.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		if s.logger != nil {
+			s.logger.Warn("bot service stop timeout waiting delayed jobs")
+		}
+	}
+}
+
+func (s *Service) runDelayed(delay time.Duration, fn func()) {
+	ctx := s.lifecycleCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+			if ctx.Err() == nil {
+				fn()
+			}
+		case <-ctx.Done():
+		}
+	}()
+}
+
+func (s *Service) deleteDelayedMessage(msg tele.Editable) error {
+	sender := s.sender
+	if sender != nil {
+		return sender.Delete(msg)
+	}
+	return s.bot.Delete(msg)
 }
 
 func (s *Service) ProcessUpdate(update tele.Update) error {
@@ -1890,10 +1943,9 @@ func (s *Service) handleSpamCommand(c tele.Context) error {
 	}
 
 	// 2. Delete the /spam command message itself after 3s
-	go func() {
-		time.Sleep(3 * time.Second)
-		_ = s.bot.Delete(&tele.Message{ID: msg.ID, Chat: chat})
-	}()
+	s.runDelayed(3*time.Second, func() {
+		_ = s.deleteDelayedMessage(&tele.Message{ID: msg.ID, Chat: chat})
+	})
 
 	// 3. Ban user
 	if err := s.bot.Ban(chat, &tele.ChatMember{User: &tele.User{ID: target.UserID}}); err != nil {
@@ -1951,10 +2003,9 @@ func (s *Service) handleSpamCommand(c tele.Context) error {
 	// 9. Send confirmation then auto-delete after 5s
 	confirm, _ := s.sendThrottled(ctx, chat, "\U0001f6a8 已将 "+htmlEscape(target.Display)+" 封禁", &tele.SendOptions{ParseMode: tele.ModeHTML})
 	if confirm != nil {
-		go func() {
-			time.Sleep(5 * time.Second)
-			_ = s.bot.Delete(&tele.Message{ID: confirm.ID, Chat: chat})
-		}()
+		s.runDelayed(5*time.Second, func() {
+			_ = s.deleteDelayedMessage(&tele.Message{ID: confirm.ID, Chat: chat})
+		})
 	}
 
 	return nil

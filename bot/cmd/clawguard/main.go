@@ -99,6 +99,7 @@ func main() {
 	if err := botService.RegisterWebhook(ctx); err != nil {
 		logger.Fatal("register webhook", zap.Error(err))
 	}
+	defer botService.Stop()
 
 	scheduledMessages := scheduler.New(logger, queries, botService.TelegramBot(), botService.SendLimiter())
 	if err := scheduledMessages.LoadActive(ctx); err != nil {
