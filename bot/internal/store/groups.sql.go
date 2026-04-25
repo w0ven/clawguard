@@ -30,6 +30,13 @@ FROM groups
 ORDER BY title ASC, chat_id ASC
 `
 
+const listGroupsScoped = `-- name: ListGroupsScoped :many
+SELECT id, chat_id, title, type, member_count, enabled, joined_at, config
+FROM groups
+WHERE ($1::BIGINT[] IS NULL OR cardinality($1::BIGINT[]) = 0 OR chat_id = ANY($1::BIGINT[]))
+ORDER BY title ASC, chat_id ASC
+`
+
 const updateGroupConfig = `-- name: UpdateGroupConfig :one
 UPDATE groups
 SET config = $2
@@ -83,6 +90,36 @@ type UpdateGroupConfigParams struct {
 
 func (q *Queries) ListGroups(ctx context.Context) ([]Group, error) {
 	rows, err := q.db.Query(ctx, listGroups)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var items []Group
+	for rows.Next() {
+		var i Group
+		if err := rows.Scan(
+			&i.ID,
+			&i.ChatID,
+			&i.Title,
+			&i.Type,
+			&i.MemberCount,
+			&i.Enabled,
+			&i.JoinedAt,
+			&i.Config,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+func (q *Queries) ListGroupsScoped(ctx context.Context, chatIds []int64) ([]Group, error) {
+	rows, err := q.db.Query(ctx, listGroupsScoped, chatIds)
 	if err != nil {
 		return nil, err
 	}

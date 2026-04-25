@@ -82,7 +82,8 @@ func (s *Server) registerAdminRoutes() {
 
 func (s *Server) handleListGroups(c echo.Context) error {
 	admin, _ := currentAdmin(c)
-	groups, err := s.botService.Queries().ListGroups(c.Request().Context())
+	chatIDs, _ := adminScopeFilter(admin)
+	groups, err := s.botService.Queries().ListGroupsScoped(c.Request().Context(), chatIDs)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "list groups failed"})
 	}
@@ -92,9 +93,6 @@ func (s *Server) handleListGroups(c echo.Context) error {
 	}
 	items := make([]map[string]any, 0, len(groups))
 	for _, group := range groups {
-		if !adminCanAccessChat(admin, group.ChatID) {
-			continue
-		}
 		items = append(items, serializeGroup(group))
 	}
 	return c.JSON(http.StatusOK, map[string]any{"groups": items})

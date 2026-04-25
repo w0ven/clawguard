@@ -21,6 +21,12 @@ SELECT id, chat_id, title, type, member_count, enabled, joined_at, config
 FROM groups
 ORDER BY title ASC, chat_id ASC;
 
+-- name: ListGroupsScoped :many
+SELECT id, chat_id, title, type, member_count, enabled, joined_at, config
+FROM groups
+WHERE ($1::BIGINT[] IS NULL OR cardinality($1::BIGINT[]) = 0 OR chat_id = ANY($1::BIGINT[]))
+ORDER BY title ASC, chat_id ASC;
+
 -- name: UpdateGroupConfig :one
 UPDATE groups
 SET config = $2
