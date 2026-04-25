@@ -12,27 +12,24 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { apiFetch } from "@/lib/api";
-import type { AICacheStats, AICostSummary } from "@/lib/types";
+import type { AICacheStats, AICallSummary } from "@/lib/types";
 import { useToast } from "@/components/providers";
 
-function formatCents(value: number) {
-  return `${value.toFixed(2)}¢`;
-}
-
-function CostTrendChart({
+function CallTrendChart({
   points,
 }: {
-  points: { date: string; cost_cents: number; calls: number }[];
+  points: { date: string; calls: number }[];
 }) {
   const width = 760;
   const height = 220;
   const padding = 24;
-  const max = Math.max(...points.map((item) => item.cost_cents), 1);
-  const stepX = points.length > 1 ? (width - padding * 2) / (points.length - 1) : 0;
+  const max = Math.max(...points.map((item) => item.calls), 1);
+  const stepX =
+    points.length > 1 ? (width - padding * 2) / (points.length - 1) : 0;
   const path = points
     .map((point, index) => {
       const x = padding + stepX * index;
-      const y = height - padding - (point.cost_cents / max) * (height - padding * 2);
+      const y = height - padding - (point.calls / max) * (height - padding * 2);
       return `${index === 0 ? "M" : "L"} ${x} ${y}`;
     })
     .join(" ");
@@ -44,10 +41,10 @@ function CostTrendChart({
           viewBox={`0 0 ${width} ${height}`}
           className="min-w-[640px] text-[var(--accent)]"
           role="img"
-          aria-label="最近 30 天 AI 成本趋势图"
+          aria-label="最近 30 天 AI 调用次数趋势图"
         >
           <defs>
-            <linearGradient id="costTrendFill" x1="0" x2="0" y1="0" y2="1">
+            <linearGradient id="callTrendFill" x1="0" x2="0" y1="0" y2="1">
               <stop offset="0%" stopColor="#2563eb" stopOpacity="0.24" />
               <stop offset="100%" stopColor="#2563eb" stopOpacity="0" />
             </linearGradient>
@@ -70,7 +67,7 @@ function CostTrendChart({
           />
           <path
             d={`${path} L ${width - padding} ${height - padding} L ${padding} ${height - padding} Z`}
-            fill="url(#costTrendFill)"
+            fill="url(#callTrendFill)"
             stroke="none"
           />
           <path
@@ -83,7 +80,8 @@ function CostTrendChart({
           />
           {points.map((point, index) => {
             const x = padding + stepX * index;
-            const y = height - padding - (point.cost_cents / max) * (height - padding * 2);
+            const y =
+              height - padding - (point.calls / max) * (height - padding * 2);
             return (
               <circle
                 key={point.date}
@@ -99,30 +97,37 @@ function CostTrendChart({
         </svg>
       </div>
       <div className="grid grid-cols-3 gap-2 text-xs text-[var(--text-muted)] sm:grid-cols-6">
-        {points.filter((_, index) => index % 5 === 0 || index === points.length - 1).map((point) => (
-          <div key={point.date} className="rounded-md border border-[var(--border)] bg-[var(--surface-2)] px-2 py-2">
-            <div>{point.date.slice(5)}</div>
-            <div className="mt-1 font-medium text-[var(--text)]">{formatCents(point.cost_cents)}</div>
-          </div>
-        ))}
+        {points
+          .filter((_, index) => index % 5 === 0 || index === points.length - 1)
+          .map((point) => (
+            <div
+              key={point.date}
+              className="rounded-md border border-[var(--border)] bg-[var(--surface-2)] px-2 py-2"
+            >
+              <div>{point.date.slice(5)}</div>
+              <div className="mt-1 font-medium text-[var(--text)]">
+                {point.calls}
+              </div>
+            </div>
+          ))}
       </div>
     </div>
   );
 }
 
-export default function AICostsPage() {
+export default function AICallsPage() {
   const { pushToast } = useToast();
-  const [summary, setSummary] = useState<AICostSummary | null>(null);
+  const [summary, setSummary] = useState<AICallSummary | null>(null);
   const [cacheStats, setCacheStats] = useState<AICacheStats | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     Promise.all([
-      apiFetch<AICostSummary>("/api/admin/ai-costs"),
+      apiFetch<AICallSummary>("/api/admin/ai-calls"),
       apiFetch<AICacheStats>("/api/admin/ai-cache-stats"),
     ])
-      .then(([costPayload, cachePayload]) => {
-        setSummary(costPayload);
+      .then(([callsPayload, cachePayload]) => {
+        setSummary(callsPayload);
         setCacheStats(cachePayload);
       })
       .catch((e) =>
@@ -132,33 +137,33 @@ export default function AICostsPage() {
   }, [pushToast]);
 
   const modelTotal = (summary?.per_model ?? []).reduce(
-    (acc, item) => ({
-      calls: acc.calls + item.calls,
-      cost: acc.cost + item.cost_cents,
-    }),
-    { calls: 0, cost: 0 },
+    (acc, item) => acc + item.calls,
+    0,
   );
   const cacheTotal = (cacheStats?.hit ?? 0) + (cacheStats?.miss ?? 0);
 
   return (
-    <AdminShell title="AI 成本" subtitle="调用量、缓存命中率与估算成本">
+    <AdminShell
+      title="AI 调用统计"
+      subtitle="调用次数、缓存命中率与模型/群分布"
+    >
       <section className="grid gap-3 grid-cols-1 sm:grid-cols-2 xl:grid-cols-4">
         <Card className="p-4">
-            <p className="text-xs text-[var(--text-muted)]">今日成本</p>
+          <p className="text-xs text-[var(--text-muted)]">今日调用次数</p>
           <p className="mt-2 text-3xl font-semibold tabular-nums">
-            {formatCents(summary?.today_cost_cents ?? 0)}
+            {summary?.today_calls ?? 0}
           </p>
         </Card>
         <Card className="p-4">
           <p className="text-xs text-[var(--text-muted)]">近 30 天调用</p>
           <p className="mt-2 text-3xl font-semibold tabular-nums">
-            {modelTotal.calls}
+            {modelTotal}
           </p>
         </Card>
         <Card className="p-4">
-          <p className="text-xs text-[var(--text-muted)]">近 30 天成本</p>
+          <p className="text-xs text-[var(--text-muted)]">有调用模型</p>
           <p className="mt-2 text-3xl font-semibold tabular-nums">
-            {formatCents(modelTotal.cost)}
+            {summary?.per_model.length ?? 0}
           </p>
         </Card>
         <Card className="p-4">
@@ -174,7 +179,7 @@ export default function AICostsPage() {
 
       <Card>
         <CardHeader>
-          <CardTitle>最近 30 天每日成本</CardTitle>
+          <CardTitle>最近 30 天每日调用次数</CardTitle>
         </CardHeader>
         <CardBody>
           {!summary || summary.daily.length === 0 ? (
@@ -182,7 +187,7 @@ export default function AICostsPage() {
               {loading ? "加载中…" : "暂无 AI 调用记录"}
             </div>
           ) : (
-            <CostTrendChart points={summary.daily} />
+            <CallTrendChart points={summary.daily} />
           )}
         </CardBody>
       </Card>
@@ -201,8 +206,7 @@ export default function AICostsPage() {
               <TableHead>
                 <TableRow>
                   <TableHeaderCell>模型</TableHeaderCell>
-                  <TableHeaderCell>调用数</TableHeaderCell>
-                  <TableHeaderCell>成本</TableHeaderCell>
+                  <TableHeaderCell>调用次数</TableHeaderCell>
                 </TableRow>
               </TableHead>
               <TableBody>
@@ -212,9 +216,6 @@ export default function AICostsPage() {
                       <code className="text-xs">{item.model}</code>
                     </TableCell>
                     <TableCell className="tabular-nums">{item.calls}</TableCell>
-                    <TableCell className="tabular-nums text-[var(--text-muted)]">
-                      {formatCents(item.cost_cents)}
-                    </TableCell>
                   </TableRow>
                 ))}
               </TableBody>
@@ -236,19 +237,17 @@ export default function AICostsPage() {
                 <TableRow>
                   <TableHeaderCell>群</TableHeaderCell>
                   <TableHeaderCell>Chat ID</TableHeaderCell>
-                  <TableHeaderCell>调用数</TableHeaderCell>
-                  <TableHeaderCell>成本</TableHeaderCell>
+                  <TableHeaderCell>调用次数</TableHeaderCell>
                 </TableRow>
               </TableHead>
               <TableBody>
                 {summary?.per_chat.map((item) => (
                   <TableRow key={item.chat_id}>
                     <TableCell>{item.title || "未命名群"}</TableCell>
-                    <TableCell className="tabular-nums">{item.chat_id}</TableCell>
-                    <TableCell className="tabular-nums">{item.calls}</TableCell>
-                    <TableCell className="tabular-nums text-[var(--text-muted)]">
-                      {formatCents(item.cost_cents)}
+                    <TableCell className="tabular-nums">
+                      {item.chat_id}
                     </TableCell>
+                    <TableCell className="tabular-nums">{item.calls}</TableCell>
                   </TableRow>
                 ))}
               </TableBody>

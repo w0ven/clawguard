@@ -20,7 +20,7 @@ import { LiveFeed } from "@/components/live-feed";
 import { apiFetch } from "@/lib/api";
 import type { AdminStats, SystemState, Violation } from "@/lib/types";
 import { useToast } from "@/components/providers";
-import { Users, ShieldCheck, AlertTriangle, ArrowRight, Lock } from "lucide-react";
+import { Users, ShieldCheck, AlertTriangle, ArrowRight } from "lucide-react";
 
 function formatTime(ts: string) {
   const d = new Date(ts);
@@ -35,7 +35,8 @@ function formatTime(ts: string) {
 
 function actionTone(action: string): "danger" | "warning" | "default" {
   if (action === "ban" || action === "delete_ban") return "danger";
-  if (action === "warn" || action === "mute" || action === "delete") return "warning";
+  if (action === "warn" || action === "mute" || action === "delete")
+    return "warning";
   return "default";
 }
 
@@ -51,8 +52,8 @@ export default function DashboardPage() {
     setLoading(true);
     try {
       const [s, v, state] = await Promise.all([
-      apiFetch<AdminStats>("/api/admin/stats"),
-      apiFetch<{ violations: Violation[] }>("/api/admin/violations?limit=10"),
+        apiFetch<AdminStats>("/api/admin/stats"),
+        apiFetch<{ violations: Violation[] }>("/api/admin/violations?limit=10"),
         apiFetch<{ state: SystemState }>("/api/admin/system-state"),
       ]);
       setStats(s);
@@ -69,14 +70,20 @@ export default function DashboardPage() {
     load();
   }, [pushToast]);
 
-  async function updateSystemState(patch: Record<string, unknown>, message: string) {
+  async function updateSystemState(
+    patch: Record<string, unknown>,
+    message: string,
+  ) {
     if (!confirm(message)) return;
     setUpdatingState(true);
     try {
-      const res = await apiFetch<{ state: SystemState }>("/api/admin/system-state", {
-        method: "PUT",
-        body: JSON.stringify(patch),
-      });
+      const res = await apiFetch<{ state: SystemState }>(
+        "/api/admin/system-state",
+        {
+          method: "PUT",
+          body: JSON.stringify(patch),
+        },
+      );
       setSystemState(res.state);
       pushToast("系统状态已更新", "success");
     } catch (e) {
@@ -110,8 +117,7 @@ export default function DashboardPage() {
   const hasEmergencyState =
     systemState?.ai_paused ||
     systemState?.actions_paused ||
-    systemState?.frozen ||
-    systemState?.ai_budget_locked;
+    systemState?.frozen;
 
   return (
     <AdminShell title="总览" subtitle="实时群管理状态">
@@ -126,7 +132,6 @@ export default function DashboardPage() {
                 systemState?.ai_paused ? "AI 已暂停" : null,
                 systemState?.actions_paused ? "动作已暂停" : null,
                 systemState?.frozen ? "系统已冻结" : null,
-                systemState?.ai_budget_locked ? "预算锁定中" : null,
               ]
                 .filter(Boolean)
                 .join(" / ")}
@@ -203,35 +208,6 @@ export default function DashboardPage() {
                   )
                 }
               />
-            </div>
-          </div>
-
-          <div className="rounded-md border border-[var(--border)] p-4">
-            <div className="flex items-start gap-3">
-              <Lock className="mt-0.5 h-4 w-4 text-[var(--danger)]" />
-              <div className="space-y-2">
-                <div>
-                  <p className="text-sm font-medium">预算锁定</p>
-                  <p className="mt-1 text-xs text-[var(--text-muted)]">
-                    {systemState?.ai_budget_locked
-                      ? `已锁定${systemState.ai_budget_locked_date ? ` · ${systemState.ai_budget_locked_date}` : ""}`
-                      : "未锁定"}
-                  </p>
-                </div>
-                <Button
-                  size="sm"
-                  variant="danger"
-                  disabled={!systemState?.ai_budget_locked || updatingState}
-                  onClick={() =>
-                    void updateSystemState(
-                      { reset_budget_locked: true },
-                      "确认解除 AI 预算锁定并恢复 AI 审核？",
-                    )
-                  }
-                >
-                  解除预算锁定
-                </Button>
-              </div>
             </div>
           </div>
         </CardBody>

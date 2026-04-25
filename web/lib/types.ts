@@ -85,7 +85,6 @@ export type GuardPolicy = {
     max_retries: number;
     graduate_after_messages: number;
     graduate_after_days: number;
-    daily_budget_cents: number;
     per_user_daily_limit: number;
     skip_messages_shorter_than: number;
     batch_window_ms: number;
@@ -180,22 +179,20 @@ export type SystemState = {
   actions_paused: boolean;
   frozen: boolean;
   ai_paused_reason: string;
-  ai_budget_locked: boolean;
-  ai_budget_locked_date: Nullable<string>;
   updated_at: string;
   updated_by: Nullable<number>;
 };
 
 export type Violation = {
-	id: number;
-	chat_id: number;
-	user_id: number;
-	username: Nullable<string>;
-	rule: string;
-	matched: Nullable<string>;
-	action: string;
-	message_text: Nullable<string>;
-	created_at: string;
+  id: number;
+  chat_id: number;
+  user_id: number;
+  username: Nullable<string>;
+  rule: string;
+  matched: Nullable<string>;
+  action: string;
+  message_text: Nullable<string>;
+  created_at: string;
 };
 
 export type ProfileCheckLog = {
@@ -249,7 +246,7 @@ export type HealthStatus = {
   ai_last_ok_at: Nullable<string>;
   ai_last_fail_at: Nullable<string>;
   ai_last_error: string;
-  today_cost_cents: number;
+  today_calls: number;
   uptime_seconds: number;
 };
 
@@ -279,7 +276,6 @@ export type AIDecision = {
   action_taken: string;
   admin_override: Nullable<string>;
   latency_ms: number;
-  cost_cents: number;
   created_at: string;
 };
 
@@ -307,37 +303,27 @@ export type BannedReason = {
   source?: string;
 };
 
-export type AICostStat = {
-  day: string;
-  calls: number;
-  cost_cents: number;
-  model: string;
-};
-
-export type AICostDaily = {
+export type AICallDaily = {
   date: string;
-  cost_cents: number;
   calls: number;
 };
 
-export type AICostPerModel = {
+export type AICallPerModel = {
   model: string;
   calls: number;
-  cost_cents: number;
 };
 
-export type AICostPerChat = {
+export type AICallPerChat = {
   chat_id: number;
   title: Nullable<string>;
   calls: number;
-  cost_cents: number;
 };
 
-export type AICostSummary = {
-  today_cost_cents: number;
-  daily: AICostDaily[];
-  per_model: AICostPerModel[];
-  per_chat: AICostPerChat[];
+export type AICallSummary = {
+  today_calls: number;
+  daily: AICallDaily[];
+  per_model: AICallPerModel[];
+  per_chat: AICallPerChat[];
 };
 
 export type AICacheStats = {

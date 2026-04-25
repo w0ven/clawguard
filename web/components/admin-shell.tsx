@@ -11,7 +11,7 @@ import {
   LogOut,
   UserCog,
   Bot,
-  Wallet,
+  BarChart3,
   UserRoundCheck,
   FileCode2,
   LayoutDashboard,
@@ -28,7 +28,7 @@ const navItems = [
   { href: "/authorized-groups", label: "群授权", icon: Waypoints },
   { href: "/violations", label: "违规", icon: TriangleAlert },
   { href: "/ai-review", label: "AI 复核", icon: Bot },
-  { href: "/ai-costs", label: "AI 成本", icon: Wallet },
+  { href: "/ai-calls", label: "AI 统计", icon: BarChart3 },
   { href: "/trust", label: "信任系统", icon: UserRoundCheck },
   { href: "/prompt-editor", label: "Prompt", icon: FileCode2 },
   { href: "/llm", label: "模型管理", icon: Cpu },
@@ -75,7 +75,8 @@ export function AdminShell({
           <ul className="flex flex-col gap-0.5">
             {navItems.map((item) => {
               const Icon = item.icon;
-              const active = pathname === item.href || pathname.startsWith(item.href + "/");
+              const active =
+                pathname === item.href || pathname.startsWith(item.href + "/");
               return (
                 <li key={item.href}>
                   <Link
@@ -122,7 +123,8 @@ export function AdminShell({
           <div className="flex gap-1 px-4 py-2 min-w-max">
             {navItems.map((item) => {
               const Icon = item.icon;
-              const active = pathname === item.href || pathname.startsWith(item.href + "/");
+              const active =
+                pathname === item.href || pathname.startsWith(item.href + "/");
               return (
                 <Link
                   key={item.href}
@@ -159,7 +161,9 @@ export function AdminShell({
 
         {/* Content */}
         <main className="flex-1 overflow-y-auto bg-[var(--bg)] px-5 md:px-8 py-6">
-          <div className="mx-auto max-w-7xl flex flex-col gap-6">{children}</div>
+          <div className="mx-auto max-w-7xl flex flex-col gap-6">
+            {children}
+          </div>
         </main>
       </div>
     </div>

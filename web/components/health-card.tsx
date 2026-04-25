@@ -66,8 +66,8 @@ export function HealthCard() {
       tone: "text-[var(--text)]",
     },
     {
-      label: "今日成本",
-      value: health ? `${health.today_cost_cents.toFixed(2)}¢` : "—",
+      label: "今日调用",
+      value: health ? `${health.today_calls}` : "—",
       tone: "text-[var(--accent)]",
     },
   ];

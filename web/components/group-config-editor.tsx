@@ -423,7 +423,7 @@ export const fieldDescriptors: FieldDescriptor[] = [
     tab: "ai",
     path: ["ai", "image_moderation_enabled"],
     label: "启用图片审核",
-    description: "下载图片并交给视觉模型审核，token 成本更高",
+    description: "下载图片并交给视觉模型审核，会增加 AI 调用量",
     kind: "switch",
   },
   {
@@ -484,13 +484,6 @@ export const fieldDescriptors: FieldDescriptor[] = [
   },
   {
     tab: "ai",
-    path: ["ai", "daily_budget_cents"],
-    label: "日预算 (分)",
-    description: "超出只 flag",
-    kind: "number",
-  },
-  {
-    tab: "ai",
     path: ["ai", "per_user_daily_limit"],
     label: "每用户日上限",
     description: "",
@@ -535,7 +528,8 @@ export const fieldDescriptors: FieldDescriptor[] = [
     tab: "ai",
     path: ["ai", "check_profile_on_message"],
     label: "未毕业用户发言前审核简介",
-    description: "new/suspicious 用户每条消息前重新审核其 bio，防止入群后偷改简介加广告。命中直接 ban",
+    description:
+      "new/suspicious 用户每条消息前重新审核其 bio，防止入群后偷改简介加广告。命中直接 ban",
     kind: "switch",
   },
   {
@@ -549,7 +543,8 @@ export const fieldDescriptors: FieldDescriptor[] = [
     tab: "ai",
     path: ["ai", "bio_cache_ttl_minutes"],
     label: "Bio 缓存分钟数",
-    description: "缓存 bio，节流 Telegram getChat 调用；0=不缓存每次现查；建议 10-30 分钟",
+    description:
+      "缓存 bio，节流 Telegram getChat 调用；0=不缓存每次现查；建议 10-30 分钟",
     kind: "number",
   },
   {
@@ -752,7 +747,10 @@ export function GroupConfigEditor({ group, mergedPolicy }: Props) {
         .catch((error) => {
           setProfileCheckLogs([]);
           setProfileCheckTotal(0);
-          pushToast(error instanceof Error ? error.message : "加载失败", "error");
+          pushToast(
+            error instanceof Error ? error.message : "加载失败",
+            "error",
+          );
         })
         .finally(() => setProfileCheckLoading(false));
     }, 250);
@@ -817,21 +815,27 @@ export function GroupConfigEditor({ group, mergedPolicy }: Props) {
     "messages",
     "keyword_replies",
   ]);
-  const mergedKeywordReplies = (
-    getPathValue(mergedPolicyState, ["messages", "keyword_replies"]) ?? []
-  ) as KeywordReplyRule[];
-  const keywordReplies = (Array.isArray(keywordRepliesValue)
-    ? (keywordRepliesValue as KeywordReplyRule[])
-    : []
+  const mergedKeywordReplies = (getPathValue(mergedPolicyState, [
+    "messages",
+    "keyword_replies",
+  ]) ?? []) as KeywordReplyRule[];
+  const keywordReplies = (
+    Array.isArray(keywordRepliesValue)
+      ? (keywordRepliesValue as KeywordReplyRule[])
+      : []
   ).map((rule) => {
     const stats = mergedKeywordReplies.find((r) => r.id === rule.id);
     return stats
-      ? { ...rule, trigger_count: stats.trigger_count ?? rule.trigger_count, last_triggered_at: stats.last_triggered_at ?? rule.last_triggered_at }
+      ? {
+          ...rule,
+          trigger_count: stats.trigger_count ?? rule.trigger_count,
+          last_triggered_at: stats.last_triggered_at ?? rule.last_triggered_at,
+        }
       : rule;
   });
   const checkProfileEnabled = Boolean(
     getEffectiveValue(draft, mergedPolicyState, ["verify", "check_profile"]) ??
-      false,
+    false,
   );
 
   function updateField(
@@ -994,136 +998,146 @@ export function GroupConfigEditor({ group, mergedPolicy }: Props) {
         </div>
       )}
 
-      {activeTab !== "basic" && activeTab !== "audit" && activeTab !== "scheduled" && (
-        <div className="space-y-3">
-          {tabFields.map((field) => {
-            const inherited = !hasPath(draft, field.path);
-            const value = getEffectiveValue(
-              draft,
-              mergedPolicyState,
-              field.path,
-            );
-            return (
-              <Card key={field.path.join(".")}>
-                <CardBody>
-                  <div className="flex items-start justify-between gap-4 mb-3">
-                    <div className="min-w-0">
-                      <p className="text-sm font-medium">{field.label}</p>
-                      {field.description && (
-                        <p className="mt-0.5 text-xs text-[var(--text-muted)]">
-                          {field.description}
-                        </p>
-                      )}
+      {activeTab !== "basic" &&
+        activeTab !== "audit" &&
+        activeTab !== "scheduled" && (
+          <div className="space-y-3">
+            {tabFields.map((field) => {
+              const inherited = !hasPath(draft, field.path);
+              const value = getEffectiveValue(
+                draft,
+                mergedPolicyState,
+                field.path,
+              );
+              return (
+                <Card key={field.path.join(".")}>
+                  <CardBody>
+                    <div className="flex items-start justify-between gap-4 mb-3">
+                      <div className="min-w-0">
+                        <p className="text-sm font-medium">{field.label}</p>
+                        {field.description && (
+                          <p className="mt-0.5 text-xs text-[var(--text-muted)]">
+                            {field.description}
+                          </p>
+                        )}
+                      </div>
+                      <label className="inline-flex items-center gap-1.5 text-xs text-[var(--text-muted)] whitespace-nowrap cursor-pointer select-none">
+                        <input
+                          type="checkbox"
+                          checked={inherited}
+                          onChange={(e) =>
+                            toggleInherited(field, e.target.checked)
+                          }
+                          className="rounded border-[var(--border)]"
+                        />
+                        继承全局
+                      </label>
                     </div>
-                    <label className="inline-flex items-center gap-1.5 text-xs text-[var(--text-muted)] whitespace-nowrap cursor-pointer select-none">
-                      <input
-                        type="checkbox"
-                        checked={inherited}
-                        onChange={(e) =>
-                          toggleInherited(field, e.target.checked)
-                        }
-                        className="rounded border-[var(--border)]"
-                      />
-                      继承全局
-                    </label>
-                  </div>
-                  <FieldControl
-                    field={field}
-                    value={value}
-                    inherited={inherited}
-                    modelOptions={llmModelOptions}
-                    modelOptionsError={llmOptionsError}
-                    onChange={updateField}
+                    <FieldControl
+                      field={field}
+                      value={value}
+                      inherited={inherited}
+                      modelOptions={llmModelOptions}
+                      modelOptionsError={llmOptionsError}
+                      onChange={updateField}
+                    />
+                  </CardBody>
+                </Card>
+              );
+            })}
+
+            {activeTab === "verify" && (
+              <ProfileCheckLogsSection
+                enabled={checkProfileEnabled}
+                items={profileCheckLogs}
+                total={profileCheckTotal}
+                page={profileCheckPage}
+                loading={profileCheckLoading}
+                deleting={profileCheckDeleting}
+                filters={profileCheckFilters}
+                onSearchChange={(search) =>
+                  updateProfileCheckFilters({ search }, true)
+                }
+                onResultChange={(result) =>
+                  updateProfileCheckFilters({ result }, true)
+                }
+                onModeChange={(mode) =>
+                  updateProfileCheckFilters({ mode }, true)
+                }
+                onPageChange={setProfileCheckPage}
+                onCleanup={cleanupProfileCheckLogs}
+              />
+            )}
+
+            {activeTab === "verify" && (
+              <Card>
+                <CardHeader>
+                  <CardTitle>欢迎语预览</CardTitle>
+                  <p className="text-xs text-[var(--text-muted)] mt-0.5">
+                    示例用户「可乐」，群名即当前群
+                  </p>
+                </CardHeader>
+                <CardBody>
+                  <div
+                    className="rounded-md border border-[var(--border)] bg-[var(--surface-2)] p-4 text-sm leading-7"
+                    dangerouslySetInnerHTML={{ __html: welcomePreview }}
                   />
                 </CardBody>
               </Card>
-            );
-          })}
+            )}
 
-          {activeTab === "verify" && (
-            <ProfileCheckLogsSection
-              enabled={checkProfileEnabled}
-              items={profileCheckLogs}
-              total={profileCheckTotal}
-              page={profileCheckPage}
-              loading={profileCheckLoading}
-              deleting={profileCheckDeleting}
-              filters={profileCheckFilters}
-              onSearchChange={(search) =>
-                updateProfileCheckFilters({ search }, true)
-              }
-              onResultChange={(result) =>
-                updateProfileCheckFilters({ result }, true)
-              }
-              onModeChange={(mode) => updateProfileCheckFilters({ mode }, true)}
-              onPageChange={setProfileCheckPage}
-              onCleanup={cleanupProfileCheckLogs}
-            />
-          )}
-
-          {activeTab === "verify" && (
-            <Card>
-              <CardHeader>
-                <CardTitle>欢迎语预览</CardTitle>
-                <p className="text-xs text-[var(--text-muted)] mt-0.5">
-                  示例用户「可乐」，群名即当前群
-                </p>
-              </CardHeader>
-              <CardBody>
-                <div
-                  className="rounded-md border border-[var(--border)] bg-[var(--surface-2)] p-4 text-sm leading-7"
-                  dangerouslySetInnerHTML={{ __html: welcomePreview }}
-                />
-              </CardBody>
-            </Card>
-          )}
-
-          {activeTab === "feedback" && (
-            <FeedbackSection
-              value={
-                (getEffectiveValue(draft, mergedPolicyState, ["feedback"]) as
-                  | Record<string, ActionFeedbackValue>
-                  | undefined) ?? {}
-              }
-              onChange={(next) => {
-                const cur = structuredClone(draft) as Record<string, unknown>;
-                setPath(cur, ["feedback"], next);
-                setDraft(cur);
-              }}
-            />
-          )}
-
-          {activeTab === "replies" && (
-            <KeywordReplySection
-              rules={keywordReplies}
-              inherited={keywordRepliesInherited}
-              onToggleInherited={(checked) => {
-                const next = structuredClone(draft) as Record<string, unknown>;
-                if (checked) {
-                  removePath(next, ["messages", "keyword_replies"]);
-                } else {
-                  setPath(
-                    next,
-                    ["messages", "keyword_replies"],
-                    structuredClone(
-                      getPathValue(mergedPolicyState, [
-                        "messages",
-                        "keyword_replies",
-                      ]) ?? [],
-                    ),
-                  );
+            {activeTab === "feedback" && (
+              <FeedbackSection
+                value={
+                  (getEffectiveValue(draft, mergedPolicyState, ["feedback"]) as
+                    | Record<string, ActionFeedbackValue>
+                    | undefined) ?? {}
                 }
-                setDraft(next);
-              }}
-              onChange={(rules) => {
-                const next = structuredClone(draft) as Record<string, unknown>;
-                setPath(next, ["messages", "keyword_replies"], rules);
-                setDraft(next);
-              }}
-            />
-          )}
-        </div>
-      )}
+                onChange={(next) => {
+                  const cur = structuredClone(draft) as Record<string, unknown>;
+                  setPath(cur, ["feedback"], next);
+                  setDraft(cur);
+                }}
+              />
+            )}
+
+            {activeTab === "replies" && (
+              <KeywordReplySection
+                rules={keywordReplies}
+                inherited={keywordRepliesInherited}
+                onToggleInherited={(checked) => {
+                  const next = structuredClone(draft) as Record<
+                    string,
+                    unknown
+                  >;
+                  if (checked) {
+                    removePath(next, ["messages", "keyword_replies"]);
+                  } else {
+                    setPath(
+                      next,
+                      ["messages", "keyword_replies"],
+                      structuredClone(
+                        getPathValue(mergedPolicyState, [
+                          "messages",
+                          "keyword_replies",
+                        ]) ?? [],
+                      ),
+                    );
+                  }
+                  setDraft(next);
+                }}
+                onChange={(rules) => {
+                  const next = structuredClone(draft) as Record<
+                    string,
+                    unknown
+                  >;
+                  setPath(next, ["messages", "keyword_replies"], rules);
+                  setDraft(next);
+                }}
+              />
+            )}
+          </div>
+        )}
 
       {activeTab === "scheduled" && <ScheduledMessagesEditor group={group} />}
 
@@ -1286,7 +1300,10 @@ function ProfileCheckLogsSection({
                 { label: "全部模式", value: "" },
                 { label: "入群关键词 (keyword)", value: "keyword" },
                 { label: "入群AI (ai)", value: "ai" },
-                { label: "发言前关键词 (on_message_keyword)", value: "on_message_keyword" },
+                {
+                  label: "发言前关键词 (on_message_keyword)",
+                  value: "on_message_keyword",
+                },
                 { label: "发言前AI (on_message_ai)", value: "on_message_ai" },
               ]}
             />
@@ -1306,13 +1323,19 @@ function ProfileCheckLogsSection({
             <TableBody>
               {loading ? (
                 <TableRow>
-                  <TableCell colSpan={6} className="text-center text-[var(--text-muted)]">
+                  <TableCell
+                    colSpan={6}
+                    className="text-center text-[var(--text-muted)]"
+                  >
                     加载中...
                   </TableCell>
                 </TableRow>
               ) : items.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={6} className="text-center text-[var(--text-muted)]">
+                  <TableCell
+                    colSpan={6}
+                    className="text-center text-[var(--text-muted)]"
+                  >
                     暂无日志
                   </TableCell>
                 </TableRow>
@@ -1344,7 +1367,9 @@ function ProfileCheckLogsSection({
                         </span>
                       </TableCell>
                       <TableCell>
-                        <Badge tone={item.check_mode === "ai" ? "info" : "default"}>
+                        <Badge
+                          tone={item.check_mode === "ai" ? "info" : "default"}
+                        >
                           {item.check_mode}
                         </Badge>
                       </TableCell>
@@ -1404,7 +1429,9 @@ function ProfileCheckLogsSection({
   );
 }
 
-function profileCheckResultTone(result: string): "success" | "danger" | "default" | "warning" {
+function profileCheckResultTone(
+  result: string,
+): "success" | "danger" | "default" | "warning" {
   switch (result) {
     case "pass":
       return "success";
@@ -1484,7 +1511,8 @@ const FEEDBACK_ACTIONS: FeedbackActionMeta[] = [
     label: "禁言",
     description: "禁言用户时的反馈",
     vars: "{user} {user_mention} {duration} {reason}",
-    defaultTemplate: "🤐 {user} 被贴了 {duration} 的封口胶。冷静一下，思考人生（{reason}）",
+    defaultTemplate:
+      "🤐 {user} 被贴了 {duration} 的封口胶。冷静一下，思考人生（{reason}）",
     defaultEnabled: true,
     defaultAutoDelete: 60,
     defaultReplyToMsg: false,
@@ -1514,7 +1542,8 @@ const FEEDBACK_ACTIONS: FeedbackActionMeta[] = [
     label: "警告",
     description: "警告累加时的反馈（显示当前/上限）",
     vars: "{user} {user_mention} {current} {limit} {reason}",
-    defaultTemplate: "⚠️ 警告一下 {user}，累计 {current}/{limit}。再犯就请你吃手铐了（{reason}）",
+    defaultTemplate:
+      "⚠️ 警告一下 {user}，累计 {current}/{limit}。再犯就请你吃手铐了（{reason}）",
     defaultEnabled: true,
     defaultAutoDelete: 60,
     defaultReplyToMsg: true,
@@ -1524,7 +1553,8 @@ const FEEDBACK_ACTIONS: FeedbackActionMeta[] = [
     label: "验证通过",
     description: "新人验证通过时的反馈（默认关闭）",
     vars: "{user} {user_mention} {group}",
-    defaultTemplate: "✅ {user} 通过安检，欢迎入群！麻烦看下群规，别让我下次在违规榜上见到你",
+    defaultTemplate:
+      "✅ {user} 通过安检，欢迎入群！麻烦看下群规，别让我下次在违规榜上见到你",
     defaultEnabled: false,
     defaultAutoDelete: 15,
     defaultReplyToMsg: false,
@@ -1532,9 +1562,11 @@ const FEEDBACK_ACTIONS: FeedbackActionMeta[] = [
   {
     key: "verify_fail",
     label: "验证失败/超时",
-    description: "新人验证失败或超时被踢时的反馈。{reason} 会注入具体原因（超时未完成验证 / 答题错误 / 个人简介违规：xxx）",
+    description:
+      "新人验证失败或超时被踢时的反馈。{reason} 会注入具体原因（超时未完成验证 / 答题错误 / 个人简介违规：xxx）",
     vars: "{user} {user_mention} {reason}",
-    defaultTemplate: "⌛ {user} 验证未通过（{reason}），已被礼送出境。真人欢迎重新申请加群",
+    defaultTemplate:
+      "⌛ {user} 验证未通过（{reason}），已被礼送出境。真人欢迎重新申请加群",
     defaultEnabled: true,
     defaultAutoDelete: 60,
     defaultReplyToMsg: false,
@@ -1633,7 +1665,9 @@ export function FeedbackSection({
               </div>
               <Switch
                 checked={v.enabled}
-                onChange={(checked) => updateOne(item.key, { enabled: checked })}
+                onChange={(checked) =>
+                  updateOne(item.key, { enabled: checked })
+                }
               />
             </CardHeader>
             {v.enabled && (
@@ -1732,7 +1766,7 @@ export function KeywordReplySection({
 
   function toggleExpand(id: string) {
     setExpandedIds((prev) =>
-      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
+      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
     );
   }
 
@@ -1839,7 +1873,8 @@ export function KeywordReplySection({
                   <Badge>{`命中 ${rule.trigger_count ?? 0}`}</Badge>
                   <Badge>{`最后触发 ${rule.last_triggered_at ? formatTime(rule.last_triggered_at) : "-"}`}</Badge>
                   <div className="ml-auto flex items-center gap-3">
-                    <label className="inline-flex items-center gap-2 text-sm text-[var(--text)]"
+                    <label
+                      className="inline-flex items-center gap-2 text-sm text-[var(--text)]"
                       onClick={(e) => e.stopPropagation()}
                     >
                       <Switch
@@ -1854,172 +1889,182 @@ export function KeywordReplySection({
                       type="button"
                       variant="secondary"
                       disabled={inherited}
-                      onClick={(e) => { e.stopPropagation(); deleteRule(rule.id); }}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        deleteRule(rule.id);
+                      }}
                       className="!px-2 !py-1 text-xs"
                     >
                       删除
                     </Button>
-                    <span className="text-xs text-[var(--text-muted)] select-none">{isExpanded ? "▼" : "▶"}</span>
+                    <span className="text-xs text-[var(--text-muted)] select-none">
+                      {isExpanded ? "▼" : "▶"}
+                    </span>
                   </div>
                 </div>
                 {isExpanded && (
                   <div className="px-4 pb-4 space-y-4">
-                  <div className="grid gap-4 md:grid-cols-2">
-                    <div className="space-y-2">
-                      <p className="text-xs font-medium text-[var(--text-muted)]">
-                        规则名称
-                      </p>
-                      <Input
-                        disabled={inherited}
-                        value={rule.name}
-                        onChange={(e) =>
-                          updateRule(rule.id, { name: e.target.value })
-                        }
-                        placeholder="规则名称"
-                      />
-                    </div>
-                    <div className="space-y-2">
-                      <p className="text-xs font-medium text-[var(--text-muted)]">
-                        状态
-                      </p>
-                      <div className="flex items-center gap-2">
-                        <Badge tone={rule.enabled ? "info" : "default"}>
-                          {rule.enabled ? "已启用" : "已停用"}
-                        </Badge>
-                        <Badge>{`命中 ${rule.trigger_count ?? 0}`}</Badge>
-                        <Badge>{`最后触发 ${rule.last_triggered_at ? formatTime(rule.last_triggered_at) : "-"}`}</Badge>
+                    <div className="grid gap-4 md:grid-cols-2">
+                      <div className="space-y-2">
+                        <p className="text-xs font-medium text-[var(--text-muted)]">
+                          规则名称
+                        </p>
+                        <Input
+                          disabled={inherited}
+                          value={rule.name}
+                          onChange={(e) =>
+                            updateRule(rule.id, { name: e.target.value })
+                          }
+                          placeholder="规则名称"
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <p className="text-xs font-medium text-[var(--text-muted)]">
+                          状态
+                        </p>
+                        <div className="flex items-center gap-2">
+                          <Badge tone={rule.enabled ? "info" : "default"}>
+                            {rule.enabled ? "已启用" : "已停用"}
+                          </Badge>
+                          <Badge>{`命中 ${rule.trigger_count ?? 0}`}</Badge>
+                          <Badge>{`最后触发 ${rule.last_triggered_at ? formatTime(rule.last_triggered_at) : "-"}`}</Badge>
+                        </div>
                       </div>
                     </div>
-                  </div>
 
-                  <div className="grid gap-4 md:grid-cols-2">
-                    <div className="space-y-2">
-                      <p className="text-xs font-medium text-[var(--text-muted)]">
-                        匹配类型
-                      </p>
-                      <Select
-                        disabled={inherited}
-                        value={rule.match_type}
-                        onChange={(e) =>
-                          updateRule(rule.id, { match_type: e.target.value })
-                        }
-                        options={[
-                          { label: "模糊", value: "fuzzy" },
-                          { label: "精准", value: "exact" },
-                          { label: "正则", value: "regex" },
-                        ]}
-                      />
+                    <div className="grid gap-4 md:grid-cols-2">
+                      <div className="space-y-2">
+                        <p className="text-xs font-medium text-[var(--text-muted)]">
+                          匹配类型
+                        </p>
+                        <Select
+                          disabled={inherited}
+                          value={rule.match_type}
+                          onChange={(e) =>
+                            updateRule(rule.id, { match_type: e.target.value })
+                          }
+                          options={[
+                            { label: "模糊", value: "fuzzy" },
+                            { label: "精准", value: "exact" },
+                            { label: "正则", value: "regex" },
+                          ]}
+                        />
+                      </div>
+                      <label className="flex items-center gap-3 rounded-md border border-[var(--border)] bg-[var(--surface)] px-3 py-2 text-sm">
+                        <Switch
+                          checked={rule.case_sensitive}
+                          disabled={inherited}
+                          onChange={(value) =>
+                            updateRule(rule.id, { case_sensitive: value })
+                          }
+                        />
+                        <span>大小写敏感</span>
+                      </label>
+                      <div className="space-y-2">
+                        <p className="text-xs font-medium text-[var(--text-muted)]">
+                          解析模式
+                        </p>
+                        <Select
+                          disabled={inherited}
+                          value={rule.parse_mode || "markdownv2"}
+                          onChange={(e) =>
+                            updateRule(rule.id, { parse_mode: e.target.value })
+                          }
+                          options={[
+                            { label: "MarkdownV2", value: "markdownv2" },
+                            { label: "HTML", value: "html" },
+                            { label: "Markdown", value: "markdown" },
+                          ]}
+                        />
+                      </div>
                     </div>
-                    <label className="flex items-center gap-3 rounded-md border border-[var(--border)] bg-[var(--surface)] px-3 py-2 text-sm">
-                      <Switch
-                        checked={rule.case_sensitive}
-                        disabled={inherited}
-                        onChange={(value) =>
-                          updateRule(rule.id, { case_sensitive: value })
-                        }
-                      />
-                      <span>大小写敏感</span>
-                    </label>
+
                     <div className="space-y-2">
                       <p className="text-xs font-medium text-[var(--text-muted)]">
-                        解析模式
+                        关键词
                       </p>
-                      <Select
+                      <ArrayTextarea
                         disabled={inherited}
-                        value={rule.parse_mode || "markdownv2"}
-                        onChange={(e) =>
-                          updateRule(rule.id, { parse_mode: e.target.value })
+                        value={
+                          Array.isArray(rule.keywords) ? rule.keywords : []
                         }
-                        options={[
-                          { label: "MarkdownV2", value: "markdownv2" },
-                          { label: "HTML", value: "html" },
-                          { label: "Markdown", value: "markdown" },
-                        ]}
-                      />
-                    </div>
-                  </div>
-
-                  <div className="space-y-2">
-                    <p className="text-xs font-medium text-[var(--text-muted)]">
-                      关键词
-                    </p>
-                    <ArrayTextarea
-                      disabled={inherited}
-                      value={Array.isArray(rule.keywords) ? rule.keywords : []}
-                      onChange={(raw) =>
-                        updateRule(rule.id, {
-                          keywords: parseArrayValue(raw, rule.match_type !== "regex"),
-                        })
-                      }
-                      className="min-h-[110px] font-mono text-xs"
-                      placeholder={"支持换行、,、，分隔\n例如：签到\n早安"}
-                    />
-                  </div>
-
-                  <div className="space-y-2">
-                    <p className="text-xs font-medium text-[var(--text-muted)]">
-                      回复内容
-                    </p>
-                    <Textarea
-                      disabled={inherited}
-                      value={rule.reply_text}
-                      onChange={(e) =>
-                        updateRule(rule.id, { reply_text: e.target.value })
-                      }
-                      className="min-h-[140px] font-mono text-xs"
-                      placeholder="支持变量 {user} {group} {keyword}，HTML 格式"
-                    />
-                  </div>
-
-                  <div className="grid gap-4 md:grid-cols-2">
-                    <div className="space-y-2">
-                      <p className="text-xs font-medium text-[var(--text-muted)]">
-                        冷却秒数
-                      </p>
-                      <Input
-                        disabled={inherited}
-                        type="number"
-                        value={rule.cooldown_seconds}
-                        onChange={(e) =>
+                        onChange={(raw) =>
                           updateRule(rule.id, {
-                            cooldown_seconds: Number(e.target.value) || 0,
+                            keywords: parseArrayValue(
+                              raw,
+                              rule.match_type !== "regex",
+                            ),
                           })
                         }
+                        className="min-h-[110px] font-mono text-xs"
+                        placeholder={"支持换行、,、，分隔\n例如：签到\n早安"}
                       />
                     </div>
+
                     <div className="space-y-2">
                       <p className="text-xs font-medium text-[var(--text-muted)]">
-                        自动删除秒数
+                        回复内容
                       </p>
-                      <Input
+                      <Textarea
                         disabled={inherited}
-                        type="number"
-                        value={rule.auto_delete_seconds}
+                        value={rule.reply_text}
                         onChange={(e) =>
-                          updateRule(rule.id, {
-                            auto_delete_seconds: Number(e.target.value) || 0,
-                          })
+                          updateRule(rule.id, { reply_text: e.target.value })
                         }
+                        className="min-h-[140px] font-mono text-xs"
+                        placeholder="支持变量 {user} {group} {keyword}，HTML 格式"
                       />
                     </div>
-                  </div>
 
-                  <div>
-                    <label className="flex items-center gap-2 text-sm">
-                      <Switch
-                        checked={rule.skip_admins !== false}
-                        disabled={inherited}
-                        onChange={(v) =>
-                          updateRule(rule.id, { skip_admins: v })
-                        }
-                      />
-                      <span>不对管理员触发</span>
-                    </label>
+                    <div className="grid gap-4 md:grid-cols-2">
+                      <div className="space-y-2">
+                        <p className="text-xs font-medium text-[var(--text-muted)]">
+                          冷却秒数
+                        </p>
+                        <Input
+                          disabled={inherited}
+                          type="number"
+                          value={rule.cooldown_seconds}
+                          onChange={(e) =>
+                            updateRule(rule.id, {
+                              cooldown_seconds: Number(e.target.value) || 0,
+                            })
+                          }
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <p className="text-xs font-medium text-[var(--text-muted)]">
+                          自动删除秒数
+                        </p>
+                        <Input
+                          disabled={inherited}
+                          type="number"
+                          value={rule.auto_delete_seconds}
+                          onChange={(e) =>
+                            updateRule(rule.id, {
+                              auto_delete_seconds: Number(e.target.value) || 0,
+                            })
+                          }
+                        />
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="flex items-center gap-2 text-sm">
+                        <Switch
+                          checked={rule.skip_admins !== false}
+                          disabled={inherited}
+                          onChange={(v) =>
+                            updateRule(rule.id, { skip_admins: v })
+                          }
+                        />
+                        <span>不对管理员触发</span>
+                      </label>
+                    </div>
                   </div>
-                </div>
                 )}
-            </div>
-          );
+              </div>
+            );
           })
         )}
 
