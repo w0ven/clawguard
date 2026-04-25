@@ -138,6 +138,10 @@ func (r *DBProviderRegistry) Client(key string) (LLMClient, bool) {
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	provider, ok = r.byKey[key]
+	if !ok || !provider.Enabled {
+		return nil, false
+	}
 	if client, ok := r.clients[key]; ok {
 		return client, true
 	}
