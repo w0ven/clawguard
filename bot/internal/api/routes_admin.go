@@ -464,22 +464,34 @@ func (s *Server) handleListViolations(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
 	}
 
-	items, err := s.botService.Queries().ListViolations(c.Request().Context(), store.ListViolationsParams{
-		ChatID: chatID,
-		UserID: userID,
-		Rule:   strings.TrimSpace(c.QueryParam("rule")),
-		Action: strings.TrimSpace(c.QueryParam("action")),
-		Since:  since,
-		Until:  until,
-		Limit:  parseLimit(c.QueryParam("limit")),
+	chatIDs, _ := adminScopeFilter(admin)
+	params := store.ListViolationsScopedParams{
+		ChatID:  chatID,
+		UserID:  userID,
+		Rule:    strings.TrimSpace(c.QueryParam("rule")),
+		Action:  strings.TrimSpace(c.QueryParam("action")),
+		Since:   since,
+		Until:   until,
+		ChatIds: chatIDs,
+		Limit:   parseLimit(c.QueryParam("limit")),
+		Offset:  parseOffset(c.QueryParam("offset")),
+	}
+	total, err := s.botService.Queries().CountViolationsScoped(c.Request().Context(), store.CountViolationsScopedParams{
+		ChatID:  params.ChatID,
+		UserID:  params.UserID,
+		Rule:    params.Rule,
+		Action:  params.Action,
+		Since:   params.Since,
+		Until:   params.Until,
+		ChatIds: params.ChatIds,
 	})
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "count violations failed"})
+	}
+	items, err := s.botService.Queries().ListViolationsScoped(c.Request().Context(), params)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "list violations failed"})
 	}
-	if items == nil {
-		items = make([]store.Violation, 0)
-	}
-	items = filterViolationsByScope(admin, items)
 	if items == nil {
 		items = make([]store.Violation, 0)
 	}
@@ -487,7 +499,7 @@ func (s *Server) handleListViolations(c echo.Context) error {
 	for _, item := range items {
 		response = append(response, serializeViolation(item))
 	}
-	return c.JSON(http.StatusOK, map[string]any{"violations": response})
+	return c.JSON(http.StatusOK, map[string]any{"violations": response, "total": total})
 }
 
 func (s *Server) handleListProfileCheckLogs(c echo.Context) error {
@@ -580,19 +592,30 @@ func (s *Server) handleListWarnings(c echo.Context) error {
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid user_id"})
 	}
+	if chatID != nil && !adminCanAccessChat(admin, *chatID) {
+		return c.JSON(http.StatusForbidden, map[string]string{"error": "group out of scope"})
+	}
 
-	items, err := s.botService.Queries().ListWarnings(c.Request().Context(), store.ListWarningsParams{
-		ChatID: chatID,
-		UserID: userID,
-		Limit:  parseLimit(c.QueryParam("limit")),
+	chatIDs, _ := adminScopeFilter(admin)
+	params := store.ListWarningsScopedParams{
+		ChatID:  chatID,
+		UserID:  userID,
+		ChatIds: chatIDs,
+		Limit:   parseLimit(c.QueryParam("limit")),
+		Offset:  parseOffset(c.QueryParam("offset")),
+	}
+	total, err := s.botService.Queries().CountWarningsScoped(c.Request().Context(), store.CountWarningsScopedParams{
+		ChatID:  params.ChatID,
+		UserID:  params.UserID,
+		ChatIds: params.ChatIds,
 	})
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "count warnings failed"})
+	}
+	items, err := s.botService.Queries().ListWarningsScoped(c.Request().Context(), params)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "list warnings failed"})
 	}
-	if items == nil {
-		items = make([]store.Warning, 0)
-	}
-	items = filterWarningsByScope(admin, items)
 	if items == nil {
 		items = make([]store.Warning, 0)
 	}
@@ -602,7 +625,7 @@ func (s *Server) handleListWarnings(c echo.Context) error {
 			resp = append(resp, serializeWarning(item))
 		}
 		return resp
-	}()})
+	}(), "total": total})
 }
 
 func (s *Server) handleClearWarnings(c echo.Context) error {
@@ -1927,26 +1950,6 @@ func adminScopeFilter(admin store.Admin) ([]int64, bool) {
 		return []int64{}, true
 	}
 	return decodeGroupScope(admin.GroupScope), false
-}
-
-func filterViolationsByScope(admin store.Admin, items []store.Violation) []store.Violation {
-	filtered := make([]store.Violation, 0, len(items))
-	for _, item := range items {
-		if adminCanAccessChat(admin, item.ChatID) {
-			filtered = append(filtered, item)
-		}
-	}
-	return filtered
-}
-
-func filterWarningsByScope(admin store.Admin, items []store.Warning) []store.Warning {
-	filtered := make([]store.Warning, 0, len(items))
-	for _, item := range items {
-		if adminCanAccessChat(admin, item.ChatID) {
-			filtered = append(filtered, item)
-		}
-	}
-	return filtered
 }
 
 func filterAuditByScope(admin store.Admin, items []store.ConfigAudit) []store.ConfigAudit {

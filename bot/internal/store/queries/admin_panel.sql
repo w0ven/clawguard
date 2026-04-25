@@ -18,6 +18,46 @@ WHERE ($1::BIGINT IS NULL OR chat_id = $1)
 ORDER BY created_at DESC
 LIMIT $3;
 
+-- name: ListViolationsScoped :many
+SELECT id, chat_id, user_id, username, rule, matched, action, message_text, created_at
+FROM violations
+WHERE ($1::BIGINT IS NULL OR chat_id = $1)
+  AND ($2::BIGINT IS NULL OR user_id = $2)
+  AND ($3::TEXT = '' OR rule = $3)
+  AND ($4::TEXT = '' OR action = $4)
+  AND ($5::TIMESTAMPTZ IS NULL OR created_at >= $5)
+  AND ($6::TIMESTAMPTZ IS NULL OR created_at <= $6)
+  AND ($7::BIGINT[] IS NULL OR cardinality($7::BIGINT[]) = 0 OR chat_id = ANY($7::BIGINT[]))
+ORDER BY created_at DESC
+LIMIT $8 OFFSET $9;
+
+-- name: CountViolationsScoped :one
+SELECT COUNT(*)::BIGINT
+FROM violations
+WHERE ($1::BIGINT IS NULL OR chat_id = $1)
+  AND ($2::BIGINT IS NULL OR user_id = $2)
+  AND ($3::TEXT = '' OR rule = $3)
+  AND ($4::TEXT = '' OR action = $4)
+  AND ($5::TIMESTAMPTZ IS NULL OR created_at >= $5)
+  AND ($6::TIMESTAMPTZ IS NULL OR created_at <= $6)
+  AND ($7::BIGINT[] IS NULL OR cardinality($7::BIGINT[]) = 0 OR chat_id = ANY($7::BIGINT[]));
+
+-- name: ListWarningsScoped :many
+SELECT id, chat_id, user_id, reason, issued_by, created_at, consumed_at
+FROM warnings
+WHERE ($1::BIGINT IS NULL OR chat_id = $1)
+  AND ($2::BIGINT IS NULL OR user_id = $2)
+  AND ($3::BIGINT[] IS NULL OR cardinality($3::BIGINT[]) = 0 OR chat_id = ANY($3::BIGINT[]))
+ORDER BY created_at DESC
+LIMIT $4 OFFSET $5;
+
+-- name: CountWarningsScoped :one
+SELECT COUNT(*)::BIGINT
+FROM warnings
+WHERE ($1::BIGINT IS NULL OR chat_id = $1)
+  AND ($2::BIGINT IS NULL OR user_id = $2)
+  AND ($3::BIGINT[] IS NULL OR cardinality($3::BIGINT[]) = 0 OR chat_id = ANY($3::BIGINT[]));
+
 -- name: UpsertBannedUser :one
 INSERT INTO banned_users (
     user_id,

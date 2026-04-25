@@ -24,6 +24,50 @@ ORDER BY created_at DESC
 LIMIT $3
 `
 
+const listViolationsScoped = `-- name: ListViolationsScoped :many
+SELECT id, chat_id, user_id, username, rule, matched, action, message_text, created_at
+FROM violations
+WHERE ($1::BIGINT IS NULL OR chat_id = $1)
+  AND ($2::BIGINT IS NULL OR user_id = $2)
+  AND ($3::TEXT = '' OR rule = $3)
+  AND ($4::TEXT = '' OR action = $4)
+  AND ($5::TIMESTAMPTZ IS NULL OR created_at >= $5)
+  AND ($6::TIMESTAMPTZ IS NULL OR created_at <= $6)
+  AND ($7::BIGINT[] IS NULL OR cardinality($7::BIGINT[]) = 0 OR chat_id = ANY($7::BIGINT[]))
+ORDER BY created_at DESC
+LIMIT $8 OFFSET $9
+`
+
+const countViolationsScoped = `-- name: CountViolationsScoped :one
+SELECT COUNT(*)::BIGINT
+FROM violations
+WHERE ($1::BIGINT IS NULL OR chat_id = $1)
+  AND ($2::BIGINT IS NULL OR user_id = $2)
+  AND ($3::TEXT = '' OR rule = $3)
+  AND ($4::TEXT = '' OR action = $4)
+  AND ($5::TIMESTAMPTZ IS NULL OR created_at >= $5)
+  AND ($6::TIMESTAMPTZ IS NULL OR created_at <= $6)
+  AND ($7::BIGINT[] IS NULL OR cardinality($7::BIGINT[]) = 0 OR chat_id = ANY($7::BIGINT[]))
+`
+
+const listWarningsScoped = `-- name: ListWarningsScoped :many
+SELECT id, chat_id, user_id, reason, issued_by, created_at, consumed_at
+FROM warnings
+WHERE ($1::BIGINT IS NULL OR chat_id = $1)
+  AND ($2::BIGINT IS NULL OR user_id = $2)
+  AND ($3::BIGINT[] IS NULL OR cardinality($3::BIGINT[]) = 0 OR chat_id = ANY($3::BIGINT[]))
+ORDER BY created_at DESC
+LIMIT $4 OFFSET $5
+`
+
+const countWarningsScoped = `-- name: CountWarningsScoped :one
+SELECT COUNT(*)::BIGINT
+FROM warnings
+WHERE ($1::BIGINT IS NULL OR chat_id = $1)
+  AND ($2::BIGINT IS NULL OR user_id = $2)
+  AND ($3::BIGINT[] IS NULL OR cardinality($3::BIGINT[]) = 0 OR chat_id = ANY($3::BIGINT[]))
+`
+
 const upsertBannedUser = `-- name: UpsertBannedUser :one
 INSERT INTO banned_users (
     user_id,
@@ -86,6 +130,42 @@ type ListWarningsParams struct {
 	ChatID *int64
 	UserID *int64
 	Limit  int32
+}
+
+type ListViolationsScopedParams struct {
+	ChatID  *int64
+	UserID  *int64
+	Rule    string
+	Action  string
+	Since   *string
+	Until   *string
+	ChatIds []int64
+	Limit   int32
+	Offset  int32
+}
+
+type CountViolationsScopedParams struct {
+	ChatID  *int64
+	UserID  *int64
+	Rule    string
+	Action  string
+	Since   *string
+	Until   *string
+	ChatIds []int64
+}
+
+type ListWarningsScopedParams struct {
+	ChatID  *int64
+	UserID  *int64
+	ChatIds []int64
+	Limit   int32
+	Offset  int32
+}
+
+type CountWarningsScopedParams struct {
+	ChatID  *int64
+	UserID  *int64
+	ChatIds []int64
 }
 
 type UpsertBannedUserParams struct {
@@ -159,6 +239,80 @@ func (q *Queries) ListWarnings(ctx context.Context, arg ListWarningsParams) ([]W
 		return nil, err
 	}
 	return items, nil
+}
+
+func (q *Queries) ListViolationsScoped(ctx context.Context, arg ListViolationsScopedParams) ([]Violation, error) {
+	rows, err := q.db.Query(ctx, listViolationsScoped, arg.ChatID, arg.UserID, arg.Rule, arg.Action, arg.Since, arg.Until, arg.ChatIds, arg.Limit, arg.Offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var items []Violation
+	for rows.Next() {
+		var i Violation
+		if err := rows.Scan(
+			&i.ID,
+			&i.ChatID,
+			&i.UserID,
+			&i.Username,
+			&i.Rule,
+			&i.Matched,
+			&i.Action,
+			&i.MessageText,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+func (q *Queries) CountViolationsScoped(ctx context.Context, arg CountViolationsScopedParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countViolationsScoped, arg.ChatID, arg.UserID, arg.Rule, arg.Action, arg.Since, arg.Until, arg.ChatIds)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
+func (q *Queries) ListWarningsScoped(ctx context.Context, arg ListWarningsScopedParams) ([]Warning, error) {
+	rows, err := q.db.Query(ctx, listWarningsScoped, arg.ChatID, arg.UserID, arg.ChatIds, arg.Limit, arg.Offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var items []Warning
+	for rows.Next() {
+		var i Warning
+		if err := rows.Scan(
+			&i.ID,
+			&i.ChatID,
+			&i.UserID,
+			&i.Reason,
+			&i.IssuedBy,
+			&i.CreatedAt,
+			&i.ConsumedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+func (q *Queries) CountWarningsScoped(ctx context.Context, arg CountWarningsScopedParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countWarningsScoped, arg.ChatID, arg.UserID, arg.ChatIds)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
 }
 
 func (q *Queries) UpsertBannedUser(ctx context.Context, arg UpsertBannedUserParams) (BannedUser, error) {
