@@ -1881,6 +1881,8 @@ func (s *Service) actionsPaused(ctx context.Context) (bool, error) {
 	return state.ActionsPaused, nil
 }
 
+const maxStoredBioLength = 500
+
 func (s *Service) enqueueProfileCheckLog(chatID int64, user *tele.User, bio string, mode string, result string, matchedRule *string, aiConfidence *float32, aiVerdict *string) {
 	if s == nil || s.queries == nil || chatID == 0 || user == nil {
 		return
@@ -1901,7 +1903,7 @@ func (s *Service) enqueueProfileCheckLog(chatID int64, user *tele.User, bio stri
 		usernamePtr = &username
 	}
 
-	bio = strings.TrimSpace(bio)
+	bio = truncateString(strings.TrimSpace(bio), maxStoredBioLength)
 	var bioPtr *string
 	if bio != "" {
 		bioPtr = &bio

@@ -62,12 +62,6 @@ func runRetentionOnce(ctx context.Context, q *store.Queries, cfg config.Retentio
 	} else {
 		logger.Info("retention cleanup event config audit", zap.Int64("deleted", n), zap.Int32("days", eventDays))
 	}
-	profileCheckLogDays := int32(30)
-	if n, err := q.DeleteOldProfileCheckLogs(runCtx, profileCheckLogDays); err != nil {
-		logger.Warn("retention cleanup profile check logs failed", zap.Error(err))
-	} else {
-		logger.Info("retention cleanup profile check logs", zap.Int64("deleted", n), zap.Int32("days", profileCheckLogDays))
-	}
 	if n, err := q.DeleteExpiredPendingVerifications(runCtx, int32(maxRetention(cfg.PendingVerificationsHours, 1))); err != nil {
 		logger.Warn("retention cleanup pending verifications failed", zap.Error(err))
 	} else {

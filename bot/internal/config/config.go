@@ -47,6 +47,7 @@ type RetentionConfig struct {
 	AIDecisionsDays           int `env:"RETENTION_AI_DECISIONS_DAYS" envDefault:"90"`
 	PendingVerificationsHours int `env:"RETENTION_PENDING_VERIFICATIONS_HOURS" envDefault:"24"`
 	ConfigAuditDays           int `env:"RETENTION_CONFIG_AUDIT_DAYS" envDefault:"365"`
+	ProfileCheckLogsDays      int `env:"RETENTION_PROFILE_CHECK_LOGS_DAYS" envDefault:"90"`
 	ZombieDays                int `env:"RETENTION_ZOMBIE_DAYS" envDefault:"30"`
 	BannedDays                int `env:"RETENTION_BANNED_DAYS" envDefault:"90"`
 }

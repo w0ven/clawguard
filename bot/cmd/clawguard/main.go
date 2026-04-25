@@ -133,6 +133,7 @@ func main() {
 	dailyReportWorker := worker.NewDailyReport(logger, queries, botService, cfg)
 	go dailyReportWorker.Run(workerCtx)
 	worker.StartRetentionCleanup(workerCtx, queries, cfg.Retention, logger)
+	worker.StartProfileCheckLogsRetention(workerCtx, queries, cfg.Retention, logger)
 
 	server := api.NewServer(cfg, logger, botService, scheduledMessages)
 

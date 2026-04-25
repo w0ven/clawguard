@@ -2023,6 +2023,18 @@ func serializeViolation(v store.Violation) map[string]any {
 	}
 }
 
+func truncateProfileCheckLogBio(value *string) *string {
+	if value == nil {
+		return nil
+	}
+	trimmed := *value
+	if len(trimmed) <= 200 {
+		return &trimmed
+	}
+	trimmed = trimmed[:200] + "…"
+	return &trimmed
+}
+
 func serializeProfileCheckLog(item store.ProfileCheckLog) map[string]any {
 	return map[string]any{
 		"id":            item.ID,
@@ -2030,7 +2042,7 @@ func serializeProfileCheckLog(item store.ProfileCheckLog) map[string]any {
 		"user_id":       item.UserID,
 		"user_name":     item.UserName,
 		"username":      item.Username,
-		"bio":           item.Bio,
+		"bio":           truncateProfileCheckLogBio(item.Bio),
 		"check_mode":    item.CheckMode,
 		"result":        item.Result,
 		"matched_rule":  item.MatchedRule,
