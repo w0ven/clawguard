@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"path"
 	"reflect"
 	"strings"
@@ -14,8 +15,10 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/openclaw/clawguard/internal/ai"
 	"github.com/openclaw/clawguard/internal/config"
 	"github.com/openclaw/clawguard/internal/store"
+	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
 	tele "gopkg.in/telebot.v3"
 )
@@ -107,6 +110,155 @@ func TestAsyncProfileCheck_ProfileOnMessageHit_RecordsAIDecisionAndBansTrust(t *
 	}
 }
 
+func TestModerationDedupe_ProfileViolationWinsOverMessageAI(t *testing.T) {
+	const (
+		chatID = -100123
+		userID = 42
+	)
+
+	svc, transport, db, msg, policy := newModerationDedupeTestService(t, chatID, userID)
+	profileOutput := ai.CheckOutput{Verdict: ai.Verdict{Verdict: "spam", Confidence: 0.99, Category: "spam", Reason: "资料违规"}, Model: "profile-model"}
+	if err := svc.handleProfileOnMessageViolation(context.Background(), msg, policy, "资料违规", &profileOutput); err != nil {
+		t.Fatalf("handleProfileOnMessageViolation() error = %v", err)
+	}
+
+	messageOutput := ai.CheckOutput{Verdict: ai.Verdict{Verdict: "spam", Confidence: 0.99, Category: "spam", Reason: "消息违规"}, Model: "message-model"}
+	if err := svc.applyAIAction(context.Background(), msg, policy, db.currentTrust(), messageOutput, "ban", false); err != nil {
+		t.Fatalf("applyAIAction() error = %v", err)
+	}
+
+	assertModerationDedupeCounts(t, transport, 1, 1, 1)
+	if got := joinedTelegramBodies(transport); !strings.Contains(got, "资料简介违规：资料违规") {
+		t.Fatalf("feedback body = %q, want profile reason", got)
+	}
+}
+
+func TestModerationDedupe_MessageAIWinsOverProfileViolation(t *testing.T) {
+	const (
+		chatID = -100123
+		userID = 42
+	)
+
+	svc, transport, db, msg, policy := newModerationDedupeTestService(t, chatID, userID)
+	messageOutput := ai.CheckOutput{Verdict: ai.Verdict{Verdict: "spam", Confidence: 0.99, Category: "spam", Reason: "消息违规"}, Model: "message-model"}
+	if err := svc.applyAIAction(context.Background(), msg, policy, db.currentTrust(), messageOutput, "ban", false); err != nil {
+		t.Fatalf("applyAIAction() error = %v", err)
+	}
+
+	profileOutput := ai.CheckOutput{Verdict: ai.Verdict{Verdict: "spam", Confidence: 0.99, Category: "spam", Reason: "资料违规"}, Model: "profile-model"}
+	if err := svc.handleProfileOnMessageViolation(context.Background(), msg, policy, "资料违规", &profileOutput); err != nil {
+		t.Fatalf("handleProfileOnMessageViolation() error = %v", err)
+	}
+
+	assertModerationDedupeCounts(t, transport, 1, 1, 1)
+	if got := joinedTelegramBodies(transport); !strings.Contains(got, "消息违规") {
+		t.Fatalf("feedback body = %q, want message reason", got)
+	}
+}
+
+func TestModerationDedupe_ProfileAndMessageAIConcurrent(t *testing.T) {
+	const (
+		chatID = -100123
+		userID = 42
+	)
+
+	svc, transport, db, msg, policy := newModerationDedupeTestService(t, chatID, userID)
+	profileOutput := ai.CheckOutput{Verdict: ai.Verdict{Verdict: "spam", Confidence: 0.99, Category: "spam", Reason: "资料违规"}, Model: "profile-model"}
+	messageOutput := ai.CheckOutput{Verdict: ai.Verdict{Verdict: "spam", Confidence: 0.99, Category: "spam", Reason: "消息违规"}, Model: "message-model"}
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	errs := make(chan error, 2)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		<-start
+		errs <- svc.handleProfileOnMessageViolation(context.Background(), msg, policy, "资料违规", &profileOutput)
+	}()
+	go func() {
+		defer wg.Done()
+		<-start
+		errs <- svc.applyAIAction(context.Background(), msg, policy, db.currentTrust(), messageOutput, "ban", false)
+	}()
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent moderation action error = %v", err)
+		}
+	}
+
+	assertModerationDedupeCounts(t, transport, 1, 1, 1)
+}
+
+func TestModerationDedupe_RedisUnavailableFallsBackToLocalLocks(t *testing.T) {
+	svc := &Service{
+		logger: zap.NewNop(),
+		redis:  redis.NewClient(&redis.Options{Addr: "127.0.0.1:1", DialTimeout: time.Millisecond, ReadTimeout: time.Millisecond, WriteTimeout: time.Millisecond, MaxRetries: 0}),
+	}
+	t.Cleanup(func() {
+		if client, ok := svc.redis.(*redis.Client); ok {
+			_ = client.Close()
+		}
+	})
+
+	if release, ok := svc.acquireUserActionLock(-100123, 42); !ok {
+		t.Fatal("first user action lock acquisition failed")
+	} else {
+		release()
+	}
+	if _, ok := svc.acquireUserActionLock(-100123, 42); ok {
+		t.Fatal("second user action lock acquisition succeeded, want local fallback dedupe")
+	}
+	if release, ok := svc.acquireMessageDeleteLock(-100123, 1001); !ok {
+		t.Fatal("first message delete lock acquisition failed")
+	} else {
+		release()
+	}
+	if _, ok := svc.acquireMessageDeleteLock(-100123, 1001); ok {
+		t.Fatal("second message delete lock acquisition succeeded, want local fallback dedupe")
+	}
+}
+
+func newModerationDedupeTestService(t *testing.T, chatID, userID int64) (*Service, *telegramMockTransport, *moderationProfileMatchMockDB, *tele.Message, config.GuardPolicy) {
+	t.Helper()
+	botClient, transport := newMockTelegramBot(t, "")
+	db := newModerationProfileMatchMockDB(chatID, userID)
+	svc := &Service{logger: zap.NewNop(), queries: store.New(db), bot: botClient}
+	policy := config.DefaultPolicy
+	policy.Feedback.Ban = config.ActionFeedback{Enabled: true, Template: "{reason}"}
+	msg := &tele.Message{ID: 1001, Text: "trigger message", Chat: &tele.Chat{ID: chatID, Title: "test-group"}, Sender: &tele.User{ID: userID, Username: "new_user"}}
+	return svc, transport, db, msg, policy
+}
+
+func assertModerationDedupeCounts(t *testing.T, transport *telegramMockTransport, wantBan, wantDelete, wantFeedback int) {
+	t.Helper()
+	methods := transport.Methods()
+	if got := countString(methods, "kickChatMember"); got != wantBan {
+		t.Fatalf("kickChatMember calls = %d, want %d; methods=%v", got, wantBan, methods)
+	}
+	if got := countString(methods, "deleteMessage"); got != wantDelete {
+		t.Fatalf("deleteMessage calls = %d, want %d; methods=%v", got, wantDelete, methods)
+	}
+	if got := countString(methods, "sendMessage"); got != wantFeedback {
+		t.Fatalf("sendMessage calls = %d, want %d; methods=%v", got, wantFeedback, methods)
+	}
+}
+
+func joinedTelegramBodies(transport *telegramMockTransport) string {
+	bodies := transport.RequestBodies()
+	decoded := make([]string, 0, len(bodies))
+	for _, body := range bodies {
+		value, err := url.QueryUnescape(body)
+		if err != nil {
+			value = body
+		}
+		decoded = append(decoded, value)
+	}
+	return strings.Join(decoded, "\n")
+}
+
 type moderationProfileMatchMockDB struct {
 	mu          sync.Mutex
 	now         time.Time
@@ -135,6 +287,12 @@ func newModerationProfileMatchMockDB(chatID, userID int64) *moderationProfileMat
 			UpdatedAt: now,
 		},
 	}
+}
+
+func (db *moderationProfileMatchMockDB) currentTrust() store.UserTrust {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	return db.userTrust
 }
 
 func (db *moderationProfileMatchMockDB) Exec(context.Context, string, ...any) (pgconn.CommandTag, error) {
@@ -282,6 +440,32 @@ func (db *moderationProfileMatchMockDB) QueryRow(_ context.Context, query string
 			params.AiVerdict,
 			createdAt,
 		)
+	case strings.Contains(query, "SET messages_checked = messages_checked"):
+		db.mu.Lock()
+		db.userTrust.MessagesChecked += args[2].(int32)
+		db.userTrust.MessagesClean += args[3].(int32)
+		db.userTrust.Score = args[4].(float64)
+		db.userTrust.UpdatedAt = db.now.Add(2 * time.Minute)
+		trust := db.userTrust
+		db.mu.Unlock()
+		return mockScanRow(
+			trust.ChatID,
+			trust.UserID,
+			trust.Username,
+			trust.FirstName,
+			trust.LastName,
+			trust.JoinedAt,
+			trust.UpdatedAt,
+			trust.StatusChangedAt,
+			trust.Status,
+			trust.Score,
+			trust.MessagesChecked,
+			trust.MessagesClean,
+			trust.GraduatedAt,
+			trust.BannedAt,
+			trust.BannedReason,
+			trust.Notes,
+		)
 	case strings.Contains(query, "SET messages_clean = 0"):
 		db.mu.Lock()
 		db.userTrust.MessagesClean = 0
@@ -396,6 +580,7 @@ type telegramMockTransport struct {
 	mu      sync.Mutex
 	bio     string
 	methods []string
+	bodies  []string
 }
 
 func newMockTelegramBot(t *testing.T, bio string) (*tele.Bot, *telegramMockTransport) {
@@ -418,8 +603,17 @@ func newMockTelegramBot(t *testing.T, bio string) (*tele.Bot, *telegramMockTrans
 func (t *telegramMockTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	method := path.Base(req.URL.Path)
 
+	requestBody := ""
+	if req.Body != nil {
+		raw, _ := io.ReadAll(req.Body)
+		requestBody = string(raw)
+	}
+
 	t.mu.Lock()
 	t.methods = append(t.methods, method)
+	if requestBody != "" {
+		t.bodies = append(t.bodies, requestBody)
+	}
 	t.mu.Unlock()
 
 	body := `{"ok":true,"result":true}`
@@ -443,6 +637,22 @@ func (t *telegramMockTransport) Methods() []string {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return append([]string(nil), t.methods...)
+}
+
+func (t *telegramMockTransport) RequestBodies() []string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return append([]string(nil), t.bodies...)
+}
+
+func countString(values []string, want string) int {
+	count := 0
+	for _, value := range values {
+		if value == want {
+			count++
+		}
+	}
+	return count
 }
 
 func containsString(values []string, want string) bool {

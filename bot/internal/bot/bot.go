@@ -28,30 +28,32 @@ import (
 )
 
 type Service struct {
-	cfg              config.Config
-	logger           *zap.Logger
-	queries          *store.Queries
-	redis            redis.Cmdable
-	casClient        *casclient.Client
-	aiProviders      ai.ProviderRegistry
-	aiModels         ai.ModelRegistry
-	aiResolver       *ai.Resolver
-	aiModerator      *ai.Moderator
-	bot              *tele.Bot
-	sender           telegramSender
-	sendLimiter      *SendLimiter
-	lifecycleCtx     context.Context
-	lifecycleCancel  context.CancelFunc
-	wg               sync.WaitGroup
-	verifyBtn        tele.Btn
-	verifyMathBtn    tele.Btn
-	verifyRandBtn    tele.Btn
-	startedAt        time.Time
-	lastUpdateAt     atomic.Value
-	lastAIOKAt       atomic.Value
-	lastAIFailAt     atomic.Value
-	lastAIError      atomic.Value
-	bioCheckInFlight sync.Map
+	cfg                config.Config
+	logger             *zap.Logger
+	queries            *store.Queries
+	redis              redis.Cmdable
+	casClient          *casclient.Client
+	aiProviders        ai.ProviderRegistry
+	aiModels           ai.ModelRegistry
+	aiResolver         *ai.Resolver
+	aiModerator        *ai.Moderator
+	bot                *tele.Bot
+	sender             telegramSender
+	sendLimiter        *SendLimiter
+	lifecycleCtx       context.Context
+	lifecycleCancel    context.CancelFunc
+	wg                 sync.WaitGroup
+	verifyBtn          tele.Btn
+	verifyMathBtn      tele.Btn
+	verifyRandBtn      tele.Btn
+	startedAt          time.Time
+	lastUpdateAt       atomic.Value
+	lastAIOKAt         atomic.Value
+	lastAIFailAt       atomic.Value
+	lastAIError        atomic.Value
+	bioCheckInFlight   sync.Map
+	userActionLocks    sync.Map
+	messageDeleteLocks sync.Map
 }
 
 type buttonPayload struct {

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -29,6 +30,11 @@ return 0
 `
 
 const defaultAIModerationTotalTimeout = 25 * time.Second
+
+const (
+	userActionLockTTL    = 60 * time.Second
+	messageDeleteLockTTL = 30 * time.Second
+)
 
 func buildUserTrustBanReason(rule, matched, source string) []byte {
 	return mustJSONBytes(map[string]any{
@@ -212,9 +218,21 @@ func (s *Service) applyAIModeration(ctx context.Context, msg *tele.Message, poli
 	case "trusted":
 		return nil
 	case "banned":
-		if err := s.deleteMessage(msg); err != nil {
-			s.logger.Warn("delete banned user message failed", zap.Error(err))
+		deleteRelease, deleteOK := s.acquireMessageDeleteLock(msg.Chat.ID, msg.ID)
+		if deleteOK {
+			defer deleteRelease()
+			if err := s.deleteMessage(msg); err != nil {
+				s.logger.Warn("delete banned user message failed", zap.Error(err))
+			}
+		} else {
+			s.logger.Info("skip duplicate banned user message delete", zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID), zap.Int("message_id", msg.ID))
 		}
+		actionRelease, actionOK := s.acquireUserActionLock(msg.Chat.ID, msg.Sender.ID)
+		if !actionOK {
+			s.logger.Info("skip duplicate banned user action", zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID), zap.Int("message_id", msg.ID))
+			return nil
+		}
+		defer actionRelease()
 		if err := s.banUser(msg.Chat, msg.Sender); err != nil {
 			return err
 		}
@@ -1312,14 +1330,28 @@ func (s *Service) applyAIAction(ctx context.Context, msg *tele.Message, policy c
 	cleanDelta := int32(0)
 	nextStatus := trust.Status
 	score := trust.Score
+	shouldSendActionFeedback := true
 
 	switch action {
 	case "ban":
-		if err := s.deleteMessage(msg); err != nil {
-			return err
+		deleteRelease, deleteOK := s.acquireMessageDeleteLock(msg.Chat.ID, msg.ID)
+		if deleteOK {
+			defer deleteRelease()
+			if err := s.deleteMessage(msg); err != nil {
+				return err
+			}
+		} else {
+			s.logger.Info("skip duplicate ai ban message delete", zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID), zap.Int("message_id", msg.ID))
 		}
-		if err := s.banUser(msg.Chat, msg.Sender); err != nil {
-			return err
+		actionRelease, actionOK := s.acquireUserActionLock(msg.Chat.ID, msg.Sender.ID)
+		if actionOK {
+			defer actionRelease()
+			if err := s.banUser(msg.Chat, msg.Sender); err != nil {
+				return err
+			}
+		} else {
+			s.logger.Info("skip duplicate ai ban user action", zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID), zap.Int("message_id", msg.ID))
+			shouldSendActionFeedback = false
 		}
 		nextStatus = "banned"
 		score = 0
@@ -1406,7 +1438,9 @@ func (s *Service) applyAIAction(ctx context.Context, msg *tele.Message, policy c
 	}
 
 	// AI 动作反馈
-	s.dispatchAIActionFeedback(msg, policy, action, output)
+	if shouldSendActionFeedback {
+		s.dispatchAIActionFeedback(msg, policy, action, output)
+	}
 
 	s.resetTrustAfterViolation(ctx, msg, action, stringPtr(output.Verdict.Reason))
 	return nil
@@ -2246,6 +2280,49 @@ func (s *Service) acquireProfileCheckInFlight(userID int64) (func(), bool) {
 
 var bioCheckInFlightLocalTTL = 60 * time.Second
 
+func (s *Service) acquireUserActionLock(chatID, userID int64) (func(), bool) {
+	if chatID == 0 || userID <= 0 {
+		return func() {}, false
+	}
+	key := "user_action:" + strconv.FormatInt(chatID, 10) + ":" + strconv.FormatInt(userID, 10)
+	return s.acquireActionDedupeLock(key, userActionLockTTL, &s.userActionLocks, "user action", zap.Int64("chat_id", chatID), zap.Int64("user_id", userID))
+}
+
+func (s *Service) acquireMessageDeleteLock(chatID int64, msgID int) (func(), bool) {
+	if chatID == 0 || msgID <= 0 {
+		return func() {}, false
+	}
+	key := "msg_deleted:" + strconv.FormatInt(chatID, 10) + ":" + strconv.Itoa(msgID)
+	return s.acquireActionDedupeLock(key, messageDeleteLockTTL, &s.messageDeleteLocks, "message delete", zap.Int64("chat_id", chatID), zap.Int("message_id", msgID))
+}
+
+func (s *Service) acquireActionDedupeLock(key string, ttl time.Duration, local *sync.Map, label string, fields ...zap.Field) (func(), bool) {
+	if key == "" || ttl <= 0 || local == nil {
+		return func() {}, false
+	}
+
+	if s.redis != nil {
+		ok, err := s.redis.SetNX(context.Background(), key, "1", ttl).Result()
+		if err == nil {
+			if !ok {
+				return func() {}, false
+			}
+			return func() {}, true
+		}
+		logFields := append([]zap.Field{zap.Error(err), zap.String("key", key)}, fields...)
+		s.logger.Warn("acquire "+label+" lock via redis failed", logFields...)
+	}
+
+	timer := time.AfterFunc(ttl, func() {
+		local.Delete(key)
+	})
+	if _, loaded := local.LoadOrStore(key, timer); loaded {
+		timer.Stop()
+		return func() {}, false
+	}
+	return func() {}, true
+}
+
 func (s *Service) handleProfileOnMessageViolation(
 	ctx context.Context,
 	msg *tele.Message,
@@ -2257,8 +2334,14 @@ func (s *Service) handleProfileOnMessageViolation(
 		return nil
 	}
 
-	if err := s.banUser(msg.Chat, msg.Sender); err != nil {
-		return err
+	actionRelease, actionOK := s.acquireUserActionLock(msg.Chat.ID, msg.Sender.ID)
+	if actionOK {
+		defer actionRelease()
+		if err := s.banUser(msg.Chat, msg.Sender); err != nil {
+			return err
+		}
+	} else {
+		s.logger.Info("skip duplicate on-message profile user action", zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID), zap.Int("message_id", msg.ID))
 	}
 	if _, err := s.queries.InsertViolation(ctx, store.InsertViolationParams{
 		ChatID:      msg.Chat.ID,
@@ -2280,15 +2363,24 @@ func (s *Service) handleProfileOnMessageViolation(
 		s.logger.Warn("record profile violation ai_decision failed", zap.Error(err))
 	}
 
-	if err := s.deleteMessage(msg); err != nil {
-		s.logger.Warn("delete on-message profile violation trigger failed",
-			zap.Error(err),
-			zap.Int64("chat_id", msg.Chat.ID),
-			zap.Int64("user_id", msg.Sender.ID),
-			zap.Int("message_id", msg.ID))
+	deleteRelease, deleteOK := s.acquireMessageDeleteLock(msg.Chat.ID, msg.ID)
+	if deleteOK {
+		defer deleteRelease()
+		if err := s.deleteMessage(msg); err != nil {
+			s.logger.Warn("delete on-message profile violation trigger failed",
+				zap.Error(err),
+				zap.Int64("chat_id", msg.Chat.ID),
+				zap.Int64("user_id", msg.Sender.ID),
+				zap.Int("message_id", msg.ID))
+		}
+	} else {
+		s.logger.Info("skip duplicate on-message profile message delete", zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID), zap.Int("message_id", msg.ID))
 	}
 
 	s.resetTrustAfterViolation(ctx, msg, "ban", stringPtr("profile_match_on_message: "+matched))
+	if !actionOK {
+		return nil
+	}
 	s.sendActionFeedback(msg.Chat, nil, policy.Feedback.Ban, map[string]string{
 		"user":         feedbackUserLabel(msg.Sender, policy.Feedback.Ban.ParseMode),
 		"user_mention": feedbackUserMention(msg.Sender, policy.Feedback.Ban.ParseMode),
