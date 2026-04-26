@@ -55,6 +55,11 @@ function overrideBadge(
   return { text: o, tone: "default" };
 }
 
+function sceneBadge(scene: string | undefined): { text: string; className: string } {
+  if (scene === "bio") return { text: "简介审核", className: "border-purple-500/20 bg-purple-500/10 text-purple-700" };
+  return { text: "消息审核", className: "border-blue-500/20 bg-blue-500/10 text-blue-700" };
+}
+
 function AIReviewPageInner() {
   const { pushToast } = useToast();
   const router = useRouter();
@@ -70,6 +75,7 @@ function AIReviewPageInner() {
     user_id: "",
     verdict: "",
     category: "",
+    scene: "",
   });
 
   const queryString = useMemo(() => {
@@ -121,7 +127,7 @@ function AIReviewPageInner() {
   }
 
   function resetFilters() {
-    setFilters({ range: "7d", chat_id: "", user_id: "", verdict: "", category: "" });
+    setFilters({ range: "7d", chat_id: "", user_id: "", verdict: "", category: "", scene: "" });
     router.replace("/ai-review");
   }
 
@@ -203,6 +209,7 @@ function AIReviewPageInner() {
                 <TableHeaderCell className="w-36">时间</TableHeaderCell>
                 <TableHeaderCell>消息</TableHeaderCell>
                 <TableHeaderCell>AI 判定</TableHeaderCell>
+                <TableHeaderCell>审核类型</TableHeaderCell>
                 <TableHeaderCell>已执行</TableHeaderCell>
                 <TableHeaderCell>置信度</TableHeaderCell>
                 <TableHeaderCell>标注</TableHeaderCell>
@@ -214,6 +221,7 @@ function AIReviewPageInner() {
                   (item as AIDecision & { action_taken?: string }).action_taken,
                 );
                 const badge = overrideBadge(item.admin_override);
+                const scene = sceneBadge(item.scene);
                 return (
                   <Fragment key={item.id}>
                     <TableRow
@@ -280,6 +288,9 @@ function AIReviewPageInner() {
                       <TableCell>
                         <Badge tone={act.tone}>{act.text}</Badge>
                       </TableCell>
+                      <TableCell>
+                        <Badge className={scene.className}>{scene.text}</Badge>
+                      </TableCell>
                       <TableCell className="tabular-nums">
                         {(item.confidence * 100).toFixed(0)}%
                       </TableCell>
@@ -342,7 +353,7 @@ function AIReviewPageInner() {
                     </TableRow>
                     {expandedId === item.id ? (
                       <TableRow className="bg-[var(--surface-2)]/40">
-                          <TableCell colSpan={8}>
+                          <TableCell colSpan={9}>
                             <MessageTextBlock text={item.message_text} />
                           </TableCell>
                       </TableRow>

@@ -276,6 +276,7 @@ export type AIDecision = {
   action_taken: string;
   admin_override: Nullable<string>;
   latency_ms: number;
+  scene: string;
   created_at: string;
 };
 
@@ -313,6 +314,11 @@ export type AICallPerModel = {
   calls: number;
 };
 
+export type AICallPerScene = {
+  scene: string;
+  calls: number;
+};
+
 export type AICallPerChat = {
   chat_id: number;
   title: Nullable<string>;
@@ -323,6 +329,7 @@ export type AICallSummary = {
   today_calls: number;
   daily: AICallDaily[];
   per_model: AICallPerModel[];
+  per_scene: AICallPerScene[];
   per_chat: AICallPerChat[];
 };
 

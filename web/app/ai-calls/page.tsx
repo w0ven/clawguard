@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { AdminShell } from "@/components/admin-shell";
 import { Card, CardBody, CardHeader, CardTitle } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
 import {
   Table,
   TableBody,
@@ -14,6 +15,11 @@ import {
 import { apiFetch } from "@/lib/api";
 import type { AICacheStats, AICallSummary } from "@/lib/types";
 import { useToast } from "@/components/providers";
+
+function sceneBadge(scene: string | undefined): { text: string; className: string } {
+  if (scene === "bio") return { text: "简介审核", className: "border-purple-500/20 bg-purple-500/10 text-purple-700" };
+  return { text: "消息审核", className: "border-blue-500/20 bg-blue-500/10 text-blue-700" };
+}
 
 function CallTrendChart({
   points,
@@ -193,6 +199,39 @@ export default function AICallsPage() {
       </Card>
 
       <div className="grid gap-4 xl:grid-cols-2">
+        <Card>
+          <CardHeader>
+            <CardTitle>按审核类型</CardTitle>
+          </CardHeader>
+          {(summary?.per_scene.length ?? 0) === 0 ? (
+            <div className="px-5 py-12 text-center text-sm text-[var(--text-muted)]">
+              {loading ? "加载中…" : "暂无 AI 调用记录"}
+            </div>
+          ) : (
+            <Table>
+              <TableHead>
+                <TableRow>
+                  <TableHeaderCell>审核类型</TableHeaderCell>
+                  <TableHeaderCell>调用次数</TableHeaderCell>
+                </TableRow>
+              </TableHead>
+              <TableBody>
+                {summary?.per_scene.map((item) => {
+                  const scene = sceneBadge(item.scene);
+                  return (
+                    <TableRow key={item.scene}>
+                      <TableCell>
+                        <Badge className={scene.className}>{scene.text}</Badge>
+                      </TableCell>
+                      <TableCell className="tabular-nums">{item.calls}</TableCell>
+                    </TableRow>
+                  );
+                })}
+              </TableBody>
+            </Table>
+          )}
+        </Card>
+
         <Card>
           <CardHeader>
             <CardTitle>按模型</CardTitle>

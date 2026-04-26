@@ -36,6 +36,16 @@ WHERE created_at >= CURRENT_DATE - INTERVAL '29 day'
 GROUP BY model
 ORDER BY calls DESC, model ASC;
 
+-- name: ListAICallsPerSceneLast30Days :many
+SELECT
+    scene,
+    COUNT(*)::BIGINT AS calls
+FROM ai_decisions
+WHERE created_at >= CURRENT_DATE - INTERVAL '29 day'
+  AND ($1::BIGINT[] IS NULL OR cardinality($1::BIGINT[]) = 0 OR chat_id = ANY($1::BIGINT[]))
+GROUP BY scene
+ORDER BY calls DESC, scene ASC;
+
 -- name: ListAICallsPerChatLast30Days :many
 SELECT
     d.chat_id,

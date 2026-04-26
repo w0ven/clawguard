@@ -1105,6 +1105,7 @@ func (s *Server) handleListAIDecisions(c echo.Context) error {
 		AdminOverride: override,
 		Category:      strings.TrimSpace(c.QueryParam("category")),
 		ActionTaken:   strings.TrimSpace(c.QueryParam("action")),
+		Scene:         strings.TrimSpace(c.QueryParam("scene")),
 		Since:         since,
 		Until:         until,
 		Limit:         parseLimit(c.QueryParam("limit")),
@@ -1468,6 +1469,10 @@ func (s *Server) handleListAICalls(c echo.Context) error {
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "load ai model calls failed"})
 	}
+	perScene, err := s.botService.Queries().ListAICallsPerSceneLast30Days(c.Request().Context(), scopeChatIDs)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "load ai scene calls failed"})
+	}
 	perChat, err := s.botService.Queries().ListAICallsPerChatLast30Days(c.Request().Context(), scopeChatIDs, 10)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "load ai chat calls failed"})
@@ -1487,6 +1492,13 @@ func (s *Server) handleListAICalls(c echo.Context) error {
 			"calls": item.Calls,
 		})
 	}
+	sceneResponse := make([]map[string]any, 0, len(perScene))
+	for _, item := range perScene {
+		sceneResponse = append(sceneResponse, map[string]any{
+			"scene": item.Scene,
+			"calls": item.Calls,
+		})
+	}
 	chatResponse := make([]map[string]any, 0, len(perChat))
 	for _, item := range perChat {
 		chatResponse = append(chatResponse, map[string]any{
@@ -1500,6 +1512,7 @@ func (s *Server) handleListAICalls(c echo.Context) error {
 		"today_calls": todayCalls,
 		"daily":       dailyResponse,
 		"per_model":   modelResponse,
+		"per_scene":   sceneResponse,
 		"per_chat":    chatResponse,
 	})
 }
@@ -1837,6 +1850,7 @@ func serializeAIDecision(item store.AIDecision) map[string]any {
 		"action_taken":   item.ActionTaken,
 		"admin_override": item.AdminOverride,
 		"latency_ms":     item.LatencyMs,
+		"scene":          item.Scene,
 		"created_at":     item.CreatedAt,
 	}
 }

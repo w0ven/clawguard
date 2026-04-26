@@ -842,6 +842,7 @@ func (s *Service) recordAIDecision(ctx context.Context, msg *tele.Message, messa
 		Reason:        stringPtr(output.Verdict.Reason),
 		ActionTaken:   normalizeAIAction(action),
 		LatencyMs:     int32(output.LatencyMs),
+		Scene:         "message",
 	})
 	return err
 }
@@ -915,6 +916,7 @@ func (s *Service) recordProfileViolationDecision(
 		Reason:        stringPtr(reason),
 		ActionTaken:   "ban",
 		LatencyMs:     latencyMs,
+		Scene:         "bio",
 	})
 	return err
 }
@@ -942,6 +944,7 @@ func (s *Service) recordAIDecisionError(ctx context.Context, msg *tele.Message, 
 		Reason:        stringPtr(reason),
 		ActionTaken:   "error",
 		LatencyMs:     0,
+		Scene:         "message",
 	})
 	return err
 }
@@ -1351,7 +1354,7 @@ func (s *Service) applyAIAction(ctx context.Context, msg *tele.Message, policy c
 			}
 		} else {
 			s.logger.Info("skip duplicate ai ban user action", zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID), zap.Int("message_id", msg.ID))
-			shouldSendActionFeedback = false
+			return nil
 		}
 		nextStatus = "banned"
 		score = 0
@@ -1373,7 +1376,7 @@ func (s *Service) applyAIAction(ctx context.Context, msg *tele.Message, policy c
 			}
 		} else {
 			s.logger.Info("skip duplicate ai mute user action", zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID), zap.Int("message_id", msg.ID))
-			shouldSendActionFeedback = false
+			return nil
 		}
 		nextStatus = "suspicious"
 		score = 0.2
@@ -1395,7 +1398,7 @@ func (s *Service) applyAIAction(ctx context.Context, msg *tele.Message, policy c
 			}
 		} else {
 			s.logger.Info("skip duplicate ai warn user action", zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID), zap.Int("message_id", msg.ID))
-			shouldSendActionFeedback = false
+			return nil
 		}
 		nextStatus = "suspicious"
 		score = 0.3
@@ -1417,7 +1420,7 @@ func (s *Service) applyAIAction(ctx context.Context, msg *tele.Message, policy c
 			defer actionRelease()
 		} else {
 			s.logger.Info("skip duplicate ai delete user action", zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID), zap.Int("message_id", msg.ID))
-			shouldSendActionFeedback = false
+			return nil
 		}
 		nextStatus = "suspicious"
 		score = 0.3

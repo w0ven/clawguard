@@ -48,7 +48,7 @@ export function FilterBar({ groups, values, onChange, onApply, onReset, mode }: 
   }
 
   return (
-    <div className="grid gap-3 md:grid-cols-3 xl:grid-cols-6">
+    <div className="grid gap-3 md:grid-cols-3 xl:grid-cols-7">
       <Select
         value={values.range}
         onChange={(e) => onChange("range", e.target.value)}
@@ -90,11 +90,26 @@ export function FilterBar({ groups, values, onChange, onApply, onReset, mode }: 
           <option value="violence">暴力 (violence)</option>
         </Select>
       )}
-      <Input
-        placeholder={mode === "violations" ? "action" : "category"}
-        value={mode === "violations" ? values.action : values.category}
-        onChange={(e) => onChange(mode === "violations" ? "action" : "category", e.target.value)}
-      />
+      {mode === "violations" ? (
+        <Input
+          placeholder="action"
+          value={values.action}
+          onChange={(e) => onChange("action", e.target.value)}
+        />
+      ) : (
+        <Input
+          placeholder="category"
+          value={values.category}
+          onChange={(e) => onChange("category", e.target.value)}
+        />
+      )}
+      {mode === "ai" && (
+        <Select value={values.scene} onChange={(e) => onChange("scene", e.target.value)}>
+          <option value="">全部类型</option>
+          <option value="message">消息审核</option>
+          <option value="bio">简介审核</option>
+        </Select>
+      )}
       <div className="flex gap-2">
         <Button variant="secondary" onClick={handleApply}>应用</Button>
         <Button variant="ghost" onClick={onReset}>重置</Button>

@@ -189,6 +189,7 @@ type AIDecision struct {
 	ActionTaken   string
 	AdminOverride *string
 	LatencyMs     int32
+	Scene         string
 	CreatedAt     time.Time
 }
 
@@ -199,6 +200,11 @@ type AICallDaily struct {
 
 type AICallPerModel struct {
 	Model string
+	Calls int64
+}
+
+type AICallPerScene struct {
+	Scene string
 	Calls int64
 }
 

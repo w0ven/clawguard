@@ -90,6 +90,9 @@ func TestAsyncProfileCheck_ProfileOnMessageHit_RecordsAIDecisionAndBansTrust(t *
 	if decisions[0].Model != "profile_check:on_message_keyword" {
 		t.Fatalf("ai_decisions model = %q, want %q", decisions[0].Model, "profile_check:on_message_keyword")
 	}
+	if decisions[0].Scene != "bio" {
+		t.Fatalf("ai_decisions scene = %q, want %q", decisions[0].Scene, "bio")
+	}
 
 	if len(violations) != 1 {
 		t.Fatalf("violations inserts = %d, want 1", len(violations))
@@ -433,6 +436,7 @@ func (db *moderationProfileMatchMockDB) QueryRow(_ context.Context, query string
 			ActionTaken:   args[12].(string),
 			AdminOverride: args[13].(*string),
 			LatencyMs:     args[14].(int32),
+			Scene:         args[15].(string),
 		}
 		db.mu.Lock()
 		db.aiDecisions = append(db.aiDecisions, params)
@@ -456,6 +460,7 @@ func (db *moderationProfileMatchMockDB) QueryRow(_ context.Context, query string
 			params.ActionTaken,
 			params.AdminOverride,
 			params.LatencyMs,
+			params.Scene,
 			createdAt,
 		)
 	case strings.Contains(query, "INSERT INTO violations"):

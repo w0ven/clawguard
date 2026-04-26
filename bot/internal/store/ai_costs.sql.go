@@ -43,6 +43,17 @@ GROUP BY model
 ORDER BY calls DESC, model ASC
 `
 
+const listAICallsPerSceneLast30Days = `-- name: ListAICallsPerSceneLast30Days :many
+SELECT
+    scene,
+    COUNT(*)::BIGINT AS calls
+FROM ai_decisions
+WHERE created_at >= CURRENT_DATE - INTERVAL '29 day'
+  AND ($1::BIGINT[] IS NULL OR cardinality($1::BIGINT[]) = 0 OR chat_id = ANY($1::BIGINT[]))
+GROUP BY scene
+ORDER BY calls DESC, scene ASC
+`
+
 const listAICallsPerChatLast30Days = `-- name: ListAICallsPerChatLast30Days :many
 SELECT
     d.chat_id,
@@ -96,6 +107,27 @@ func (q *Queries) ListAICallsPerModelLast30Days(ctx context.Context, scopedChatI
 	for rows.Next() {
 		var item AICallPerModel
 		if err := rows.Scan(&item.Model, &item.Calls); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+func (q *Queries) ListAICallsPerSceneLast30Days(ctx context.Context, scopedChatIDs []int64) ([]AICallPerScene, error) {
+	rows, err := q.db.Query(ctx, listAICallsPerSceneLast30Days, scopedChatIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var items []AICallPerScene
+	for rows.Next() {
+		var item AICallPerScene
+		if err := rows.Scan(&item.Scene, &item.Calls); err != nil {
 			return nil, err
 		}
 		items = append(items, item)
