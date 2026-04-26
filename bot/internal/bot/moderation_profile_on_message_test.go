@@ -192,6 +192,56 @@ func TestModerationDedupe_ProfileAndMessageAIConcurrent(t *testing.T) {
 	assertModerationDedupeCounts(t, transport, 1, 1, 1)
 }
 
+func TestModerationDedupe_ProfileViolationWinsOverMessageAIWarnMuteDelete(t *testing.T) {
+	for _, action := range []string{"warn", "mute", "delete"} {
+		t.Run(action, func(t *testing.T) {
+			const (
+				chatID = -100123
+				userID = 42
+			)
+
+			svc, transport, db, msg, policy := newModerationDedupeTestService(t, chatID, userID)
+			profileOutput := ai.CheckOutput{Verdict: ai.Verdict{Verdict: "spam", Confidence: 0.99, Category: "spam", Reason: "资料违规"}, Model: "profile-model"}
+			if err := svc.handleProfileOnMessageViolation(context.Background(), msg, policy, "资料违规", &profileOutput); err != nil {
+				t.Fatalf("handleProfileOnMessageViolation() error = %v", err)
+			}
+
+			messageOutput := ai.CheckOutput{Verdict: ai.Verdict{Verdict: "spam", Confidence: 0.99, Category: "spam", Reason: "消息违规"}, Model: "message-model"}
+			if err := svc.applyAIAction(context.Background(), msg, policy, db.currentTrust(), messageOutput, action, false); err != nil {
+				t.Fatalf("applyAIAction(%q) error = %v", action, err)
+			}
+
+			assertModerationDedupeCounts(t, transport, 1, 1, 1)
+			if got := joinedTelegramBodies(transport); !strings.Contains(got, "资料简介违规：资料违规") {
+				t.Fatalf("feedback body = %q, want profile reason", got)
+			}
+		})
+	}
+}
+
+func TestModerationDedupe_MessageAIWarnWinsOverProfileViolation(t *testing.T) {
+	const (
+		chatID = -100123
+		userID = 42
+	)
+
+	svc, transport, db, msg, policy := newModerationDedupeTestService(t, chatID, userID)
+	messageOutput := ai.CheckOutput{Verdict: ai.Verdict{Verdict: "violence", Confidence: 0.99, Category: "violence", Reason: "消息违规"}, Model: "message-model"}
+	if err := svc.applyAIAction(context.Background(), msg, policy, db.currentTrust(), messageOutput, "warn", false); err != nil {
+		t.Fatalf("applyAIAction() error = %v", err)
+	}
+
+	profileOutput := ai.CheckOutput{Verdict: ai.Verdict{Verdict: "spam", Confidence: 0.99, Category: "spam", Reason: "资料违规"}, Model: "profile-model"}
+	if err := svc.handleProfileOnMessageViolation(context.Background(), msg, policy, "资料违规", &profileOutput); err != nil {
+		t.Fatalf("handleProfileOnMessageViolation() error = %v", err)
+	}
+
+	assertModerationDedupeCounts(t, transport, 0, 1, 1)
+	if got := joinedTelegramBodies(transport); !strings.Contains(got, "violence") || strings.Contains(got, "资料简介违规") {
+		t.Fatalf("feedback body = %q, want only warn reason", got)
+	}
+}
+
 func TestModerationDedupe_RedisUnavailableFallsBackToLocalLocks(t *testing.T) {
 	svc := &Service{
 		logger: zap.NewNop(),
@@ -228,6 +278,9 @@ func newModerationDedupeTestService(t *testing.T, chatID, userID int64) (*Servic
 	svc := &Service{logger: zap.NewNop(), queries: store.New(db), bot: botClient}
 	policy := config.DefaultPolicy
 	policy.Feedback.Ban = config.ActionFeedback{Enabled: true, Template: "{reason}"}
+	policy.Feedback.Warn = config.ActionFeedback{Enabled: true, Template: "{reason}"}
+	policy.Feedback.Mute = config.ActionFeedback{Enabled: true, Template: "{reason}"}
+	policy.Feedback.DeleteMsg = config.ActionFeedback{Enabled: true, Template: "{reason}"}
 	msg := &tele.Message{ID: 1001, Text: "trigger message", Chat: &tele.Chat{ID: chatID, Title: "test-group"}, Sender: &tele.User{ID: userID, Username: "new_user"}}
 	return svc, transport, db, msg, policy
 }
@@ -267,6 +320,7 @@ type moderationProfileMatchMockDB struct {
 	aiDecisions []store.InsertAIDecisionParams
 	violations  []store.InsertViolationParams
 	profileLogs []store.InsertProfileCheckLogParams
+	warnings    []store.Warning
 }
 
 func newModerationProfileMatchMockDB(chatID, userID int64) *moderationProfileMatchMockDB {
@@ -295,12 +349,34 @@ func (db *moderationProfileMatchMockDB) currentTrust() store.UserTrust {
 	return db.userTrust
 }
 
-func (db *moderationProfileMatchMockDB) Exec(context.Context, string, ...any) (pgconn.CommandTag, error) {
-	return pgconn.CommandTag{}, fmt.Errorf("unexpected Exec")
+func (db *moderationProfileMatchMockDB) Exec(_ context.Context, query string, args ...any) (pgconn.CommandTag, error) {
+	if strings.Contains(query, "UPDATE warnings") {
+		db.mu.Lock()
+		defer db.mu.Unlock()
+		consumedAt := db.now.Add(4 * time.Minute)
+		for i := range db.warnings {
+			if db.warnings[i].ChatID == args[0].(int64) && db.warnings[i].UserID == args[1].(int64) && db.warnings[i].ConsumedAt == nil {
+				db.warnings[i].ConsumedAt = &consumedAt
+			}
+		}
+		return pgconn.NewCommandTag("UPDATE 1"), nil
+	}
+	return pgconn.CommandTag{}, fmt.Errorf("unexpected Exec: %s", query)
 }
 
-func (db *moderationProfileMatchMockDB) Query(context.Context, string, ...any) (pgx.Rows, error) {
-	return nil, fmt.Errorf("unexpected Query")
+func (db *moderationProfileMatchMockDB) Query(_ context.Context, query string, args ...any) (pgx.Rows, error) {
+	if strings.Contains(query, "FROM warnings") {
+		db.mu.Lock()
+		items := make([]store.Warning, 0, len(db.warnings))
+		for _, warning := range db.warnings {
+			if warning.ChatID == args[0].(int64) && warning.UserID == args[1].(int64) && warning.ConsumedAt == nil {
+				items = append(items, warning)
+			}
+		}
+		db.mu.Unlock()
+		return &mockWarningRows{items: items}, nil
+	}
+	return nil, fmt.Errorf("unexpected Query: %s", query)
 }
 
 func (db *moderationProfileMatchMockDB) QueryRow(_ context.Context, query string, args ...any) pgx.Row {
@@ -440,6 +516,24 @@ func (db *moderationProfileMatchMockDB) QueryRow(_ context.Context, query string
 			params.AiVerdict,
 			createdAt,
 		)
+	case strings.Contains(query, "INSERT INTO warnings"):
+		reason := args[2].(*string)
+		issuedBy := args[3].(*int64)
+		db.mu.Lock()
+		id := int64(len(db.warnings) + 1)
+		createdAt := db.now.Add(time.Duration(id) * time.Minute)
+		warning := store.Warning{ID: id, ChatID: args[0].(int64), UserID: args[1].(int64), Reason: reason, IssuedBy: issuedBy, CreatedAt: createdAt}
+		db.warnings = append(db.warnings, warning)
+		db.mu.Unlock()
+		return mockScanRow(
+			warning.ID,
+			warning.ChatID,
+			warning.UserID,
+			warning.Reason,
+			warning.IssuedBy,
+			warning.CreatedAt,
+			warning.ConsumedAt,
+		)
 	case strings.Contains(query, "SET messages_checked = messages_checked"):
 		db.mu.Lock()
 		db.userTrust.MessagesChecked += args[2].(int32)
@@ -536,6 +630,69 @@ func (r mockErrorRow) Scan(...any) error {
 
 type mockRow struct {
 	values []any
+}
+
+type mockWarningRows struct {
+	items  []store.Warning
+	index  int
+	closed bool
+}
+
+func (r *mockWarningRows) Close() {
+	r.closed = true
+}
+
+func (r *mockWarningRows) Err() error {
+	return nil
+}
+
+func (r *mockWarningRows) CommandTag() pgconn.CommandTag {
+	return pgconn.CommandTag{}
+}
+
+func (r *mockWarningRows) FieldDescriptions() []pgconn.FieldDescription {
+	return nil
+}
+
+func (r *mockWarningRows) Next() bool {
+	if r.index >= len(r.items) {
+		r.closed = true
+		return false
+	}
+	r.index++
+	return true
+}
+
+func (r *mockWarningRows) Scan(dest ...any) error {
+	if r.index == 0 || r.index > len(r.items) {
+		return fmt.Errorf("scan warning row without current item")
+	}
+	warning := r.items[r.index-1]
+	return mockRow{values: []any{
+		warning.ID,
+		warning.ChatID,
+		warning.UserID,
+		warning.Reason,
+		warning.IssuedBy,
+		warning.CreatedAt,
+		warning.ConsumedAt,
+	}}.Scan(dest...)
+}
+
+func (r *mockWarningRows) Values() ([]any, error) {
+	if r.index == 0 || r.index > len(r.items) {
+		return nil, fmt.Errorf("values warning row without current item")
+	}
+	warning := r.items[r.index-1]
+	return []any{warning.ID, warning.ChatID, warning.UserID, warning.Reason, warning.IssuedBy, warning.CreatedAt, warning.ConsumedAt}, nil
+}
+
+func (r *mockWarningRows) RawValues() [][]byte {
+	return nil
+}
+
+func (r *mockWarningRows) Conn() *pgx.Conn {
+	return nil
 }
 
 func mockScanRow(values ...any) pgx.Row {

@@ -183,7 +183,7 @@ func (s *Service) handleIncomingMessageWithOptions(c tele.Context, isEdited bool
 				s.logger.Warn("delete non-text message failed", zap.Error(err), zap.Int64("chat_id", msg.Chat.ID), zap.Int("message_id", msg.ID))
 				return nil
 			}
-			if _, _, err := s.IncrWarning(ctx, msg.Chat, msg.Sender, "filter_non_text_message", policy); err != nil {
+			if _, _, err := s.IncrWarning(ctx, msg.Chat, msg.Sender, "filter_non_text_message", policy, true, false); err != nil {
 				s.logger.Warn("warn non-text message failed", zap.Error(err), zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID))
 			}
 			recordNonTextViolation("delete_warn")
@@ -496,7 +496,7 @@ func (s *Service) applyFilterAction(ctx context.Context, msg *tele.Message, poli
 		if err := s.deleteMessage(msg); err != nil {
 			return err
 		}
-		if _, _, err := s.IncrWarning(ctx, msg.Chat, msg.Sender, result.Reason, policy); err != nil {
+		if _, _, err := s.IncrWarning(ctx, msg.Chat, msg.Sender, result.Reason, policy, true, false); err != nil {
 			return err
 		}
 	case "delete_mute":
@@ -517,7 +517,7 @@ func (s *Service) applyFilterAction(ctx context.Context, msg *tele.Message, poli
 		}
 	case "warn":
 		actionForViolation = "warn"
-		if _, _, err := s.IncrWarning(ctx, msg.Chat, msg.Sender, result.Reason, policy); err != nil {
+		if _, _, err := s.IncrWarning(ctx, msg.Chat, msg.Sender, result.Reason, policy, true, false); err != nil {
 			return err
 		}
 	case "delete_and_warn":
@@ -525,7 +525,7 @@ func (s *Service) applyFilterAction(ctx context.Context, msg *tele.Message, poli
 		if err := s.deleteMessage(msg); err != nil {
 			return err
 		}
-		if _, _, err := s.IncrWarning(ctx, msg.Chat, msg.Sender, result.Reason, policy); err != nil {
+		if _, _, err := s.IncrWarning(ctx, msg.Chat, msg.Sender, result.Reason, policy, true, false); err != nil {
 			return err
 		}
 	case "mute":
@@ -542,7 +542,7 @@ func (s *Service) applyFilterAction(ctx context.Context, msg *tele.Message, poli
 		if err := s.deleteMessage(msg); err != nil {
 			return err
 		}
-		if _, _, err := s.IncrWarning(ctx, msg.Chat, msg.Sender, result.Reason, policy); err != nil {
+		if _, _, err := s.IncrWarning(ctx, msg.Chat, msg.Sender, result.Reason, policy, true, false); err != nil {
 			return err
 		}
 	}
@@ -1356,20 +1356,46 @@ func (s *Service) applyAIAction(ctx context.Context, msg *tele.Message, policy c
 		nextStatus = "banned"
 		score = 0
 	case "mute":
-		if err := s.deleteMessage(msg); err != nil {
-			return err
+		deleteRelease, deleteOK := s.acquireMessageDeleteLock(msg.Chat.ID, msg.ID)
+		if deleteOK {
+			defer deleteRelease()
+			if err := s.deleteMessage(msg); err != nil {
+				return err
+			}
+		} else {
+			s.logger.Info("skip duplicate ai mute message delete", zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID), zap.Int("message_id", msg.ID))
 		}
-		if err := s.muteUser(msg.Chat, msg.Sender, 600); err != nil {
-			return err
+		actionRelease, actionOK := s.acquireUserActionLock(msg.Chat.ID, msg.Sender.ID)
+		if actionOK {
+			defer actionRelease()
+			if err := s.muteUser(msg.Chat, msg.Sender, 600); err != nil {
+				return err
+			}
+		} else {
+			s.logger.Info("skip duplicate ai mute user action", zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID), zap.Int("message_id", msg.ID))
+			shouldSendActionFeedback = false
 		}
 		nextStatus = "suspicious"
 		score = 0.2
 	case "warn":
-		if err := s.deleteMessage(msg); err != nil {
-			s.logger.Warn("delete message on warn failed", zap.Error(err))
+		deleteRelease, deleteOK := s.acquireMessageDeleteLock(msg.Chat.ID, msg.ID)
+		if deleteOK {
+			defer deleteRelease()
+			if err := s.deleteMessage(msg); err != nil {
+				s.logger.Warn("delete message on warn failed", zap.Error(err))
+			}
+		} else {
+			s.logger.Info("skip duplicate ai warn message delete", zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID), zap.Int("message_id", msg.ID))
 		}
-		if _, _, err := s.IncrWarning(ctx, msg.Chat, msg.Sender, "ai_"+output.Verdict.Verdict, policy); err != nil {
-			return err
+		actionRelease, actionOK := s.acquireUserActionLock(msg.Chat.ID, msg.Sender.ID)
+		if actionOK {
+			defer actionRelease()
+			if _, _, err := s.IncrWarning(ctx, msg.Chat, msg.Sender, "ai_"+output.Verdict.Verdict, policy, true, true); err != nil {
+				return err
+			}
+		} else {
+			s.logger.Info("skip duplicate ai warn user action", zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID), zap.Int("message_id", msg.ID))
+			shouldSendActionFeedback = false
 		}
 		nextStatus = "suspicious"
 		score = 0.3
@@ -1377,8 +1403,21 @@ func (s *Service) applyAIAction(ctx context.Context, msg *tele.Message, policy c
 		nextStatus = "suspicious"
 		score = 0.4
 	case "delete":
-		if err := s.deleteMessage(msg); err != nil {
-			return err
+		deleteRelease, deleteOK := s.acquireMessageDeleteLock(msg.Chat.ID, msg.ID)
+		if deleteOK {
+			defer deleteRelease()
+			if err := s.deleteMessage(msg); err != nil {
+				return err
+			}
+		} else {
+			s.logger.Info("skip duplicate ai delete message delete", zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID), zap.Int("message_id", msg.ID))
+		}
+		actionRelease, actionOK := s.acquireUserActionLock(msg.Chat.ID, msg.Sender.ID)
+		if actionOK {
+			defer actionRelease()
+		} else {
+			s.logger.Info("skip duplicate ai delete user action", zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID), zap.Int("message_id", msg.ID))
+			shouldSendActionFeedback = false
 		}
 		nextStatus = "suspicious"
 		score = 0.3
@@ -1660,7 +1699,7 @@ func maxFloat64(a, b float64) float64 {
 	return b
 }
 
-func (s *Service) IncrWarning(ctx context.Context, chat *tele.Chat, user *tele.User, reason string, policy config.GuardPolicy) (int, bool, error) {
+func (s *Service) IncrWarning(ctx context.Context, chat *tele.Chat, user *tele.User, reason string, policy config.GuardPolicy, sendFeedback bool, userActionLocked bool) (int, bool, error) {
 	if chat == nil || user == nil {
 		return 0, false, nil
 	}
@@ -1690,20 +1729,21 @@ func (s *Service) IncrWarning(ctx context.Context, chat *tele.Chat, user *tele.U
 
 	count := len(activeWarnings)
 
-	// Warn feedback
-	s.sendActionFeedback(chat, nil, policy.Feedback.Warn, map[string]string{
-		"user":         feedbackUserLabel(user, policy.Feedback.Warn.ParseMode),
-		"user_mention": feedbackUserMention(user, policy.Feedback.Warn.ParseMode),
-		"reason":       humanReason(reason, ""),
-		"current":      strFormatInt(int64(count)),
-		"limit":        strFormatInt(int64(policy.Warnings.MaxWarns)),
-	})
+	if sendFeedback {
+		s.sendActionFeedback(chat, nil, policy.Feedback.Warn, map[string]string{
+			"user":         feedbackUserLabel(user, policy.Feedback.Warn.ParseMode),
+			"user_mention": feedbackUserMention(user, policy.Feedback.Warn.ParseMode),
+			"reason":       humanReason(reason, ""),
+			"current":      strFormatInt(int64(count)),
+			"limit":        strFormatInt(int64(policy.Warnings.MaxWarns)),
+		})
+	}
 
 	if !policy.Warnings.Enabled || count < policy.Warnings.MaxWarns {
 		return count, false, nil
 	}
 
-	if err := s.escalateWarnings(ctx, chat, user, policy); err != nil {
+	if err := s.escalateWarnings(ctx, chat, user, policy, userActionLocked); err != nil {
 		return count, false, err
 	}
 
@@ -1718,7 +1758,16 @@ func (s *Service) IncrWarning(ctx context.Context, chat *tele.Chat, user *tele.U
 	return count, true, nil
 }
 
-func (s *Service) escalateWarnings(ctx context.Context, chat *tele.Chat, user *tele.User, policy config.GuardPolicy) error {
+func (s *Service) escalateWarnings(ctx context.Context, chat *tele.Chat, user *tele.User, policy config.GuardPolicy, userActionLocked bool) error {
+	if !userActionLocked {
+		actionRelease, actionOK := s.acquireUserActionLock(chat.ID, user.ID)
+		if !actionOK {
+			s.logger.Info("skip duplicate warnings escalation user action", zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
+			return nil
+		}
+		defer actionRelease()
+	}
+
 	action := policy.Warnings.ActionAtMax
 	if action == "" {
 		action = config.DefaultPolicy.Warnings.ActionAtMax

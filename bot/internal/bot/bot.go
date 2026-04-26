@@ -1836,7 +1836,7 @@ func (s *Service) handleWarnCommand(c tele.Context) error {
 		ID:        target.UserID,
 		Username:  target.Username,
 		FirstName: target.Display,
-	}, reason, policy)
+	}, reason, policy, true, false)
 	if err != nil {
 		return fmt.Errorf("insert manual warning: %w", err)
 	}
