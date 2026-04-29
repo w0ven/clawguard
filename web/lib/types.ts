@@ -72,6 +72,12 @@ export type GuardPolicy = {
   ai: {
     enabled: boolean;
     image_moderation_enabled: boolean;
+    video_moderation_enabled: boolean;
+    video_max_bytes: number;
+    video_max_duration_sec: number;
+    video_frame_count: number;
+    video_concurrency: number;
+    include_video_note: boolean;
     primary_model_ref?: string;
     fallback_model_refs?: string[];
     auto_degrade?: boolean;
