@@ -19,13 +19,14 @@ INSERT INTO ai_decisions (
     action_taken,
     admin_override,
     latency_ms,
-    scene
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+    scene,
+    metadata
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
 RETURNING id, chat_id, user_id, message_id, message_text, provider_id, model_id, model, prompt_version, verdict, confidence, category, reason, action_taken, admin_override, latency_ms, scene, created_at
 `
 
 const listAIDecisions = `-- name: ListAIDecisions :many
-SELECT id, chat_id, user_id, message_id, message_text, provider_id, model_id, model, prompt_version, verdict, confidence, category, reason, action_taken, admin_override, latency_ms, scene, created_at
+SELECT id, chat_id, user_id, message_id, message_text, provider_id, model_id, model, prompt_version, verdict, confidence, category, reason, action_taken, admin_override, latency_ms, scene, metadata, created_at
 FROM ai_decisions
 WHERE ($1::BIGINT IS NULL OR chat_id = $1)
   AND ($2::BIGINT IS NULL OR user_id = $2)
@@ -45,7 +46,7 @@ LIMIT $10
 `
 
 const getAIDecisionByID = `-- name: GetAIDecisionByID :one
-SELECT id, chat_id, user_id, message_id, message_text, provider_id, model_id, model, prompt_version, verdict, confidence, category, reason, action_taken, admin_override, latency_ms, scene, created_at
+SELECT id, chat_id, user_id, message_id, message_text, provider_id, model_id, model, prompt_version, verdict, confidence, category, reason, action_taken, admin_override, latency_ms, scene, metadata, created_at
 FROM ai_decisions
 WHERE id = $1
 `
@@ -74,6 +75,7 @@ type InsertAIDecisionParams struct {
 	AdminOverride *string
 	LatencyMs     int32
 	Scene         string
+	Metadata      []byte
 }
 
 type ListAIDecisionsParams struct {
@@ -90,11 +92,11 @@ type ListAIDecisionsParams struct {
 }
 
 func scanAIDecision(row interface{ Scan(...any) error }, i *AIDecision) error {
-	return row.Scan(&i.ID, &i.ChatID, &i.UserID, &i.MessageID, &i.MessageText, &i.ProviderID, &i.ModelID, &i.Model, &i.PromptVersion, &i.Verdict, &i.Confidence, &i.Category, &i.Reason, &i.ActionTaken, &i.AdminOverride, &i.LatencyMs, &i.Scene, &i.CreatedAt)
+	return row.Scan(&i.ID, &i.ChatID, &i.UserID, &i.MessageID, &i.MessageText, &i.ProviderID, &i.ModelID, &i.Model, &i.PromptVersion, &i.Verdict, &i.Confidence, &i.Category, &i.Reason, &i.ActionTaken, &i.AdminOverride, &i.LatencyMs, &i.Scene, &i.Metadata, &i.CreatedAt)
 }
 
 func (q *Queries) InsertAIDecision(ctx context.Context, arg InsertAIDecisionParams) (AIDecision, error) {
-	row := q.db.QueryRow(ctx, insertAIDecision, arg.ChatID, arg.UserID, arg.MessageID, arg.MessageText, arg.ProviderID, arg.ModelID, arg.Model, arg.PromptVersion, arg.Verdict, arg.Confidence, arg.Category, arg.Reason, arg.ActionTaken, arg.AdminOverride, arg.LatencyMs, arg.Scene)
+	row := q.db.QueryRow(ctx, insertAIDecision, arg.ChatID, arg.UserID, arg.MessageID, arg.MessageText, arg.ProviderID, arg.ModelID, arg.Model, arg.PromptVersion, arg.Verdict, arg.Confidence, arg.Category, arg.Reason, arg.ActionTaken, arg.AdminOverride, arg.LatencyMs, arg.Scene, arg.Metadata)
 	var i AIDecision
 	err := scanAIDecision(row, &i)
 	return i, err

@@ -190,6 +190,7 @@ type AIDecision struct {
 	AdminOverride *string
 	LatencyMs     int32
 	Scene         string
+	Metadata      []byte
 	CreatedAt     time.Time
 }
 

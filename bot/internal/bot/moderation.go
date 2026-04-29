@@ -351,7 +351,20 @@ func (s *Service) applyAIModeration(ctx context.Context, msg *tele.Message, poli
 	if output.FlagOnly && action != "none" {
 		action = "flag"
 	}
-	if err := s.recordAIDecision(ctx, msg, content.Text, output, action, scene); err != nil {
+	var aiDecisionMetadata []byte
+	if scene == "video" && len(content.VideoFrames) > 0 {
+		md := map[string]any{
+			"frame_count":        len(content.VideoFrames),
+			"video_duration_sec": content.VideoMeta.DurationSec,
+			"video_byte_size":    content.VideoMeta.ByteSize,
+			"file_unique_id":     content.VideoMeta.FileUniqueID,
+			"source_kind":        content.VideoMeta.Source,
+		}
+		if raw, mErr := json.Marshal(md); mErr == nil {
+			aiDecisionMetadata = raw
+		}
+	}
+	if err := s.recordAIDecision(ctx, msg, content.Text, output, action, scene, aiDecisionMetadata); err != nil {
 		s.logger.Warn("record ai decision failed", zap.Error(err))
 	}
 	if err := s.applyAIAction(ctx, msg, policy, trust, output, action, isEdited); err != nil {
@@ -884,7 +897,7 @@ func normalizeAIAction(action string) string {
 	}
 }
 
-func (s *Service) recordAIDecision(ctx context.Context, msg *tele.Message, messageText string, output ai.CheckOutput, action string, scene string) error {
+func (s *Service) recordAIDecision(ctx context.Context, msg *tele.Message, messageText string, output ai.CheckOutput, action string, scene string, metadata []byte) error {
 	if strings.TrimSpace(scene) == "" {
 		scene = "message"
 	}
@@ -904,6 +917,7 @@ func (s *Service) recordAIDecision(ctx context.Context, msg *tele.Message, messa
 		ActionTaken:   normalizeAIAction(action),
 		LatencyMs:     int32(output.LatencyMs),
 		Scene:         scene,
+		Metadata:      metadata,
 	})
 	return err
 }
