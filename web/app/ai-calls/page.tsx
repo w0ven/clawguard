@@ -18,6 +18,7 @@ import { useToast } from "@/components/providers";
 
 function sceneBadge(scene: string | undefined): { text: string; className: string } {
   if (scene === "bio") return { text: "简介审核", className: "border-purple-500/20 bg-purple-500/10 text-purple-700" };
+  if (scene === "video") return { text: "视频审核", className: "border-amber-500/20 bg-amber-500/10 text-amber-700" };
   return { text: "消息审核", className: "border-blue-500/20 bg-blue-500/10 text-blue-700" };
 }
 
