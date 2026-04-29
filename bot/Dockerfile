@@ -13,7 +13,7 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /out/migrate ./cmd/migrate
 
 FROM alpine:3.20
 
-RUN apk add --no-cache ca-certificates tzdata font-dejavu
+RUN apk add --no-cache ca-certificates tzdata font-dejavu ffmpeg
 
 WORKDIR /app
 

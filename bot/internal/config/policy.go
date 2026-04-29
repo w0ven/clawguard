@@ -214,9 +214,15 @@ type AIPolicy struct {
 	ActionsByCategory       map[string]string `json:"actions_by_category"`
 	TriggerKeywords         []string          `json:"trigger_keywords"`
 	// 未毕业用户（new/suspicious）发言前，针对其 bio 做一次审核
-	CheckProfileOnMessage bool   `json:"check_profile_on_message"`
-	ProfileOnMessageMode  string `json:"profile_on_message_mode"` // "keyword" | "ai"
-	BioCacheTTLMinutes    int    `json:"bio_cache_ttl_minutes"`   // 0 表示不缓存
+	CheckProfileOnMessage  bool   `json:"check_profile_on_message"`
+	ProfileOnMessageMode   string `json:"profile_on_message_mode"` // "keyword" | "ai"
+	BioCacheTTLMinutes     int    `json:"bio_cache_ttl_minutes"`   // 0 表示不缓存
+	VideoModerationEnabled bool   `json:"video_moderation_enabled"`
+	VideoMaxBytes          int64  `json:"video_max_bytes"`
+	VideoMaxDurationSec    int    `json:"video_max_duration_sec"`
+	VideoFrameCount        int    `json:"video_frame_count"`
+	VideoConcurrency       int    `json:"video_concurrency"`
+	IncludeVideoNote       bool   `json:"include_video_note"`
 }
 
 type AIThresholds struct {
@@ -318,9 +324,15 @@ var DefaultPolicy = GuardPolicy{
 			Warn: 0.5,
 			Flag: 0.3,
 		},
-		CheckProfileOnMessage: false,
-		ProfileOnMessageMode:  "ai",
-		BioCacheTTLMinutes:    10,
+		CheckProfileOnMessage:  false,
+		ProfileOnMessageMode:   "ai",
+		BioCacheTTLMinutes:     10,
+		VideoModerationEnabled: false,
+		VideoMaxBytes:          20 * 1024 * 1024,
+		VideoMaxDurationSec:    300,
+		VideoFrameCount:        3,
+		VideoConcurrency:       2,
+		IncludeVideoNote:       false,
 		ActionsByCategory: map[string]string{
 			"招聘": "warn",
 			"交友": "mute",
@@ -568,6 +580,18 @@ func applyAIDefaults(policy *AIPolicy) {
 	}
 	if policy.CacheTTLHours <= 0 {
 		policy.CacheTTLHours = DefaultPolicy.AI.CacheTTLHours
+	}
+	if policy.VideoMaxBytes <= 0 {
+		policy.VideoMaxBytes = DefaultPolicy.AI.VideoMaxBytes
+	}
+	if policy.VideoMaxDurationSec <= 0 {
+		policy.VideoMaxDurationSec = DefaultPolicy.AI.VideoMaxDurationSec
+	}
+	if policy.VideoFrameCount <= 0 {
+		policy.VideoFrameCount = DefaultPolicy.AI.VideoFrameCount
+	}
+	if policy.VideoConcurrency <= 0 {
+		policy.VideoConcurrency = DefaultPolicy.AI.VideoConcurrency
 	}
 	applyAIThresholdDefaults(&policy.Thresholds)
 	if len(policy.ActionsByCategory) == 0 {
