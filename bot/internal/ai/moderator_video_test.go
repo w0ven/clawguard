@@ -19,6 +19,18 @@ func TestVisionRequestContent_MultipleImages(t *testing.T) {
 	if parts[0].Type != "text" || !strings.Contains(parts[0].Text, "关键帧") {
 		t.Fatalf("expected first part text to mention key frames, got %#v", parts[0])
 	}
+	for _, want := range []string{
+		"随本请求附加的关键帧",
+		"必须观看并综合判断这些画面",
+		"不得说没有图片",
+		"缺少画面",
+		"仅显示视频标记",
+		"normal，reason 必须简短描述关键帧里看到的主要画面",
+	} {
+		if !strings.Contains(parts[0].Text, want) {
+			t.Fatalf("expected video vision text to contain %q, got %q", want, parts[0].Text)
+		}
+	}
 	if parts[1].Type != "image_url" || parts[1].ImageURL["url"] != "data:image/jpeg;base64,a" {
 		t.Fatalf("unexpected second part: %#v", parts[1])
 	}

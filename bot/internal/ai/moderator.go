@@ -713,7 +713,7 @@ func visionRequestContent(input CheckInput, includeImage bool) any {
 	if len(input.ImagesBase64) > 0 && includeImage {
 		parts := []CheckContentPart{{
 			Type: "text",
-			Text: "请严格返回 JSON。\n\n以下为同一段视频按时间顺序的关键帧，请综合判断。画质压缩、噪点、转录水印本身不算违规；仍按图片审核同一标准判断是否构成广告/色情/暴力：\n" + text,
+			Text: "请严格返回 JSON。\n\n以下为同一段视频按时间顺序抽取并随本请求附加的关键帧，请必须观看并综合判断这些画面。即使文本里包含 [视频]、[GIF] 或类似标记，也不得说没有图片、缺少画面、缺少视觉信息、仅显示视频标记或仅显示发送了视频。画质压缩、噪点、转录水印本身不算违规；仍按图片审核同一标准判断是否构成广告/色情/暴力。若判定 normal，reason 必须简短描述关键帧里看到的主要画面，并说明未检测到违规原因：\n" + text,
 		}}
 		for _, imageBase64 := range input.ImagesBase64 {
 			if strings.TrimSpace(imageBase64) == "" {
