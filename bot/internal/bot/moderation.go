@@ -294,6 +294,19 @@ func (s *Service) applyAIModeration(ctx context.Context, msg *tele.Message, poli
 		}
 	}
 
+	s.logger.Info("video moderation gate check",
+		zap.Int64("chat_id", msg.Chat.ID),
+		zap.Int("message_id", msg.ID),
+		zap.String("content_kind", content.Kind),
+		zap.String("video_source", content.VideoMeta.Source),
+		zap.String("video_file_id", content.VideoMeta.FileID),
+		zap.Int64("video_byte_size", content.VideoMeta.ByteSize),
+		zap.Int("video_duration_sec", content.VideoMeta.DurationSec),
+		zap.Bool("policy_video_enabled", policy.AI.VideoModerationEnabled),
+		zap.Bool("policy_include_video_note", policy.AI.IncludeVideoNote),
+		zap.Bool("should_run", shouldRunVideoModeration(content, policy.AI)),
+	)
+
 	if shouldRunVideoModeration(content, policy.AI) {
 		vCtx, vCancel := context.WithTimeout(ctx, 30*time.Second)
 		res, err := s.fetchVideoFrames(vCtx, msg, content.VideoMeta, policy.AI)
