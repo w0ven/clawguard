@@ -22,7 +22,7 @@ INSERT INTO ai_decisions (
     scene,
     metadata
 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
-RETURNING id, chat_id, user_id, message_id, message_text, provider_id, model_id, model, prompt_version, verdict, confidence, category, reason, action_taken, admin_override, latency_ms, scene, created_at
+RETURNING id, chat_id, user_id, message_id, message_text, provider_id, model_id, model, prompt_version, verdict, confidence, category, reason, action_taken, admin_override, latency_ms, scene, metadata, created_at
 `
 
 const listAIDecisions = `-- name: ListAIDecisions :many
@@ -55,7 +55,7 @@ const updateAIDecisionOverride = `-- name: UpdateAIDecisionOverride :one
 UPDATE ai_decisions
 SET admin_override = $2
 WHERE id = $1
-RETURNING id, chat_id, user_id, message_id, message_text, provider_id, model_id, model, prompt_version, verdict, confidence, category, reason, action_taken, admin_override, latency_ms, scene, created_at
+RETURNING id, chat_id, user_id, message_id, message_text, provider_id, model_id, model, prompt_version, verdict, confidence, category, reason, action_taken, admin_override, latency_ms, scene, metadata, created_at
 `
 
 type InsertAIDecisionParams struct {
