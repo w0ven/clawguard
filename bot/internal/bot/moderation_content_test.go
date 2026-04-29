@@ -1,6 +1,7 @@
 package bot
 
 import (
+	"strings"
 	"testing"
 
 	tele "gopkg.in/telebot.v3"
@@ -29,5 +30,37 @@ func TestExtractReviewableContentNonCaptionMedia(t *testing.T) {
 				t.Fatalf("content = (%q,%q), want (%q,%q)", got.Text, got.Kind, tt.want.Text, tt.want.Kind)
 			}
 		})
+	}
+}
+
+func TestAIModerationTextVideoFramesUsesFrameInstruction(t *testing.T) {
+	got := aiModerationText(reviewableContent{
+		Text:        "[视频]",
+		Kind:        "video",
+		VideoFrames: [][]byte{{1}, {2}, {3}},
+	})
+
+	if got == "[视频]" {
+		t.Fatalf("ai moderation text should not be bare video placeholder")
+	}
+	if want := "视频关键帧审核：已随请求附带 3 张按时间顺序抽取的关键帧，请以画面内容为准判断。"; got != want {
+		t.Fatalf("ai moderation text = %q, want %q", got, want)
+	}
+}
+
+func TestAIModerationTextVideoFramesKeepsMeaningfulCaption(t *testing.T) {
+	got := aiModerationText(reviewableContent{
+		Text:        "[GIF] 这是说明文字",
+		Kind:        "animation",
+		VideoFrames: [][]byte{{1}, {2}},
+	})
+
+	for _, want := range []string{"附带 2 张", "请以画面内容为准判断", "视频文字说明：这是说明文字"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("ai moderation text should contain %q, got %q", want, got)
+		}
+	}
+	if strings.Contains(got, "视频文字说明：[GIF]") {
+		t.Fatalf("ai moderation text should strip bare GIF placeholder, got %q", got)
 	}
 }

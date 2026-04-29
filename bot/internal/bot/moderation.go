@@ -99,6 +99,35 @@ type videoMeta struct {
 	FileUniqueID string
 }
 
+func aiModerationText(content reviewableContent) string {
+	text := strings.TrimSpace(content.Text)
+	if len(content.VideoFrames) == 0 {
+		return text
+	}
+
+	instruction := fmt.Sprintf("视频关键帧审核：已随请求附带 %d 张按时间顺序抽取的关键帧，请以画面内容为准判断。", len(content.VideoFrames))
+	caption := meaningfulVideoCaption(text)
+	if caption == "" {
+		return instruction
+	}
+	return instruction + "\n视频文字说明：" + caption
+}
+
+func meaningfulVideoCaption(text string) string {
+	caption := strings.TrimSpace(text)
+	for {
+		trimmed := strings.TrimSpace(caption)
+		switch {
+		case strings.HasPrefix(trimmed, "[视频]"):
+			caption = strings.TrimSpace(strings.TrimPrefix(trimmed, "[视频]"))
+		case strings.HasPrefix(trimmed, "[GIF]"):
+			caption = strings.TrimSpace(strings.TrimPrefix(trimmed, "[GIF]"))
+		default:
+			return trimmed
+		}
+	}
+}
+
 func shouldRunVideoModeration(content reviewableContent, policy config.AIPolicy) bool {
 	if !policy.VideoModerationEnabled {
 		return false
@@ -325,7 +354,7 @@ func (s *Service) applyAIModeration(ctx context.Context, msg *tele.Message, poli
 	output, err := s.aiModerator.CheckMessage(ctx, ai.CheckInput{
 		ChatID:            msg.Chat.ID,
 		UserID:            msg.Sender.ID,
-		Text:              content.Text,
+		Text:              aiModerationText(content),
 		Scene:             scene,
 		SenderName:        displayName(msg.Sender),
 		ForwardFrom:       forwardFrom,

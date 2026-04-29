@@ -39,6 +39,23 @@ func TestVisionRequestContent_MultipleImages(t *testing.T) {
 	}
 }
 
+func TestBuildPromptVideoFrameInstructionDoesNotUseBarePlaceholder(t *testing.T) {
+	prompt := buildPrompt("video", "message rule", []CheckInput{{
+		Text:         "视频关键帧审核：已随请求附带 3 张按时间顺序抽取的关键帧，请以画面内容为准判断。",
+		Scene:        "video",
+		ImagesBase64: []string{"a", "b", "c"},
+	}})
+
+	if strings.Contains(prompt, "1. [视频]") || strings.Contains(prompt, "1. [GIF]") {
+		t.Fatalf("video prompt should not contain a bare media placeholder line, got %q", prompt)
+	}
+	for _, want := range []string{"1. 视频关键帧审核", "附带 3 张", "按时间顺序抽取的关键帧", "请以画面内容为准判断"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("video prompt should contain %q, got %q", want, prompt)
+		}
+	}
+}
+
 func TestCacheKey_VideoFileUniqueID(t *testing.T) {
 	moderator := &Moderator{}
 	policy := videoTestPolicy()
