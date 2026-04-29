@@ -108,16 +108,19 @@ type Moderator struct {
 }
 
 type CheckInput struct {
-	ChatID      int64
-	UserID      int64
-	Text        string
-	Scene       string
-	SenderName  string
-	ForwardFrom string // 转发来源（频道名/用户名）
-	ImageBase64 string
-	ImageHash   string
-	Policy      config.AIPolicy
-	SkipCache   bool
+	ChatID            int64
+	UserID            int64
+	Text              string
+	Scene             string
+	SenderName        string
+	ForwardFrom       string // 转发来源（频道名/用户名）
+	ImageBase64       string
+	ImageHash         string
+	ImagesBase64      []string
+	ImagesHash        string
+	VideoFileUniqueID string
+	Policy            config.AIPolicy
+	SkipCache         bool
 }
 
 type CheckOutput struct {
@@ -418,7 +421,7 @@ func (m *Moderator) checkSingle(ctx context.Context, input CheckInput) (CheckOut
 	// resolver filters out moderation-only text models that cannot read
 	// image_url payloads.
 	caps := []string{"moderation"}
-	if strings.TrimSpace(input.ImageBase64) != "" {
+	if len(input.ImagesBase64) > 0 || strings.TrimSpace(input.ImageBase64) != "" {
 		caps = append(caps, "vision")
 	}
 	modelChain, _ := m.resolver.BuildChain(policy, caps)
@@ -655,6 +658,12 @@ func (m *Moderator) cacheKey(input CheckInput) string {
 	scene := normalizeScene(input.Scene)
 	policyHash := m.policyFingerprint(scene, input.Policy)
 	prefix := "ai:cache:" + strconv.FormatInt(input.ChatID, 10) + ":" + scene + ":" + policyHash
+	if strings.TrimSpace(input.VideoFileUniqueID) != "" {
+		return prefix + ":video:vid:" + strings.TrimSpace(input.VideoFileUniqueID)
+	}
+	if strings.TrimSpace(input.ImagesHash) != "" {
+		return prefix + ":video:" + strings.TrimSpace(input.ImagesHash)
+	}
 	if strings.TrimSpace(input.ImageHash) != "" {
 		return prefix + ":image:" + strings.TrimSpace(input.ImageHash)
 	}
@@ -700,6 +709,19 @@ func visionRequestContent(input CheckInput, includeImage bool) any {
 	text := strings.TrimSpace(input.Text)
 	if text == "" {
 		text = "[图片]"
+	}
+	if len(input.ImagesBase64) > 0 && includeImage {
+		parts := []CheckContentPart{{
+			Type: "text",
+			Text: "请严格返回 JSON。\n\n以下为同一段视频按时间顺序的关键帧，请综合判断。画质压缩、噪点、转录水印本身不算违规；仍按图片审核同一标准判断是否构成广告/色情/暴力：\n" + text,
+		}}
+		for _, imageBase64 := range input.ImagesBase64 {
+			if strings.TrimSpace(imageBase64) == "" {
+				continue
+			}
+			parts = append(parts, CheckContentPart{Type: "image_url", ImageURL: map[string]string{"url": "data:image/jpeg;base64," + imageBase64}})
+		}
+		return parts
 	}
 	if !includeImage || strings.TrimSpace(input.ImageBase64) == "" {
 		return "请严格返回 JSON。\n\n" + text

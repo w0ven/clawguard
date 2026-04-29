@@ -2,6 +2,9 @@ package bot
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -78,10 +81,36 @@ func parseUserTrustBanMeta(notes *string, fallbackSource string) (string, string
 }
 
 type reviewableContent struct {
-	Text     string
-	Kind     string
-	Skip     bool
-	HasImage bool
+	Text        string
+	Kind        string
+	Skip        bool
+	HasImage    bool
+	VideoFrames [][]byte
+	VideoMeta   videoMeta
+}
+
+type videoMeta struct {
+	DurationSec  int
+	Width        int
+	Height       int
+	ByteSize     int64
+	Source       string // "video" | "animation" | "video_note"
+	FileID       string
+	FileUniqueID string
+}
+
+func shouldRunVideoModeration(content reviewableContent, policy config.AIPolicy) bool {
+	if !policy.VideoModerationEnabled {
+		return false
+	}
+	switch content.Kind {
+	case "video", "animation":
+		return true
+	case "video_note":
+		return policy.IncludeVideoNote
+	default:
+		return false
+	}
 }
 
 func (s *Service) handleIncomingMessage(c tele.Context) error {
@@ -265,18 +294,47 @@ func (s *Service) applyAIModeration(ctx context.Context, msg *tele.Message, poli
 		}
 	}
 
+	if shouldRunVideoModeration(content, policy.AI) {
+		vCtx, vCancel := context.WithTimeout(ctx, 30*time.Second)
+		res, err := s.fetchVideoFrames(vCtx, msg, content.VideoMeta, policy.AI)
+		vCancel()
+		if err != nil || res.Truncated || len(res.Frames) == 0 {
+			s.logger.Warn("video frame extract failed, fallback to text", zap.Error(err), zap.Bool("truncated", res.Truncated), zap.Int64("chat_id", msg.Chat.ID), zap.Int("message_id", msg.ID), zap.String("source", content.VideoMeta.Source), zap.Int64("byte_size", content.VideoMeta.ByteSize), zap.Int("duration_sec", content.VideoMeta.DurationSec))
+		} else {
+			content.VideoFrames = res.Frames
+			content.VideoMeta = res.Meta
+		}
+	}
+
 	forwardFrom := extractForwardSource(msg)
+	scene := "message"
+	imagesBase64 := make([]string, 0, len(content.VideoFrames))
+	imagesHash := ""
+	videoFileUniqueID := ""
+	if len(content.VideoFrames) > 0 {
+		for _, frame := range content.VideoFrames {
+			imagesBase64 = append(imagesBase64, base64.StdEncoding.EncodeToString(frame))
+		}
+		joined := strings.Join(imagesBase64, "")
+		sum := sha256.Sum256([]byte(joined))
+		imagesHash = hex.EncodeToString(sum[:8])
+		videoFileUniqueID = strings.TrimSpace(content.VideoMeta.FileUniqueID)
+		scene = "video"
+	}
 
 	output, err := s.aiModerator.CheckMessage(ctx, ai.CheckInput{
-		ChatID:      msg.Chat.ID,
-		UserID:      msg.Sender.ID,
-		Text:        content.Text,
-		Scene:       "message",
-		SenderName:  displayName(msg.Sender),
-		ForwardFrom: forwardFrom,
-		ImageBase64: imageBase64,
-		ImageHash:   imageHash,
-		Policy:      policy.AI,
+		ChatID:            msg.Chat.ID,
+		UserID:            msg.Sender.ID,
+		Text:              content.Text,
+		Scene:             scene,
+		SenderName:        displayName(msg.Sender),
+		ForwardFrom:       forwardFrom,
+		ImageBase64:       imageBase64,
+		ImageHash:         imageHash,
+		ImagesBase64:      imagesBase64,
+		ImagesHash:        imagesHash,
+		VideoFileUniqueID: videoFileUniqueID,
+		Policy:            policy.AI,
 	})
 	if err != nil {
 		s.logger.Warn("ai moderation failed, allow message", zap.Error(err), zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID))
@@ -1246,15 +1304,19 @@ func extractReviewableContent(msg *tele.Message) reviewableContent {
 	if strings.TrimSpace(msg.Caption) != "" {
 		switch {
 		case msg.Photo != nil || msg.Video != nil || msg.Document != nil:
-			return reviewableContent{Text: forwardPrefix + strings.TrimSpace(msg.Caption), Kind: "media_caption", HasImage: msg.Photo != nil}
+			content := reviewableContent{Text: forwardPrefix + strings.TrimSpace(msg.Caption), Kind: "media_caption", HasImage: msg.Photo != nil}
+			if msg.Video != nil {
+				content.VideoMeta = videoMetaFromVideo(msg.Video)
+			}
+			return content
 		case msg.Animation != nil:
-			return reviewableContent{Text: forwardPrefix + "[GIF] " + strings.TrimSpace(msg.Caption), Kind: "animation"}
+			return reviewableContent{Text: forwardPrefix + "[GIF] " + strings.TrimSpace(msg.Caption), Kind: "animation", VideoMeta: videoMetaFromAnimation(msg.Animation)}
 		case msg.Voice != nil:
 			return reviewableContent{Text: forwardPrefix + strings.TrimSpace(msg.Caption), Kind: "voice"}
 		case msg.Audio != nil:
 			return reviewableContent{Text: forwardPrefix + strings.TrimSpace(msg.Caption), Kind: "audio"}
 		case msg.VideoNote != nil:
-			return reviewableContent{Text: forwardPrefix + strings.TrimSpace(msg.Caption), Kind: "video_note"}
+			return reviewableContent{Text: forwardPrefix + strings.TrimSpace(msg.Caption), Kind: "video_note", VideoMeta: videoMetaFromVideoNote(msg.VideoNote)}
 		}
 	}
 	switch {
@@ -1285,18 +1347,18 @@ func extractReviewableContent(msg *tele.Message) reviewableContent {
 		if value := strings.TrimSpace(msg.Animation.FileName); value != "" {
 			text += " " + value
 		}
-		return reviewableContent{Text: text, Kind: "animation"}
+		return reviewableContent{Text: text, Kind: "animation", VideoMeta: videoMetaFromAnimation(msg.Animation)}
 	case msg.Voice != nil:
 		return reviewableContent{Text: "[语音]", Kind: "voice"}
 	case msg.Audio != nil:
 		return reviewableContent{Text: "[音频]", Kind: "audio"}
 	case msg.VideoNote != nil:
-		return reviewableContent{Text: "[语音短片]", Kind: "video_note"}
+		return reviewableContent{Text: "[语音短片]", Kind: "video_note", VideoMeta: videoMetaFromVideoNote(msg.VideoNote)}
 	case msg.Photo != nil || msg.Video != nil:
 		if msg.Photo != nil {
 			return reviewableContent{Text: "[图片]", Kind: "photo", HasImage: true}
 		}
-		return reviewableContent{Text: "[视频]", Kind: "video"}
+		return reviewableContent{Text: "[视频]", Kind: "video", VideoMeta: videoMetaFromVideo(msg.Video)}
 	case msg.Document != nil:
 		text := "[文件]"
 		if value := strings.TrimSpace(msg.Document.FileName); value != "" {
@@ -1306,6 +1368,27 @@ func extractReviewableContent(msg *tele.Message) reviewableContent {
 	default:
 		return reviewableContent{Skip: true}
 	}
+}
+
+func videoMetaFromVideo(video *tele.Video) videoMeta {
+	if video == nil {
+		return videoMeta{}
+	}
+	return videoMeta{DurationSec: video.Duration, Width: video.Width, Height: video.Height, ByteSize: video.FileSize, Source: "video", FileID: video.FileID, FileUniqueID: video.UniqueID}
+}
+
+func videoMetaFromAnimation(animation *tele.Animation) videoMeta {
+	if animation == nil {
+		return videoMeta{}
+	}
+	return videoMeta{DurationSec: animation.Duration, Width: animation.Width, Height: animation.Height, ByteSize: animation.FileSize, Source: "animation", FileID: animation.FileID, FileUniqueID: animation.UniqueID}
+}
+
+func videoMetaFromVideoNote(videoNote *tele.VideoNote) videoMeta {
+	if videoNote == nil {
+		return videoMeta{}
+	}
+	return videoMeta{DurationSec: videoNote.Duration, Width: videoNote.Length, Height: videoNote.Length, ByteSize: videoNote.FileSize, Source: "video_note", FileID: videoNote.FileID, FileUniqueID: videoNote.UniqueID}
 }
 
 func contactTelegramIdentity(contact *tele.Contact) string {
