@@ -226,13 +226,7 @@ func (s *Scheduler) run(ctx context.Context, id int64, manual bool) error {
 	}
 
 	rendered := s.Render(msg)
-	options := &tele.SendOptions{
-		ParseMode:             tele.ModeMarkdownV2,
-		DisableWebPagePreview: true,
-	}
-	if markup := buildReplyMarkup(msg.Buttons); markup != nil {
-		options.ReplyMarkup = markup
-	}
+	options := scheduledSendOptions(msg.Buttons)
 
 	chat := &tele.Chat{ID: msg.ChatID}
 	var sent *tele.Message
@@ -335,9 +329,19 @@ func (s *Scheduler) renderVars(msg store.ScheduledMessage) map[string]string {
 func RenderScheduledTemplate(template string, plainVars map[string]string) string {
 	rendered := template
 	for key, value := range plainVars {
-		rendered = strings.ReplaceAll(rendered, key, mdv2Escape(value))
+		rendered = strings.ReplaceAll(rendered, key, value)
 	}
 	return rendered
+}
+
+func scheduledSendOptions(buttons []byte) *tele.SendOptions {
+	options := &tele.SendOptions{
+		DisableWebPagePreview: true,
+	}
+	if markup := buildReplyMarkup(buttons); markup != nil {
+		options.ReplyMarkup = markup
+	}
+	return options
 }
 
 func buildReplyMarkup(raw []byte) *tele.ReplyMarkup {

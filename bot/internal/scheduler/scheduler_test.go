@@ -6,17 +6,31 @@ import (
 	"time"
 
 	"github.com/robfig/cron/v3"
+	tele "gopkg.in/telebot.v3"
 
 	"github.com/openclaw/clawguard/internal/store"
 )
 
-func TestRenderScheduledTemplateEscapesKnownVarsAndKeepsUnknown(t *testing.T) {
+func TestRenderScheduledTemplateReplacesKnownVarsAndKeepsUnknown(t *testing.T) {
 	got := RenderScheduledTemplate("群：{group_title} 未知：{missing}", map[string]string{
 		"{group_title}": "A_B{C}",
 	})
-	want := "群：A\\_B\\{C\\} 未知：{missing}"
+	want := "群：A_B{C} 未知：{missing}"
 	if got != want {
 		t.Fatalf("rendered = %q, want %q", got, want)
+	}
+}
+
+func TestScheduledSendOptionsUsePlainTextForNormalURLs(t *testing.T) {
+	content := "🔍 PO0 系统重装/安装哪吒监控/ny面板：请参考 https://www.nodeseek.com/post-613477-1"
+	got := RenderScheduledTemplate(content, nil)
+	if got != content {
+		t.Fatalf("rendered = %q, want %q", got, content)
+	}
+
+	options := scheduledSendOptions(nil)
+	if options.ParseMode != tele.ModeDefault {
+		t.Fatalf("ParseMode = %q, want %q", options.ParseMode, tele.ModeDefault)
 	}
 }
 
