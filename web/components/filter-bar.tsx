@@ -108,6 +108,7 @@ export function FilterBar({ groups, values, onChange, onApply, onReset, mode }: 
           <option value="">全部类型</option>
           <option value="message">消息审核</option>
           <option value="bio">简介审核</option>
+          <option value="video">视频审核</option>
         </Select>
       )}
       <div className="flex gap-2">
