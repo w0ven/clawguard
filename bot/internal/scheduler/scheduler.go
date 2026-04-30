@@ -13,6 +13,7 @@ import (
 	"go.uber.org/zap"
 	tele "gopkg.in/telebot.v3"
 
+	"github.com/openclaw/clawguard/internal/messagefmt"
 	"github.com/openclaw/clawguard/internal/store"
 )
 
@@ -298,7 +299,11 @@ func (s *Scheduler) releaseRun(id int64) {
 }
 
 func (s *Scheduler) Render(msg store.ScheduledMessage) string {
-	return RenderScheduledTemplate(msg.Content, s.renderVars(msg))
+	return RenderScheduledMessage(msg.Content, s.renderVars(msg)).Text
+}
+
+func RenderScheduledMessage(template string, plainVars map[string]string) messagefmt.RenderedTemplate {
+	return messagefmt.RenderMessageTemplate(template, tele.ModeMarkdownV2, nil, plainVars)
 }
 
 func (s *Scheduler) renderVars(msg store.ScheduledMessage) map[string]string {
@@ -327,15 +332,12 @@ func (s *Scheduler) renderVars(msg store.ScheduledMessage) map[string]string {
 }
 
 func RenderScheduledTemplate(template string, plainVars map[string]string) string {
-	rendered := template
-	for key, value := range plainVars {
-		rendered = strings.ReplaceAll(rendered, key, value)
-	}
-	return rendered
+	return RenderScheduledMessage(template, plainVars).Text
 }
 
 func scheduledSendOptions(buttons []byte) *tele.SendOptions {
 	options := &tele.SendOptions{
+		ParseMode:             tele.ModeMarkdownV2,
 		DisableWebPagePreview: true,
 	}
 	if markup := buildReplyMarkup(buttons); markup != nil {

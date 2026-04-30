@@ -15,13 +15,13 @@ func TestRenderScheduledTemplateReplacesKnownVarsAndKeepsUnknown(t *testing.T) {
 	got := RenderScheduledTemplate("群：{group_title} 未知：{missing}", map[string]string{
 		"{group_title}": "A_B{C}",
 	})
-	want := "群：A_B{C} 未知：{missing}"
+	want := "群：A\\_B\\{C\\} 未知：{missing}"
 	if got != want {
 		t.Fatalf("rendered = %q, want %q", got, want)
 	}
 }
 
-func TestScheduledSendOptionsUsePlainTextForNormalURLs(t *testing.T) {
+func TestScheduledSendOptionsUseMarkdownV2ForNormalURLs(t *testing.T) {
 	content := "🔍 PO0 系统重装/安装哪吒监控/ny面板：请参考 https://www.nodeseek.com/post-613477-1"
 	got := RenderScheduledTemplate(content, nil)
 	if got != content {
@@ -29,8 +29,21 @@ func TestScheduledSendOptionsUsePlainTextForNormalURLs(t *testing.T) {
 	}
 
 	options := scheduledSendOptions(nil)
-	if options.ParseMode != tele.ModeDefault {
-		t.Fatalf("ParseMode = %q, want %q", options.ParseMode, tele.ModeDefault)
+	if options.ParseMode != tele.ModeMarkdownV2 {
+		t.Fatalf("ParseMode = %q, want %q", options.ParseMode, tele.ModeMarkdownV2)
+	}
+}
+
+func TestRenderScheduledMessageUsesKeywordReplyMarkdownV2Renderer(t *testing.T) {
+	rendered := RenderScheduledMessage("欢迎来到 *{group_title}*，人数 {member_count}!", map[string]string{
+		"{group_title}":  "高级群[测试](A)",
+		"{member_count}": "1_234",
+	})
+	if rendered.ParseMode != tele.ModeMarkdownV2 {
+		t.Fatalf("ParseMode = %q, want %q", rendered.ParseMode, tele.ModeMarkdownV2)
+	}
+	if got, want := rendered.Text, "欢迎来到 *高级群\\[测试\\]\\(A\\)*，人数 1\\_234!"; got != want {
+		t.Fatalf("rendered = %q, want %q", got, want)
 	}
 }
 

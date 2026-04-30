@@ -1889,21 +1889,25 @@ func (s *Service) handleUnbanCommand(c tele.Context) error {
 		return c.Send(err.Error(), &tele.SendOptions{ParseMode: tele.ModeHTML})
 	}
 
-	if err := s.bot.Unban(chat, &tele.User{ID: target.UserID}); err != nil {
+	warnings := make([]string, 0, 2)
+	if warning, err := s.SafeUnbanChatUser(context.Background(), chat.ID, target.UserID); err != nil {
 		return c.Send("解封失败: "+htmlEscape(err.Error()), &tele.SendOptions{ParseMode: tele.ModeHTML})
+	} else if strings.TrimSpace(warning) != "" {
+		warnings = append(warnings, warning)
 	}
 	if err := s.queries.DeleteBannedUser(context.Background(), target.UserID); err != nil {
 		return c.Send("清理封禁记录失败: "+htmlEscape(err.Error()), &tele.SendOptions{ParseMode: tele.ModeHTML})
-	}
-	if err := s.UnmuteChatUser(context.Background(), chat.ID, target.UserID); err != nil {
-		return c.Send("解除禁言失败: "+htmlEscape(err.Error()), &tele.SendOptions{ParseMode: tele.ModeHTML})
 	}
 	if _, err := s.queries.UnbanUserTrust(context.Background(), store.UnbanUserTrustParams{
 		ChatID: chat.ID,
 		UserID: target.UserID,
 		Score:  0.5,
 	}); err != nil {
-		s.logger.Warn("reset user trust status on unban failed", zap.Error(err), zap.Int64("user_id", target.UserID))
+		if errors.Is(err, pgx.ErrNoRows) {
+			warnings = append(warnings, "用户并未处于本地封禁状态，已跳过本地信任状态解封")
+		} else {
+			s.logger.Warn("reset user trust status on unban failed", zap.Error(err), zap.Int64("user_id", target.UserID))
+		}
 	}
 
 	diff := "manual_unban"
@@ -1918,11 +1922,15 @@ func (s *Service) handleUnbanCommand(c tele.Context) error {
 		After: mustJSONBytes(map[string]any{
 			"user_id":  target.UserID,
 			"unbanned": true,
-			"unmuted":  true,
+			"warnings": warnings,
 		}),
 		Diff: &diff,
 	})
-	return c.Send("已解封 "+htmlEscape(target.Display), &tele.SendOptions{ParseMode: tele.ModeHTML})
+	text := "已尝试解封 " + htmlEscape(target.Display)
+	if len(warnings) > 0 {
+		text += "\n安全提示：" + htmlEscape(strings.Join(warnings, "；"))
+	}
+	return c.Send(text, &tele.SendOptions{ParseMode: tele.ModeHTML})
 }
 
 func (s *Service) handleSpamCommand(c tele.Context) error {

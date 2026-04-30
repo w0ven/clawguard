@@ -13,6 +13,7 @@ import (
 	tele "gopkg.in/telebot.v3"
 
 	"github.com/openclaw/clawguard/internal/config"
+	"github.com/openclaw/clawguard/internal/messagefmt"
 )
 
 func (s *Service) tryKeywordReply(ctx context.Context, msg *tele.Message, policy config.GuardPolicy) (matched bool, err error) {
@@ -172,16 +173,7 @@ func (s *Service) matchKeywordReplyRule(rule config.KeywordReplyRule, messageTex
 }
 
 func resolveParseMode(mode string) string {
-	switch strings.ToLower(strings.TrimSpace(mode)) {
-	case "markdown", "md":
-		return tele.ModeMarkdownV2
-	case "markdownv2", "mdv2":
-		return tele.ModeMarkdownV2
-	case "html":
-		return tele.ModeHTML
-	default:
-		return tele.ModeMarkdownV2
-	}
+	return messagefmt.ResolveParseMode(mode)
 }
 
 func renderKeywordReply(msg *tele.Message, keyword string, template string, parseMode string) string {
@@ -272,34 +264,7 @@ func escapeMarkdownV2(text string) string {
 var mdv2Specials = []string{"_", "*", "[", "]", "(", ")", "~", "`", ">", "#", "+", "-", "=", "|", "{", "}", ".", "!"}
 
 func mdv2EscapeChars(s string) string {
-	var b strings.Builder
-	b.Grow(len(s) * 2)
-	runes := []rune(s)
-	for i := 0; i < len(runes); i++ {
-		ch := runes[i]
-		if ch == '\\' && i+1 < len(runes) {
-			b.WriteRune(ch)
-			i++
-			b.WriteRune(runes[i])
-			continue
-		}
-		if ch == '\x00' {
-			b.WriteRune(ch)
-			continue
-		}
-		need := false
-		for _, sp := range mdv2Specials {
-			if string(ch) == sp {
-				need = true
-				break
-			}
-		}
-		if need {
-			b.WriteRune('\\')
-		}
-		b.WriteRune(ch)
-	}
-	return b.String()
+	return messagefmt.EscapeMarkdownV2Chars(s)
 }
 
 func (s *Service) scheduleKeywordReplyDelete(chat *tele.Chat, sent *tele.Message, rule config.KeywordReplyRule) {
