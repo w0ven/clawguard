@@ -2279,16 +2279,58 @@ func (s *Service) checkBotAdminPermissions(ctx context.Context, update *tele.Cha
 	if update == nil || update.Chat == nil || update.NewChatMember == nil {
 		return
 	}
-	member := update.NewChatMember
-	if member.Role != tele.Administrator && member.Role != tele.Creator {
-		s.warnMissingBotPermissions(ctx, update.Chat, []string{"管理员身份", "删除消息", "封禁/禁言成员"})
+	if shouldSkipBotAdminPermissionCheck(update.Chat) {
 		return
 	}
-	missing := requiredBotPermissionNames(member)
+	authorized := true
+	if s.queries != nil {
+		var err error
+		authorized, err = s.IsAuthorizedGroup(ctx, update.Chat.ID)
+		if err != nil {
+			s.logger.Warn("check authorized group for bot permissions failed", zap.Error(err), zap.Int64("chat_id", update.Chat.ID))
+			return
+		}
+	}
+	if !authorized {
+		s.writeUnauthorizedBotPermissionAudit(ctx, update.Chat)
+		return
+	}
+	missing := botAdminPermissionMissingNames(update.Chat, authorized, update.NewChatMember)
 	if len(missing) == 0 {
 		return
 	}
 	s.warnMissingBotPermissions(ctx, update.Chat, missing)
+}
+
+func botAdminPermissionMissingNames(chat *tele.Chat, authorized bool, member *tele.ChatMember) []string {
+	if shouldSkipBotAdminPermissionCheck(chat) || !authorized || member == nil {
+		return nil
+	}
+	if member.Role != tele.Administrator && member.Role != tele.Creator {
+		return []string{"管理员身份", "删除消息", "封禁/禁言成员"}
+	}
+	return requiredBotPermissionNames(member)
+}
+
+func shouldSkipBotAdminPermissionCheck(chat *tele.Chat) bool {
+	if chat == nil {
+		return true
+	}
+	return chat.Type == tele.ChatPrivate || chat.Type == tele.ChatChannel
+}
+
+func (s *Service) writeUnauthorizedBotPermissionAudit(ctx context.Context, chat *tele.Chat) {
+	if chat == nil || s.queries == nil {
+		return
+	}
+	chatID := chat.ID
+	s.WriteRuntimeAudit(ctx, "bot_permissions", &chatID, "unauthorized_group_skip_permission_warning", map[string]any{
+		"chat_id": chat.ID,
+		"title":   chat.Title,
+		"type":    string(chat.Type),
+	}, map[string]any{
+		"warned": false,
+	})
 }
 
 func requiredBotPermissionNames(member *tele.ChatMember) []string {
@@ -2345,14 +2387,24 @@ func (s *Service) sendBotPermissionWarningToOwners(ctx context.Context, chat *te
 	if len(recipients) == 0 {
 		return
 	}
-	title := "未知群"
-	if chat != nil && strings.TrimSpace(chat.Title) != "" {
-		title = chat.Title
-	}
-	text := fmt.Sprintf("%s\n群：%s (%d)", message, htmlEscape(title), chat.ID)
+	text := fmt.Sprintf("%s\n群：%s", message, formatOwnerWarnChatLabel(chat))
 	for id := range recipients {
 		if err := s.SendHTMLPrivateMessage(id, text); err != nil {
 			s.logger.Warn("send bot permission warning to owner failed", zap.Error(err), zap.Int64("telegram_id", id))
 		}
 	}
+}
+
+func formatOwnerWarnChatLabel(chat *tele.Chat) string {
+	if chat == nil {
+		return "未命名 [0] ()"
+	}
+	name := strings.TrimSpace(chat.Title)
+	if name == "" && strings.TrimSpace(chat.Username) != "" {
+		name = "@" + strings.TrimPrefix(strings.TrimSpace(chat.Username), "@")
+	}
+	if name == "" {
+		name = "未命名"
+	}
+	return fmt.Sprintf("%s [%d] (%s)", htmlEscape(name), chat.ID, htmlEscape(string(chat.Type)))
 }
