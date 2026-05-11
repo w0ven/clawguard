@@ -85,6 +85,7 @@ type reviewableContent struct {
 	Kind        string
 	Skip        bool
 	HasImage    bool
+	ViaBotHint  bool
 	VideoFrames [][]byte
 	VideoMeta   videoMeta
 }
@@ -101,6 +102,9 @@ type videoMeta struct {
 
 func aiModerationText(content reviewableContent) string {
 	text := strings.TrimSpace(content.Text)
+	if content.ViaBotHint {
+		text = appendViaBotAIModerationHint(text)
+	}
 	if len(content.VideoFrames) == 0 {
 		return text
 	}
@@ -112,6 +116,16 @@ func aiModerationText(content reviewableContent) string {
 	}
 	return instruction + "\n视频文字说明：" + caption
 }
+
+func appendViaBotAIModerationHint(text string) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return viaBotAIModerationHint
+	}
+	return text + "\n" + viaBotAIModerationHint
+}
+
+const viaBotAIModerationHint = "【审核提示】此消息通过 inline bot 发送，富媒体内容（卡片/链接预览/图片）可能不在 bot 可见字段中，请基于 bot 用户名、文本和上下文严判，疑似引流/广告/色情应判违规。"
 
 func meaningfulVideoCaption(text string) string {
 	caption := strings.TrimSpace(text)
@@ -381,14 +395,20 @@ func (s *Service) applyAIModeration(ctx context.Context, msg *tele.Message, poli
 		action = "flag"
 	}
 	var aiDecisionMetadata []byte
+	md := map[string]any{}
 	if scene == "video" && len(content.VideoFrames) > 0 {
-		md := map[string]any{
-			"frame_count":        len(content.VideoFrames),
-			"video_duration_sec": content.VideoMeta.DurationSec,
-			"video_byte_size":    content.VideoMeta.ByteSize,
-			"file_unique_id":     content.VideoMeta.FileUniqueID,
-			"source_kind":        content.VideoMeta.Source,
-		}
+		md["frame_count"] = len(content.VideoFrames)
+		md["video_duration_sec"] = content.VideoMeta.DurationSec
+		md["video_byte_size"] = content.VideoMeta.ByteSize
+		md["file_unique_id"] = content.VideoMeta.FileUniqueID
+		md["source_kind"] = content.VideoMeta.Source
+	}
+	if msg.Via != nil {
+		md["via_bot_username"] = strings.TrimSpace(msg.Via.Username)
+		md["via_bot_id"] = msg.Via.ID
+		md["via_bot_first_name"] = strings.TrimSpace(msg.Via.FirstName)
+	}
+	if len(md) > 0 {
 		if raw, mErr := json.Marshal(md); mErr == nil {
 			aiDecisionMetadata = raw
 		}
@@ -1098,10 +1118,11 @@ func buildReviewableContentWithOptions(
 	// 本群引用片段（msg.Quote 非空、msg.ReplyTo 为 nil）：把 Quote 文本拼进去作为补充上下文
 	if msg != nil && msg.ReplyTo == nil && msg.Quote != nil && strings.TrimSpace(msg.Quote.Text) != "" {
 		return reviewableContent{
-			Text:     fmt.Sprintf("【引用片段】%s\n【本次消息】%s", strings.TrimSpace(msg.Quote.Text), current.Text),
-			Kind:     current.Kind,
-			Skip:     false,
-			HasImage: current.HasImage,
+			Text:       fmt.Sprintf("【引用片段】%s\n【本次消息】%s", strings.TrimSpace(msg.Quote.Text), current.Text),
+			Kind:       current.Kind,
+			Skip:       false,
+			HasImage:   current.HasImage,
+			ViaBotHint: current.ViaBotHint,
 		}
 	}
 
@@ -1116,10 +1137,11 @@ func buildReviewableContentWithOptions(
 
 	source := quotedMessageSource(msg.ReplyTo)
 	return reviewableContent{
-		Text:     fmt.Sprintf("【引用回复】原消息(来自 %s): %s\n【本次消息】%s", source, quoted.Text, current.Text),
-		Kind:     current.Kind,
-		Skip:     false,
-		HasImage: current.HasImage,
+		Text:       fmt.Sprintf("【引用回复】原消息(来自 %s): %s\n【本次消息】%s", source, quoted.Text, current.Text),
+		Kind:       current.Kind,
+		Skip:       false,
+		HasImage:   current.HasImage,
+		ViaBotHint: current.ViaBotHint,
 	}
 }
 
@@ -1188,18 +1210,20 @@ func buildTmePreviewReviewable(
 
 	if len(blocks) == 0 {
 		return reviewableContent{
-			Text:     fmt.Sprintf("【无法展开的 Telegram 链接】%s\n【本次消息】%s", strings.Join(urls, ", "), currentText),
-			Kind:     current.Kind,
-			Skip:     false,
-			HasImage: current.HasImage,
+			Text:       fmt.Sprintf("【无法展开的 Telegram 链接】%s\n【本次消息】%s", strings.Join(urls, ", "), currentText),
+			Kind:       current.Kind,
+			Skip:       false,
+			HasImage:   current.HasImage,
+			ViaBotHint: current.ViaBotHint,
 		}, true
 	}
 
 	return reviewableContent{
-		Text:     strings.Join(blocks, tmePreviewSeparator) + fmt.Sprintf("\n\n【本次消息】%s", currentText),
-		Kind:     current.Kind,
-		Skip:     false,
-		HasImage: current.HasImage,
+		Text:       strings.Join(blocks, tmePreviewSeparator) + fmt.Sprintf("\n\n【本次消息】%s", currentText),
+		Kind:       current.Kind,
+		Skip:       false,
+		HasImage:   current.HasImage,
+		ViaBotHint: current.ViaBotHint,
 	}, true
 }
 
@@ -1236,9 +1260,10 @@ func buildExternalReplyReviewable(msg *tele.Message, current reviewableContent) 
 			"【跨聊天引用】原消息(来自 %s, 类型: %s): %s\n【本次消息】%s",
 			source, kind, quoteText, currentText,
 		),
-		Kind:     finalKind,
-		Skip:     false,
-		HasImage: combinedHasImage,
+		Kind:       finalKind,
+		Skip:       false,
+		HasImage:   combinedHasImage,
+		ViaBotHint: current.ViaBotHint,
 	}
 }
 
@@ -1339,30 +1364,37 @@ func extractReviewableContent(msg *tele.Message) reviewableContent {
 	if msg == nil {
 		return reviewableContent{Skip: true}
 	}
+	viaPrefix := ""
+	viaBotHint := false
+	if via := extractViaBot(msg); via != "" {
+		viaPrefix = "[via inline bot: " + via + "] "
+		viaBotHint = true
+	}
 	// 转发消息：拼上转发来源信息
 	forwardPrefix := ""
 	if fwd := extractForwardSource(msg); fwd != "" {
 		forwardPrefix = "[转发自: " + fwd + "] "
 	}
+	prefix := viaPrefix + forwardPrefix
 	if strings.TrimSpace(msg.Text) != "" {
-		return reviewableContent{Text: forwardPrefix + strings.TrimSpace(msg.Text), Kind: "text"}
+		return reviewableContent{Text: prefix + strings.TrimSpace(msg.Text), Kind: "text", ViaBotHint: viaBotHint}
 	}
 	if strings.TrimSpace(msg.Caption) != "" {
 		switch {
 		case msg.Photo != nil || msg.Video != nil || msg.Document != nil:
-			content := reviewableContent{Text: forwardPrefix + strings.TrimSpace(msg.Caption), Kind: "media_caption", HasImage: msg.Photo != nil}
+			content := reviewableContent{Text: prefix + strings.TrimSpace(msg.Caption), Kind: "media_caption", HasImage: msg.Photo != nil, ViaBotHint: viaBotHint}
 			if msg.Video != nil {
 				content.VideoMeta = videoMetaFromVideo(msg.Video)
 			}
 			return content
 		case msg.Animation != nil:
-			return reviewableContent{Text: forwardPrefix + "[GIF] " + strings.TrimSpace(msg.Caption), Kind: "animation", VideoMeta: videoMetaFromAnimation(msg.Animation)}
+			return reviewableContent{Text: prefix + "[GIF] " + strings.TrimSpace(msg.Caption), Kind: "animation", ViaBotHint: viaBotHint, VideoMeta: videoMetaFromAnimation(msg.Animation)}
 		case msg.Voice != nil:
-			return reviewableContent{Text: forwardPrefix + strings.TrimSpace(msg.Caption), Kind: "voice"}
+			return reviewableContent{Text: prefix + strings.TrimSpace(msg.Caption), Kind: "voice", ViaBotHint: viaBotHint}
 		case msg.Audio != nil:
-			return reviewableContent{Text: forwardPrefix + strings.TrimSpace(msg.Caption), Kind: "audio"}
+			return reviewableContent{Text: prefix + strings.TrimSpace(msg.Caption), Kind: "audio", ViaBotHint: viaBotHint}
 		case msg.VideoNote != nil:
-			return reviewableContent{Text: forwardPrefix + strings.TrimSpace(msg.Caption), Kind: "video_note", VideoMeta: videoMetaFromVideoNote(msg.VideoNote)}
+			return reviewableContent{Text: prefix + strings.TrimSpace(msg.Caption), Kind: "video_note", ViaBotHint: viaBotHint, VideoMeta: videoMetaFromVideoNote(msg.VideoNote)}
 		}
 	}
 	switch {
@@ -1378,7 +1410,7 @@ func extractReviewableContent(msg *tele.Message) reviewableContent {
 		if value := contactTelegramIdentity(msg.Contact); value != "" {
 			parts = append(parts, "Telegram用户="+value)
 		}
-		return reviewableContent{Text: strings.Join(parts, " "), Kind: "contact"}
+		return reviewableContent{Text: prefix + strings.Join(parts, " "), Kind: "contact", ViaBotHint: viaBotHint}
 	case msg.Sticker != nil:
 		parts := []string{"[贴纸]"}
 		if value := strings.TrimSpace(msg.Sticker.Emoji); value != "" {
@@ -1387,33 +1419,45 @@ func extractReviewableContent(msg *tele.Message) reviewableContent {
 		if value := strings.TrimSpace(msg.Sticker.SetName); value != "" {
 			parts = append(parts, "包="+value)
 		}
-		return reviewableContent{Text: strings.Join(parts, " "), Kind: "sticker"}
+		return reviewableContent{Text: prefix + strings.Join(parts, " "), Kind: "sticker", ViaBotHint: viaBotHint}
 	case msg.Animation != nil:
 		text := "[GIF]"
 		if value := strings.TrimSpace(msg.Animation.FileName); value != "" {
 			text += " " + value
 		}
-		return reviewableContent{Text: text, Kind: "animation", VideoMeta: videoMetaFromAnimation(msg.Animation)}
+		return reviewableContent{Text: prefix + text, Kind: "animation", ViaBotHint: viaBotHint, VideoMeta: videoMetaFromAnimation(msg.Animation)}
 	case msg.Voice != nil:
-		return reviewableContent{Text: "[语音]", Kind: "voice"}
+		return reviewableContent{Text: prefix + "[语音]", Kind: "voice", ViaBotHint: viaBotHint}
 	case msg.Audio != nil:
-		return reviewableContent{Text: "[音频]", Kind: "audio"}
+		return reviewableContent{Text: prefix + "[音频]", Kind: "audio", ViaBotHint: viaBotHint}
 	case msg.VideoNote != nil:
-		return reviewableContent{Text: "[语音短片]", Kind: "video_note", VideoMeta: videoMetaFromVideoNote(msg.VideoNote)}
+		return reviewableContent{Text: prefix + "[语音短片]", Kind: "video_note", ViaBotHint: viaBotHint, VideoMeta: videoMetaFromVideoNote(msg.VideoNote)}
 	case msg.Photo != nil || msg.Video != nil:
 		if msg.Photo != nil {
-			return reviewableContent{Text: "[图片]", Kind: "photo", HasImage: true}
+			return reviewableContent{Text: prefix + "[图片]", Kind: "photo", HasImage: true, ViaBotHint: viaBotHint}
 		}
-		return reviewableContent{Text: "[视频]", Kind: "video", VideoMeta: videoMetaFromVideo(msg.Video)}
+		return reviewableContent{Text: prefix + "[视频]", Kind: "video", ViaBotHint: viaBotHint, VideoMeta: videoMetaFromVideo(msg.Video)}
 	case msg.Document != nil:
 		text := "[文件]"
 		if value := strings.TrimSpace(msg.Document.FileName); value != "" {
 			text += " " + value
 		}
-		return reviewableContent{Text: text, Kind: "document"}
+		return reviewableContent{Text: prefix + text, Kind: "document", ViaBotHint: viaBotHint}
+	case viaBotHint:
+		return reviewableContent{Text: prefix + "[无文字内容]", Kind: "text", ViaBotHint: true}
 	default:
 		return reviewableContent{Skip: true}
 	}
+}
+
+func extractViaBot(msg *tele.Message) string {
+	if msg == nil || msg.Via == nil {
+		return ""
+	}
+	if username := strings.TrimSpace(msg.Via.Username); username != "" {
+		return "@" + username
+	}
+	return strings.TrimSpace(msg.Via.FirstName)
 }
 
 func videoMetaFromVideo(video *tele.Video) videoMeta {
