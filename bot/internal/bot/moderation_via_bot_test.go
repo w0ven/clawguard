@@ -64,7 +64,7 @@ func TestBuildReviewableContent_ViaBot_WithPhoto(t *testing.T) {
 	if !rv.HasImage {
 		t.Fatalf("HasImage 应为 true")
 	}
-	if !strings.Contains(rv.Text, "[via inline bot: @swiftgram] hi") {
+	if !strings.Contains(rv.Text, "[via inline bot: @swiftgram] [图片] hi") {
 		t.Fatalf("Text 缺少 via 前缀或 caption: %q", rv.Text)
 	}
 }
@@ -77,8 +77,8 @@ func TestBuildReviewableContent_NoVia_Unchanged(t *testing.T) {
 	if rv.Skip {
 		t.Fatalf("Skip 不应该为 true")
 	}
-	if rv.Text != "正常文本" {
-		t.Fatalf("Text = %q, want %q", rv.Text, "正常文本")
+	if rv.Text != "【本次消息】正常文本" {
+		t.Fatalf("Text = %q, want %q", rv.Text, "【本次消息】正常文本")
 	}
 	if rv.Kind != "text" {
 		t.Fatalf("Kind = %q, want text", rv.Kind)

@@ -104,3 +104,144 @@ func TestBuildReviewableContent_ExternalReplyWithSingleChar(t *testing.T) {
 		t.Errorf("引用源未保留: %q", rv.Text)
 	}
 }
+
+func TestBuildReviewableContent_ReplyPhotoWithCaption(t *testing.T) {
+	msg := &tele.Message{
+		Text:   "💍",
+		Sender: &tele.User{ID: 2, FirstName: "x"},
+		Chat:   &tele.Chat{ID: -2, Title: "t"},
+		ReplyTo: &tele.Message{
+			Sender: &tele.User{ID: 3, FirstName: "ad"},
+			Chat:   &tele.Chat{ID: -2, Title: "t"},
+			Photo:  &tele.Photo{Caption: "今晚不雅广告 text"},
+		},
+	}
+
+	rv := buildReviewableContent(msg)
+
+	if rv.Skip {
+		t.Fatalf("Skip 不应该为 true")
+	}
+	if rv.Kind != "text" {
+		t.Fatalf("Kind = %q, want text", rv.Kind)
+	}
+	if !rv.HasImage {
+		t.Fatalf("HasImage 应为 true，因为 ReplyTo 是 photo")
+	}
+	if !strings.Contains(rv.Text, "【引用回复】") {
+		t.Fatalf("Text 缺少【引用回复】标记: %q", rv.Text)
+	}
+	if !strings.Contains(rv.Text, "今晚不雅广告 text") {
+		t.Fatalf("Text 未包含 caption: %q", rv.Text)
+	}
+	if strings.TrimSpace(rv.Text) == "💍" {
+		t.Fatalf("reply preview 未展开，text=%q", rv.Text)
+	}
+}
+
+func TestBuildReviewableContent_ReplyPhotoWithoutCaption(t *testing.T) {
+	msg := &tele.Message{
+		Text:   "💍",
+		Sender: &tele.User{ID: 4, FirstName: "x"},
+		Chat:   &tele.Chat{ID: -3, Title: "t"},
+		ReplyTo: &tele.Message{
+			Sender: &tele.User{ID: 5, FirstName: "ad"},
+			Chat:   &tele.Chat{ID: -3, Title: "t"},
+			Photo:  &tele.Photo{},
+		},
+	}
+
+	rv := buildReviewableContent(msg)
+
+	if rv.Skip {
+		t.Fatalf("Skip 不应该为 true")
+	}
+	if !strings.Contains(rv.Text, "【引用回复】") {
+		t.Fatalf("Text 缺少【引用回复】标记: %q", rv.Text)
+	}
+	if !strings.Contains(rv.Text, "[图片]") {
+		t.Fatalf("Text 未包含 [图片]: %q", rv.Text)
+	}
+	if !rv.HasImage {
+		t.Fatalf("HasImage 应为 true")
+	}
+}
+
+func TestBuildReviewableContent_QuoteOnlyShortEmoji(t *testing.T) {
+	msg := &tele.Message{
+		Text:   "💍",
+		Sender: &tele.User{ID: 6, FirstName: "x"},
+		Chat:   &tele.Chat{ID: -4, Title: "t"},
+		Quote:  &tele.TextQuote{Text: "广告词：加我看福利"},
+	}
+
+	rv := buildReviewableContent(msg)
+
+	if rv.Skip {
+		t.Fatalf("Skip 不应该为 true")
+	}
+	if !strings.Contains(rv.Text, "【引用片段】") {
+		t.Fatalf("Text 缺少【引用片段】标记: %q", rv.Text)
+	}
+	if !strings.Contains(rv.Text, "广告词：加我看福利") {
+		t.Fatalf("Text 未包含 Quote 文字: %q", rv.Text)
+	}
+	if !strings.Contains(rv.Text, "💍") {
+		t.Fatalf("当前短正文未保留: %q", rv.Text)
+	}
+}
+
+func TestBuildReviewableContent_ExternalReplyWithQuoteShortEmoji(t *testing.T) {
+	msg := &tele.Message{
+		Text:   "💍",
+		Sender: &tele.User{ID: 7, FirstName: "x"},
+		Chat:   &tele.Chat{ID: -5, Title: "t"},
+		ExternalReplyInfo: &tele.ExternalReplyInfo{
+			Photo: []tele.Photo{{}},
+			Origin: &tele.MessageOrigin{
+				Type: "channel",
+				Chat: &tele.Chat{Title: "某频道", Username: "ad_channel"},
+			},
+			Chat: &tele.Chat{Title: "某频道", Username: "ad_channel"},
+		},
+		Quote: &tele.TextQuote{Text: "深圳游艇会聚会不雅性爱视频"},
+	}
+
+	rv := buildReviewableContent(msg)
+
+	if rv.Skip {
+		t.Fatalf("Skip 不应该为 true")
+	}
+	if !rv.HasImage {
+		t.Fatalf("HasImage 应为 true，因为 ExternalReplyInfo.Photo 非空")
+	}
+	if !strings.Contains(rv.Text, "【跨聊天引用】") {
+		t.Fatalf("Text 缺少【跨聊天引用】标记: %q", rv.Text)
+	}
+	if !strings.Contains(rv.Text, "深圳游艇会") {
+		t.Fatalf("Text 未包含 Quote 文字: %q", rv.Text)
+	}
+	if !strings.Contains(rv.Text, "💍") {
+		t.Fatalf("当前短正文未保留: %q", rv.Text)
+	}
+}
+
+func TestBuildReviewableContent_ShortEmojiAloneStillReviewable(t *testing.T) {
+	msg := &tele.Message{
+		Text:   "💍",
+		Sender: &tele.User{ID: 8, FirstName: "x"},
+		Chat:   &tele.Chat{ID: -6, Title: "t"},
+	}
+
+	rv := buildReviewableContent(msg)
+
+	if rv.Skip {
+		t.Fatalf("Skip 不应该为 true")
+	}
+	if rv.Text != "【本次消息】💍" {
+		t.Fatalf("Text = %q, want %q", rv.Text, "【本次消息】💍")
+	}
+	if rv.Kind != "text" {
+		t.Fatalf("Kind = %q, want text", rv.Kind)
+	}
+}

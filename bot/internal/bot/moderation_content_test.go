@@ -14,11 +14,11 @@ func TestExtractReviewableContentNonCaptionMedia(t *testing.T) {
 		want reviewableContent
 	}{
 		{name: "video", msg: &tele.Message{Video: &tele.Video{}}, want: reviewableContent{Text: "[视频]", Kind: "video"}},
-		{name: "document", msg: &tele.Message{Document: &tele.Document{FileName: "a.pdf"}}, want: reviewableContent{Text: "[文件] a.pdf", Kind: "document"}},
+		{name: "document", msg: &tele.Message{Document: &tele.Document{FileName: "a.pdf"}}, want: reviewableContent{Text: "[文件] filename=a.pdf", Kind: "document"}},
 		{name: "audio", msg: &tele.Message{Audio: &tele.Audio{}}, want: reviewableContent{Text: "[音频]", Kind: "audio"}},
 		{name: "voice", msg: &tele.Message{Voice: &tele.Voice{}}, want: reviewableContent{Text: "[语音]", Kind: "voice"}},
 		{name: "sticker", msg: &tele.Message{Sticker: &tele.Sticker{}}, want: reviewableContent{Text: "[贴纸]", Kind: "sticker"}},
-		{name: "animation", msg: &tele.Message{Animation: &tele.Animation{}}, want: reviewableContent{Text: "[GIF]", Kind: "animation"}},
+		{name: "animation", msg: &tele.Message{Animation: &tele.Animation{}}, want: reviewableContent{Text: "[动图]", Kind: "animation"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -46,14 +46,14 @@ func TestExtractReviewableContentAdditionalTelegramTypes(t *testing.T) {
 			msg:      &tele.Message{Poll: &tele.Poll{Question: "选哪个", Options: []tele.PollOption{{Text: "A"}, {Text: "B"}}}},
 			wantKind: "poll",
 			wantParts: []string{
-				"[投票]", "标题=选哪个", "选项1=A", "选项2=B",
+				"[投票]", "question=选哪个", "option1=A", "option2=B",
 			},
 		},
 		{name: "dice", msg: &tele.Message{Dice: &tele.Dice{Type: "🎰", Value: 64}}, wantKind: "dice", wantParts: []string{"[骰子]", "emoji=🎰", "value=64"}},
-		{name: "location", msg: &tele.Message{Location: &tele.Location{Lat: 31.23, Lng: 121.47}}, wantKind: "location", wantParts: []string{"[位置]", "lat=31.23", "lon=121.47"}},
-		{name: "venue", msg: &tele.Message{Venue: &tele.Venue{Title: "店", Address: "路", Location: tele.Location{Lat: 31.23, Lng: 121.47}}}, wantKind: "venue", wantParts: []string{"[地点]", "标题=店", "地址=路", "lat=31.23", "lon=121.47"}},
-		{name: "game", msg: &tele.Message{Game: &tele.Game{Title: "游戏", Description: "描述"}}, wantKind: "game", wantParts: []string{"[游戏]", "标题=游戏", "描述=描述"}},
-		{name: "invoice", msg: &tele.Message{Invoice: &tele.Invoice{Title: "订单", Description: "说明", Total: 123, Currency: "USD"}}, wantKind: "invoice", wantParts: []string{"[Invoice]", "标题=订单", "描述=说明", "总额=123", "货币=USD"}},
+		{name: "location", msg: &tele.Message{Location: &tele.Location{Lat: 31.23, Lng: 121.47}}, wantKind: "location", wantParts: []string{"[位置]", "lat=31.23", "lng=121.47"}},
+		{name: "venue", msg: &tele.Message{Venue: &tele.Venue{Title: "店", Address: "路", Location: tele.Location{Lat: 31.23, Lng: 121.47}}}, wantKind: "venue", wantParts: []string{"[地点]", "title=店", "address=路", "lat=31.23", "lng=121.47"}},
+		{name: "game", msg: &tele.Message{Game: &tele.Game{Title: "游戏", Description: "描述"}}, wantKind: "game", wantParts: []string{"[游戏]", "title=游戏", "description=描述"}},
+		{name: "invoice", msg: &tele.Message{Invoice: &tele.Invoice{Title: "订单", Description: "说明", Total: 123, Currency: "USD"}}, wantKind: "invoice", wantParts: []string{"[Invoice]", "title=订单", "description=说明", "total=123", "currency=USD"}},
 		{name: "story", msg: &tele.Message{Story: &tele.Story{ID: 9, Poster: &tele.Chat{ID: -100, Title: "频道"}}}, wantKind: "story", wantParts: []string{"[Story 转发]", "来源=频道/9"}},
 		{name: "giveaway", msg: &tele.Message{Giveaway: &tele.Giveaway{PrizeDescription: "奖品", WinnerCount: 3, SelectionUnixtime: 1710000000}}, wantKind: "giveaway", wantParts: []string{"[赠品]", "描述=奖品", "数量=3", "截止=2024-03-10T"}},
 		{name: "giveaway_created", msg: &tele.Message{GiveawayCreated: &tele.GiveawayCreated{}}, wantKind: "giveaway_created", wantParts: []string{"[赠品]", "描述=created"}},

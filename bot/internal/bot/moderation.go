@@ -1214,7 +1214,12 @@ func (s *Service) buildReviewableContent(ctx context.Context, msg *tele.Message)
 	if typed, ok := s.redis.(*redis.Client); ok {
 		redisClient = typed
 	}
-	return buildReviewableContentWithOptions(ctx, msg, redisClient, fetchTmeLinkPreviewForUser)
+	current := extractReviewableContent(msg)
+	content := buildReviewableContentWithOptions(ctx, msg, redisClient, fetchTmeLinkPreviewForUser)
+	if shouldLogReplyPreviewNotExpanded(msg, current, content) {
+		s.logger.Debug("reply preview not expanded", replyPreviewLogFields(msg, current, content)...)
+	}
+	return content
 }
 
 func buildReviewableContentWithOptions(
@@ -1224,50 +1229,52 @@ func buildReviewableContentWithOptions(
 	fetchPreview func(context.Context, string, *redis.Client, int64) (*LinkPreview, error),
 ) reviewableContent {
 	current := extractReviewableContent(msg)
-
-	// 跨聊天引用回复（Reply from another chat）: msg.ExternalReplyInfo + msg.Quote
-	// 广告号常用这个绕审：自己只发单字或空，把色情/引流频道的消息作为跨群引用挂上。
-	// 必须把引用内容提升为审核主体，哪怕 current.Skip == true。
-	if msg != nil && msg.ExternalReplyInfo != nil {
-		return buildExternalReplyReviewable(msg, current)
-	}
-
-	if previewed, ok := buildTmePreviewReviewable(ctx, msg, current, redisClient, fetchPreview); ok {
-		return previewed
-	}
-
-	if current.Skip {
+	if msg == nil {
 		return current
 	}
 
-	// 本群引用片段（msg.Quote 非空、msg.ReplyTo 为 nil）：把 Quote 文本拼进去作为补充上下文
-	if msg != nil && msg.ReplyTo == nil && msg.Quote != nil && strings.TrimSpace(msg.Quote.Text) != "" {
-		return reviewableContent{
-			Text:       fmt.Sprintf("【引用片段】%s\n【本次消息】%s", strings.TrimSpace(msg.Quote.Text), current.Text),
-			Kind:       current.Kind,
-			Skip:       false,
-			HasImage:   current.HasImage,
-			ViaBotHint: current.ViaBotHint,
+	blocks := make([]string, 0, 5)
+	combined := current
+	if !current.Skip {
+		blocks = append(blocks, reviewBlock("本次消息", current.Text))
+	}
+
+	if msg.ReplyTo != nil {
+		reply := extractReviewableContent(msg.ReplyTo)
+		combined = mergeReviewableContent(combined, reply)
+		if !reply.Skip {
+			source := quotedMessageSource(msg.ReplyTo)
+			blocks = append(blocks, reviewBlock("引用回复", fmt.Sprintf("原消息(来自 %s): %s", source, reply.Text)))
 		}
 	}
 
-	if msg == nil || msg.ReplyTo == nil {
-		return current
+	if msg.Quote != nil && strings.TrimSpace(msg.Quote.Text) != "" {
+		quote := reviewableContent{Text: strings.TrimSpace(msg.Quote.Text), Kind: "quote"}
+		combined = mergeReviewableContent(combined, quote)
+		blocks = append(blocks, reviewBlock("引用片段", quote.Text))
 	}
 
-	quoted := extractReviewableContent(msg.ReplyTo)
-	if quoted.Skip {
-		return current
+	if msg.ExternalReplyInfo != nil {
+		external := buildExternalReplyReviewable(msg, current)
+		combined = mergeReviewableContent(combined, external)
+		if !external.Skip {
+			blocks = append(blocks, reviewBlock("跨聊天引用", external.Text))
+		}
 	}
 
-	source := quotedMessageSource(msg.ReplyTo)
-	return reviewableContent{
-		Text:       fmt.Sprintf("【引用回复】原消息(来自 %s): %s\n【本次消息】%s", source, quoted.Text, current.Text),
-		Kind:       current.Kind,
-		Skip:       false,
-		HasImage:   current.HasImage,
-		ViaBotHint: current.ViaBotHint,
+	if previewed, ok := buildTmePreviewReviewable(ctx, msg, current, redisClient, fetchPreview); ok {
+		combined = mergeReviewableContent(combined, previewed)
+		if previewText := linkPreviewBlockText(previewed.Text, current.Text); previewText != "" {
+			blocks = append(blocks, reviewBlock("链接预览", previewText))
+		}
 	}
+
+	if len(blocks) == 0 {
+		return reviewableContent{Skip: true}
+	}
+	combined.Text = strings.Join(blocks, "\n")
+	combined.Skip = false
+	return combined
 }
 
 func buildTmePreviewReviewable(
@@ -1360,18 +1367,21 @@ func buildExternalReplyReviewable(msg *tele.Message, current reviewableContent) 
 	ext := msg.ExternalReplyInfo
 	source := externalReplySource(ext)
 	kind, hasImage := externalReplyKind(ext)
+	mediaText := externalReplyMediaText(ext)
 
 	quoteText := ""
 	if msg.Quote != nil {
 		quoteText = strings.TrimSpace(msg.Quote.Text)
 	}
-	if quoteText == "" {
-		quoteText = "[无文字]"
+	parts := []string{fmt.Sprintf("原消息(来自 %s, 类型: %s)", source, kind)}
+	if quoteText != "" {
+		parts = append(parts, "引用片段: "+quoteText)
 	}
-
-	currentText := strings.TrimSpace(current.Text)
-	if current.Skip || currentText == "" {
-		currentText = "[无文字]"
+	if mediaText != "" {
+		parts = append(parts, "媒体: "+mediaText)
+	}
+	if ext != nil && ext.HasMediaSpoiler {
+		parts = append(parts, "[媒体剧透]")
 	}
 
 	combinedHasImage := current.HasImage || hasImage
@@ -1381,10 +1391,7 @@ func buildExternalReplyReviewable(msg *tele.Message, current reviewableContent) 
 	}
 
 	return reviewableContent{
-		Text: fmt.Sprintf(
-			"【跨聊天引用】原消息(来自 %s, 类型: %s): %s\n【本次消息】%s",
-			source, kind, quoteText, currentText,
-		),
+		Text:       strings.Join(parts, "\n"),
 		Kind:       finalKind,
 		Skip:       false,
 		HasImage:   combinedHasImage,
@@ -1485,6 +1492,232 @@ func externalReplyKind(ext *tele.ExternalReplyInfo) (string, bool) {
 	return "text", false
 }
 
+func externalReplyMediaText(ext *tele.ExternalReplyInfo) string {
+	if ext == nil {
+		return ""
+	}
+	switch {
+	case len(ext.Photo) > 0:
+		return "[图片]"
+	case ext.Video != nil:
+		return videoReviewText(ext.Video)
+	case ext.Animation != nil:
+		return animationReviewText(ext.Animation)
+	case ext.Document != nil:
+		return documentReviewText(ext.Document)
+	case ext.Sticker != nil:
+		return stickerReviewText(ext.Sticker)
+	case ext.Voice != nil:
+		return voiceReviewText(ext.Voice)
+	case ext.Audio != nil:
+		return audioReviewText(ext.Audio)
+	case ext.Note != nil:
+		return "[视频圆片]"
+	case ext.Contact != nil:
+		return contactReviewText(ext.Contact)
+	case ext.Story != nil:
+		return storyReviewText(ext.Story)
+	case ext.Poll != nil:
+		return pollReviewText(ext.Poll)
+	case ext.Location != nil:
+		return locationReviewText(ext.Location)
+	case ext.Venue != nil:
+		return venueReviewText(ext.Venue)
+	case ext.Game != nil:
+		return gameReviewText(ext.Game)
+	case ext.Dice != nil:
+		return diceReviewText(ext.Dice)
+	case ext.Invoice != nil:
+		return invoiceReviewText(ext.Invoice)
+	case ext.Giveaway != nil:
+		return giveawayReviewText(ext.Giveaway)
+	case ext.GiveawayWinners != nil:
+		return giveawayWinnersReviewText(ext.GiveawayWinners)
+	default:
+		return ""
+	}
+}
+
+func mergeReviewableContent(base, extra reviewableContent) reviewableContent {
+	if extra.Skip {
+		return base
+	}
+	if base.Skip {
+		base = reviewableContent{}
+	}
+	if base.Kind == "" {
+		base.Kind = extra.Kind
+	}
+	base.HasImage = base.HasImage || extra.HasImage
+	base.ViaBotHint = base.ViaBotHint || extra.ViaBotHint
+	if base.VideoMeta.Source == "" && extra.VideoMeta.Source != "" {
+		base.VideoMeta = extra.VideoMeta
+	}
+	return base
+}
+
+func reviewBlock(label, text string) string {
+	return fmt.Sprintf("【%s】%s", label, strings.TrimSpace(text))
+}
+
+func linkPreviewBlockText(previewText, currentText string) string {
+	text := strings.TrimSpace(previewText)
+	currentText = strings.TrimSpace(currentText)
+	if currentText != "" {
+		text = strings.TrimSpace(strings.TrimSuffix(text, fmt.Sprintf("\n\n【本次消息】%s", currentText)))
+	}
+	return text
+}
+
+func shouldLogReplyPreviewNotExpanded(msg *tele.Message, current, content reviewableContent) bool {
+	if msg == nil || msg.Chat == nil || msg.Sender == nil {
+		return false
+	}
+	if !hasReplyPreviewContext(msg) {
+		return false
+	}
+	if !isShortBody(current.Text) {
+		return false
+	}
+	return strings.TrimSpace(current.Text) == strings.TrimSpace(content.Text)
+}
+
+func hasReplyPreviewContext(msg *tele.Message) bool {
+	if msg == nil {
+		return false
+	}
+	if msg.ReplyTo != nil || msg.ExternalReplyInfo != nil {
+		return true
+	}
+	if msg.Quote != nil && strings.TrimSpace(msg.Quote.Text) != "" {
+		return true
+	}
+	return len(extractTmeURLs(msg)) > 0
+}
+
+func isShortBody(text string) bool {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return false
+	}
+	return utf8.RuneCountInString(text) <= 2
+}
+
+func replyPreviewLogFields(msg *tele.Message, current, content reviewableContent) []zap.Field {
+	fields := []zap.Field{
+		zap.Int64("chat_id", msg.Chat.ID),
+		zap.Int("message_id", msg.ID),
+		zap.String("current_text", strings.TrimSpace(current.Text)),
+		zap.String("review_text", strings.TrimSpace(content.Text)),
+		zap.Bool("has_reply_to", msg.ReplyTo != nil),
+		zap.Bool("has_external_reply", msg.ExternalReplyInfo != nil),
+		zap.Bool("has_quote", msg.Quote != nil && strings.TrimSpace(msg.Quote.Text) != ""),
+		zap.Bool("has_link_preview", len(extractTmeURLs(msg)) > 0),
+		zap.Bool("has_preview_options", msg.PreviewOptions != nil),
+	}
+	if msg.ReplyTo != nil {
+		fields = append(fields,
+			zap.String("reply_to_kind", replyPreviewKind(msg.ReplyTo)),
+			zap.Bool("reply_to_has_caption", messageCaption(msg.ReplyTo) != ""),
+		)
+	}
+	if msg.ExternalReplyInfo != nil {
+		fields = append(fields,
+			zap.String("external_reply_kind", externalReplyKindString(msg.ExternalReplyInfo)),
+			zap.Bool("external_reply_has_preview_options", msg.ExternalReplyInfo.PreviewOptions != nil),
+		)
+	}
+	return fields
+}
+
+func replyPreviewKind(msg *tele.Message) string {
+	if msg == nil {
+		return "unknown"
+	}
+	switch {
+	case msg.Photo != nil:
+		return "photo"
+	case msg.Video != nil:
+		return "video"
+	case msg.Animation != nil:
+		return "animation"
+	case msg.Document != nil:
+		return "document"
+	case msg.Sticker != nil:
+		return "sticker"
+	case msg.Voice != nil:
+		return "voice"
+	case msg.Audio != nil:
+		return "audio"
+	case msg.VideoNote != nil:
+		return "video_note"
+	case msg.Contact != nil:
+		return "contact"
+	case msg.Poll != nil:
+		return "poll"
+	case msg.Location != nil:
+		return "location"
+	case msg.Venue != nil:
+		return "venue"
+	case msg.Game != nil:
+		return "game"
+	case msg.Dice != nil:
+		return "dice"
+	case strings.TrimSpace(msg.Text) != "":
+		return "text"
+	case messageCaption(msg) != "":
+		return "caption"
+	default:
+		return "unknown"
+	}
+}
+
+func externalReplyKindString(ext *tele.ExternalReplyInfo) string {
+	if ext == nil {
+		return "unknown"
+	}
+	switch {
+	case len(ext.Photo) > 0:
+		return "photo"
+	case ext.Video != nil:
+		return "video"
+	case ext.Animation != nil:
+		return "animation"
+	case ext.Document != nil:
+		return "document"
+	case ext.Sticker != nil:
+		return "sticker"
+	case ext.Voice != nil:
+		return "voice"
+	case ext.Audio != nil:
+		return "audio"
+	case ext.Note != nil:
+		return "video_note"
+	case ext.Contact != nil:
+		return "contact"
+	case ext.Story != nil:
+		return "story"
+	case ext.Poll != nil:
+		return "poll"
+	case ext.Location != nil:
+		return "location"
+	case ext.Venue != nil:
+		return "venue"
+	case ext.Game != nil:
+		return "game"
+	case ext.Dice != nil:
+		return "dice"
+	case ext.Invoice != nil:
+		return "invoice"
+	case ext.Giveaway != nil:
+		return "giveaway"
+	case ext.GiveawayWinners != nil:
+		return "giveaway_winners"
+	default:
+		return "text"
+	}
+}
+
 func extractReviewableContent(msg *tele.Message) reviewableContent {
 	if msg == nil {
 		return reviewableContent{Skip: true}
@@ -1504,74 +1737,50 @@ func extractReviewableContent(msg *tele.Message) reviewableContent {
 	if strings.TrimSpace(msg.Text) != "" {
 		return reviewableContent{Text: prefix + strings.TrimSpace(msg.Text), Kind: "text", ViaBotHint: viaBotHint}
 	}
-	if strings.TrimSpace(msg.Caption) != "" {
+	if messageCaption(msg) != "" {
+		caption := messageCaption(msg)
 		switch {
 		case msg.Photo != nil || msg.Video != nil || msg.Document != nil:
-			content := reviewableContent{Text: prefix + strings.TrimSpace(msg.Caption), Kind: "media_caption", HasImage: msg.Photo != nil, ViaBotHint: viaBotHint}
+			placeholder := "[媒体]"
+			if msg.Photo != nil {
+				placeholder = "[图片]"
+			}
+			if msg.Video != nil {
+				placeholder = videoReviewText(msg.Video)
+			}
+			if msg.Document != nil {
+				placeholder = documentReviewText(msg.Document)
+			}
+			content := reviewableContent{Text: prefix + placeholder + " " + caption, Kind: "media_caption", HasImage: msg.Photo != nil, ViaBotHint: viaBotHint}
 			if msg.Video != nil {
 				content.VideoMeta = videoMetaFromVideo(msg.Video)
 			}
 			return content
 		case msg.Animation != nil:
-			return reviewableContent{Text: prefix + "[GIF] " + strings.TrimSpace(msg.Caption), Kind: "animation", ViaBotHint: viaBotHint, VideoMeta: videoMetaFromAnimation(msg.Animation)}
+			return reviewableContent{Text: prefix + animationReviewText(msg.Animation) + " " + caption, Kind: "animation", ViaBotHint: viaBotHint, VideoMeta: videoMetaFromAnimation(msg.Animation)}
 		case msg.Voice != nil:
-			return reviewableContent{Text: prefix + strings.TrimSpace(msg.Caption), Kind: "voice", ViaBotHint: viaBotHint}
+			return reviewableContent{Text: prefix + voiceReviewText(msg.Voice) + " " + caption, Kind: "voice", ViaBotHint: viaBotHint}
 		case msg.Audio != nil:
-			return reviewableContent{Text: prefix + strings.TrimSpace(msg.Caption), Kind: "audio", ViaBotHint: viaBotHint}
+			return reviewableContent{Text: prefix + audioReviewText(msg.Audio) + " " + caption, Kind: "audio", ViaBotHint: viaBotHint}
 		case msg.VideoNote != nil:
-			return reviewableContent{Text: prefix + strings.TrimSpace(msg.Caption), Kind: "video_note", ViaBotHint: viaBotHint, VideoMeta: videoMetaFromVideoNote(msg.VideoNote)}
+			return reviewableContent{Text: prefix + "[视频圆片] " + caption, Kind: "video_note", ViaBotHint: viaBotHint, VideoMeta: videoMetaFromVideoNote(msg.VideoNote)}
 		}
 	}
 	switch {
 	case msg.Contact != nil:
-		parts := []string{"[名片]"}
-		name := strings.TrimSpace(strings.TrimSpace(msg.Contact.FirstName + " " + msg.Contact.LastName))
-		if name != "" {
-			parts = append(parts, "姓名="+name)
-		}
-		if value := strings.TrimSpace(msg.Contact.PhoneNumber); value != "" {
-			parts = append(parts, "电话="+value)
-		}
-		if value := contactTelegramIdentity(msg.Contact); value != "" {
-			parts = append(parts, "Telegram用户="+value)
-		}
-		return reviewableContent{Text: prefix + strings.Join(parts, " "), Kind: "contact", ViaBotHint: viaBotHint}
+		return reviewableContent{Text: prefix + contactReviewText(msg.Contact), Kind: "contact", ViaBotHint: viaBotHint}
 	case msg.Poll != nil:
-		parts := []string{"[投票]"}
-		if value := strings.TrimSpace(msg.Poll.Question); value != "" {
-			parts = append(parts, "标题="+value)
-		}
-		for idx, option := range msg.Poll.Options {
-			if value := strings.TrimSpace(option.Text); value != "" {
-				parts = append(parts, fmt.Sprintf("选项%d=%s", idx+1, value))
-			}
-		}
-		return reviewableContent{Text: prefix + strings.Join(parts, " "), Kind: "poll", ViaBotHint: viaBotHint}
+		return reviewableContent{Text: prefix + pollReviewText(msg.Poll), Kind: "poll", ViaBotHint: viaBotHint}
 	case msg.Dice != nil:
-		return reviewableContent{Text: prefix + fmt.Sprintf("[骰子] emoji=%s value=%d", msg.Dice.Type, msg.Dice.Value), Kind: "dice", ViaBotHint: viaBotHint}
+		return reviewableContent{Text: prefix + diceReviewText(msg.Dice), Kind: "dice", ViaBotHint: viaBotHint}
 	case msg.Location != nil:
-		return reviewableContent{Text: prefix + fmt.Sprintf("[位置] lat=%.6g lon=%.6g", msg.Location.Lat, msg.Location.Lng), Kind: "location", ViaBotHint: viaBotHint}
+		return reviewableContent{Text: prefix + locationReviewText(msg.Location), Kind: "location", ViaBotHint: viaBotHint}
 	case msg.Venue != nil:
-		parts := []string{"[地点]"}
-		if value := strings.TrimSpace(msg.Venue.Title); value != "" {
-			parts = append(parts, "标题="+value)
-		}
-		if value := strings.TrimSpace(msg.Venue.Address); value != "" {
-			parts = append(parts, "地址="+value)
-		}
-		parts = append(parts, fmt.Sprintf("lat=%.6g lon=%.6g", msg.Venue.Location.Lat, msg.Venue.Location.Lng))
-		return reviewableContent{Text: prefix + strings.Join(parts, " "), Kind: "venue", ViaBotHint: viaBotHint}
+		return reviewableContent{Text: prefix + venueReviewText(msg.Venue), Kind: "venue", ViaBotHint: viaBotHint}
 	case msg.Game != nil:
-		parts := []string{"[游戏]"}
-		if value := strings.TrimSpace(msg.Game.Title); value != "" {
-			parts = append(parts, "标题="+value)
-		}
-		if value := strings.TrimSpace(msg.Game.Description); value != "" {
-			parts = append(parts, "描述="+value)
-		}
-		return reviewableContent{Text: prefix + strings.Join(parts, " "), Kind: "game", ViaBotHint: viaBotHint}
+		return reviewableContent{Text: prefix + gameReviewText(msg.Game), Kind: "game", ViaBotHint: viaBotHint}
 	case msg.Invoice != nil:
-		return reviewableContent{Text: prefix + fmt.Sprintf("[Invoice] 标题=%s 描述=%s 总额=%d 货币=%s", strings.TrimSpace(msg.Invoice.Title), strings.TrimSpace(msg.Invoice.Description), msg.Invoice.Total, strings.TrimSpace(msg.Invoice.Currency)), Kind: "invoice", ViaBotHint: viaBotHint}
+		return reviewableContent{Text: prefix + invoiceReviewText(msg.Invoice), Kind: "invoice", ViaBotHint: viaBotHint}
 	case msg.Story != nil || msg.ReplyToStory != nil:
 		story := msg.Story
 		if story == nil {
@@ -1587,37 +1796,22 @@ func extractReviewableContent(msg *tele.Message) reviewableContent {
 	case msg.GiveawayCompleted != nil:
 		return reviewableContent{Text: prefix + fmt.Sprintf("[赠品] 描述=completed 数量=%d 截止=", msg.GiveawayCompleted.WinnerCount), Kind: "giveaway_completed", ViaBotHint: viaBotHint}
 	case msg.Sticker != nil:
-		parts := []string{"[贴纸]"}
-		if value := strings.TrimSpace(msg.Sticker.Emoji); value != "" {
-			parts = append(parts, "emoji="+value)
-		}
-		if value := strings.TrimSpace(msg.Sticker.SetName); value != "" {
-			parts = append(parts, "包="+value)
-		}
-		return reviewableContent{Text: prefix + strings.Join(parts, " "), Kind: "sticker", ViaBotHint: viaBotHint}
+		return reviewableContent{Text: prefix + stickerReviewText(msg.Sticker), Kind: "sticker", ViaBotHint: viaBotHint}
 	case msg.Animation != nil:
-		text := "[GIF]"
-		if value := strings.TrimSpace(msg.Animation.FileName); value != "" {
-			text += " " + value
-		}
-		return reviewableContent{Text: prefix + text, Kind: "animation", ViaBotHint: viaBotHint, VideoMeta: videoMetaFromAnimation(msg.Animation)}
+		return reviewableContent{Text: prefix + animationReviewText(msg.Animation), Kind: "animation", ViaBotHint: viaBotHint, VideoMeta: videoMetaFromAnimation(msg.Animation)}
 	case msg.Voice != nil:
-		return reviewableContent{Text: prefix + "[语音]", Kind: "voice", ViaBotHint: viaBotHint}
+		return reviewableContent{Text: prefix + voiceReviewText(msg.Voice), Kind: "voice", ViaBotHint: viaBotHint}
 	case msg.Audio != nil:
-		return reviewableContent{Text: prefix + "[音频]", Kind: "audio", ViaBotHint: viaBotHint}
+		return reviewableContent{Text: prefix + audioReviewText(msg.Audio), Kind: "audio", ViaBotHint: viaBotHint}
 	case msg.VideoNote != nil:
-		return reviewableContent{Text: prefix + "[语音短片]", Kind: "video_note", ViaBotHint: viaBotHint, VideoMeta: videoMetaFromVideoNote(msg.VideoNote)}
+		return reviewableContent{Text: prefix + "[视频圆片]", Kind: "video_note", ViaBotHint: viaBotHint, VideoMeta: videoMetaFromVideoNote(msg.VideoNote)}
 	case msg.Photo != nil || msg.Video != nil:
 		if msg.Photo != nil {
 			return reviewableContent{Text: prefix + "[图片]", Kind: "photo", HasImage: true, ViaBotHint: viaBotHint}
 		}
-		return reviewableContent{Text: prefix + "[视频]", Kind: "video", ViaBotHint: viaBotHint, VideoMeta: videoMetaFromVideo(msg.Video)}
+		return reviewableContent{Text: prefix + videoReviewText(msg.Video), Kind: "video", ViaBotHint: viaBotHint, VideoMeta: videoMetaFromVideo(msg.Video)}
 	case msg.Document != nil:
-		text := "[文件]"
-		if value := strings.TrimSpace(msg.Document.FileName); value != "" {
-			text += " " + value
-		}
-		return reviewableContent{Text: prefix + text, Kind: "document", ViaBotHint: viaBotHint}
+		return reviewableContent{Text: prefix + documentReviewText(msg.Document), Kind: "document", ViaBotHint: viaBotHint}
 	case viaBotHint:
 		return reviewableContent{Text: prefix + "[无文字内容]", Kind: "text", ViaBotHint: true}
 	default:
@@ -1633,6 +1827,31 @@ func extractViaBot(msg *tele.Message) string {
 		return "@" + username
 	}
 	return strings.TrimSpace(msg.Via.FirstName)
+}
+
+func messageCaption(msg *tele.Message) string {
+	if msg == nil {
+		return ""
+	}
+	if value := strings.TrimSpace(msg.Caption); value != "" {
+		return value
+	}
+	switch {
+	case msg.Photo != nil:
+		return strings.TrimSpace(msg.Photo.Caption)
+	case msg.Video != nil:
+		return strings.TrimSpace(msg.Video.Caption)
+	case msg.Animation != nil:
+		return strings.TrimSpace(msg.Animation.Caption)
+	case msg.Document != nil:
+		return strings.TrimSpace(msg.Document.Caption)
+	case msg.Voice != nil:
+		return strings.TrimSpace(msg.Voice.Caption)
+	case msg.Audio != nil:
+		return strings.TrimSpace(msg.Audio.Caption)
+	default:
+		return ""
+	}
 }
 
 func videoMetaFromVideo(video *tele.Video) videoMeta {
@@ -1703,6 +1922,196 @@ func contactTelegramIdentity(contact *tele.Contact) string {
 		return strconv.FormatInt(contact.UserID, 10)
 	}
 	return ""
+}
+
+func documentReviewText(document *tele.Document) string {
+	parts := []string{"[文件]"}
+	if document == nil {
+		return strings.Join(parts, " ")
+	}
+	if value := strings.TrimSpace(document.FileName); value != "" {
+		parts = append(parts, "filename="+value)
+	}
+	if value := strings.TrimSpace(document.MIME); value != "" {
+		parts = append(parts, "mime="+value)
+	}
+	return strings.Join(parts, " ")
+}
+
+func videoReviewText(video *tele.Video) string {
+	parts := []string{"[视频]"}
+	if video == nil {
+		return strings.Join(parts, " ")
+	}
+	if value := strings.TrimSpace(video.FileName); value != "" {
+		parts = append(parts, "filename="+value)
+	}
+	if value := strings.TrimSpace(video.MIME); value != "" {
+		parts = append(parts, "mime="+value)
+	}
+	return strings.Join(parts, " ")
+}
+
+func animationReviewText(animation *tele.Animation) string {
+	parts := []string{"[动图]"}
+	if animation == nil {
+		return strings.Join(parts, " ")
+	}
+	if value := strings.TrimSpace(animation.FileName); value != "" {
+		parts = append(parts, "filename="+value)
+	}
+	if value := strings.TrimSpace(animation.MIME); value != "" {
+		parts = append(parts, "mime="+value)
+	}
+	return strings.Join(parts, " ")
+}
+
+func voiceReviewText(voice *tele.Voice) string {
+	parts := []string{"[语音]"}
+	if voice == nil {
+		return strings.Join(parts, " ")
+	}
+	if value := strings.TrimSpace(voice.MIME); value != "" {
+		parts = append(parts, "mime="+value)
+	}
+	return strings.Join(parts, " ")
+}
+
+func audioReviewText(audio *tele.Audio) string {
+	parts := []string{"[音频]"}
+	if audio == nil {
+		return strings.Join(parts, " ")
+	}
+	if value := strings.TrimSpace(audio.FileName); value != "" {
+		parts = append(parts, "filename="+value)
+	}
+	if value := strings.TrimSpace(audio.MIME); value != "" {
+		parts = append(parts, "mime="+value)
+	}
+	if value := strings.TrimSpace(audio.Title); value != "" {
+		parts = append(parts, "title="+value)
+	}
+	if value := strings.TrimSpace(audio.Performer); value != "" {
+		parts = append(parts, "performer="+value)
+	}
+	return strings.Join(parts, " ")
+}
+
+func stickerReviewText(sticker *tele.Sticker) string {
+	parts := []string{"[贴纸]"}
+	if sticker == nil {
+		return strings.Join(parts, " ")
+	}
+	if value := strings.TrimSpace(sticker.Emoji); value != "" {
+		parts = append(parts, "emoji="+value)
+	}
+	if value := strings.TrimSpace(sticker.SetName); value != "" {
+		parts = append(parts, "set="+value)
+	}
+	if value := strings.TrimSpace(sticker.CustomEmoji); value != "" {
+		parts = append(parts, "custom_emoji="+value)
+	}
+	return strings.Join(parts, " ")
+}
+
+func contactReviewText(contact *tele.Contact) string {
+	parts := []string{"[联系人]"}
+	if contact == nil {
+		return strings.Join(parts, " ")
+	}
+	name := strings.TrimSpace(contact.FirstName + " " + contact.LastName)
+	if name != "" {
+		parts = append(parts, "name="+name)
+	}
+	if value := strings.TrimSpace(contact.PhoneNumber); value != "" {
+		parts = append(parts, "phone="+value)
+	}
+	if value := contactTelegramIdentity(contact); value != "" {
+		parts = append(parts, "telegram_user="+value)
+	}
+	return strings.Join(parts, " ")
+}
+
+func pollReviewText(poll *tele.Poll) string {
+	parts := []string{"[投票]"}
+	if poll == nil {
+		return strings.Join(parts, " ")
+	}
+	if value := strings.TrimSpace(poll.Question); value != "" {
+		parts = append(parts, "question="+value)
+	}
+	for idx, option := range poll.Options {
+		if value := strings.TrimSpace(option.Text); value != "" {
+			parts = append(parts, fmt.Sprintf("option%d=%s", idx+1, value))
+		}
+	}
+	if value := strings.TrimSpace(poll.Explanation); value != "" {
+		parts = append(parts, "explanation="+value)
+	}
+	return strings.Join(parts, " ")
+}
+
+func diceReviewText(dice *tele.Dice) string {
+	if dice == nil {
+		return "[骰子]"
+	}
+	return fmt.Sprintf("[骰子] emoji=%s value=%d", dice.Type, dice.Value)
+}
+
+func locationReviewText(location *tele.Location) string {
+	if location == nil {
+		return "[位置]"
+	}
+	return fmt.Sprintf("[位置] lat=%.6g lng=%.6g", location.Lat, location.Lng)
+}
+
+func venueReviewText(venue *tele.Venue) string {
+	parts := []string{"[地点]"}
+	if venue == nil {
+		return strings.Join(parts, " ")
+	}
+	if value := strings.TrimSpace(venue.Title); value != "" {
+		parts = append(parts, "title="+value)
+	}
+	if value := strings.TrimSpace(venue.Address); value != "" {
+		parts = append(parts, "address="+value)
+	}
+	parts = append(parts, fmt.Sprintf("lat=%.6g lng=%.6g", venue.Location.Lat, venue.Location.Lng))
+	return strings.Join(parts, " ")
+}
+
+func gameReviewText(game *tele.Game) string {
+	parts := []string{"[游戏]"}
+	if game == nil {
+		return strings.Join(parts, " ")
+	}
+	if value := strings.TrimSpace(game.Title); value != "" {
+		parts = append(parts, "title="+value)
+	}
+	if value := strings.TrimSpace(game.Description); value != "" {
+		parts = append(parts, "description="+value)
+	}
+	return strings.Join(parts, " ")
+}
+
+func invoiceReviewText(invoice *tele.Invoice) string {
+	parts := []string{"[Invoice]"}
+	if invoice == nil {
+		return strings.Join(parts, " ")
+	}
+	if value := strings.TrimSpace(invoice.Title); value != "" {
+		parts = append(parts, "title="+value)
+	}
+	if value := strings.TrimSpace(invoice.Description); value != "" {
+		parts = append(parts, "description="+value)
+	}
+	if invoice.Total != 0 {
+		parts = append(parts, fmt.Sprintf("total=%d", invoice.Total))
+	}
+	if value := strings.TrimSpace(invoice.Currency); value != "" {
+		parts = append(parts, "currency="+value)
+	}
+	return strings.Join(parts, " ")
 }
 
 func quotedMessageSource(msg *tele.Message) string {
