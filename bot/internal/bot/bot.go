@@ -2084,8 +2084,15 @@ func (s *Service) handleSpamCommand(c tele.Context) error {
 		_ = s.deleteDelayedMessage(&tele.Message{ID: msg.ID, Chat: chat})
 	})
 
-	// 3. Ban user
-	if err := s.bot.Ban(chat, &tele.ChatMember{User: &tele.User{ID: target.UserID}}); err != nil {
+	targetUser := &tele.User{
+		ID:        target.UserID,
+		Username:  target.Username,
+		FirstName: target.Display,
+	}
+
+	// 3. Ban user. Bots cannot file an official Telegram spam report; revoke_messages
+	// is the available Bot API mechanism for removing the target user's chat history.
+	if err := s.banUser(chat, targetUser); err != nil {
 		return c.Send("封禁失败: "+htmlEscape(err.Error()), &tele.SendOptions{ParseMode: tele.ModeHTML})
 	}
 
@@ -2122,27 +2129,27 @@ func (s *Service) handleSpamCommand(c tele.Context) error {
 		Diff:    &diff,
 	})
 
-	// 5. Send ban feedback if configured
+	// 5. Send exactly one user-visible result: configured ban feedback, or a fallback confirmation.
 	policy, _ := config.LoadPolicy(ctx, s.queries, chat.ID)
+	sentFeedback := false
 	if policy.Feedback.Ban.Enabled {
-		targetUser := &tele.User{
-			ID:        target.UserID,
-			Username:  target.Username,
-			FirstName: target.Display,
-		}
 		s.sendActionFeedback(chat, nil, policy.Feedback.Ban, map[string]string{
 			"user":         feedbackUserLabel(targetUser, policy.Feedback.Ban.ParseMode),
 			"user_mention": feedbackUserMention(targetUser, policy.Feedback.Ban.ParseMode),
 			"reason":       "spam",
 		})
+		if strings.TrimSpace(policy.Feedback.Ban.Template) != "" {
+			sentFeedback = true
+		}
 	}
 
-	// 9. Send confirmation then auto-delete after 5s
-	confirm, _ := s.sendThrottled(ctx, chat, "\U0001f6a8 已将 "+htmlEscape(target.Display)+" 封禁", &tele.SendOptions{ParseMode: tele.ModeHTML})
-	if confirm != nil {
-		s.runDelayed(5*time.Second, func() {
-			_ = s.deleteDelayedMessage(&tele.Message{ID: confirm.ID, Chat: chat})
-		})
+	if !sentFeedback {
+		confirm, _ := s.sendThrottled(ctx, chat, "\U0001f6a8 已将 "+htmlEscape(target.Display)+" 封禁", &tele.SendOptions{ParseMode: tele.ModeHTML})
+		if confirm != nil {
+			s.runDelayed(5*time.Second, func() {
+				_ = s.deleteDelayedMessage(&tele.Message{ID: confirm.ID, Chat: chat})
+			})
+		}
 	}
 
 	return nil

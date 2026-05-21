@@ -2136,7 +2136,7 @@ func (s *Service) IncrWarning(ctx context.Context, chat *tele.Chat, user *tele.U
 		return count, false, nil
 	}
 
-	if err := s.escalateWarnings(ctx, chat, user, policy, userActionLocked); err != nil {
+	if err := s.escalateWarnings(ctx, chat, user, policy, userActionLocked, !userActionLocked); err != nil {
 		return count, false, err
 	}
 
@@ -2151,7 +2151,7 @@ func (s *Service) IncrWarning(ctx context.Context, chat *tele.Chat, user *tele.U
 	return count, true, nil
 }
 
-func (s *Service) escalateWarnings(ctx context.Context, chat *tele.Chat, user *tele.User, policy config.GuardPolicy, userActionLocked bool) error {
+func (s *Service) escalateWarnings(ctx context.Context, chat *tele.Chat, user *tele.User, policy config.GuardPolicy, userActionLocked bool, sendEscalationFeedback bool) error {
 	if !userActionLocked {
 		actionRelease, actionOK := s.acquireUserActionLock(chat.ID, user.ID)
 		if !actionOK {
@@ -2191,27 +2191,29 @@ func (s *Service) escalateWarnings(ctx context.Context, chat *tele.Chat, user *t
 		return fmt.Errorf("unknown warnings escalate action %q", action)
 	}
 
-	// 升级动作反馈
-	vars := map[string]string{
-		"user":         feedbackUserLabel(user, policy.Feedback.Mute.ParseMode),
-		"user_mention": feedbackUserMention(user, policy.Feedback.Mute.ParseMode),
-		"reason":       "达到警告上限",
-	}
-	switch action {
-	case "mute", "mute_1h":
-		vars["duration"] = "1小时"
-		s.sendActionFeedback(chat, nil, policy.Feedback.Mute, vars)
-	case "mute_5m":
-		vars["duration"] = "5分钟"
-		s.sendActionFeedback(chat, nil, policy.Feedback.Mute, vars)
-	case "kick":
-		vars["user"] = feedbackUserLabel(user, policy.Feedback.Kick.ParseMode)
-		vars["user_mention"] = feedbackUserMention(user, policy.Feedback.Kick.ParseMode)
-		s.sendActionFeedback(chat, nil, policy.Feedback.Kick, vars)
-	case "ban":
-		vars["user"] = feedbackUserLabel(user, policy.Feedback.Ban.ParseMode)
-		vars["user_mention"] = feedbackUserMention(user, policy.Feedback.Ban.ParseMode)
-		s.sendActionFeedback(chat, nil, policy.Feedback.Ban, vars)
+	if sendEscalationFeedback {
+		// 升级动作反馈
+		vars := map[string]string{
+			"user":         feedbackUserLabel(user, policy.Feedback.Mute.ParseMode),
+			"user_mention": feedbackUserMention(user, policy.Feedback.Mute.ParseMode),
+			"reason":       "达到警告上限",
+		}
+		switch action {
+		case "mute", "mute_1h":
+			vars["duration"] = "1小时"
+			s.sendActionFeedback(chat, nil, policy.Feedback.Mute, vars)
+		case "mute_5m":
+			vars["duration"] = "5分钟"
+			s.sendActionFeedback(chat, nil, policy.Feedback.Mute, vars)
+		case "kick":
+			vars["user"] = feedbackUserLabel(user, policy.Feedback.Kick.ParseMode)
+			vars["user_mention"] = feedbackUserMention(user, policy.Feedback.Kick.ParseMode)
+			s.sendActionFeedback(chat, nil, policy.Feedback.Kick, vars)
+		case "ban":
+			vars["user"] = feedbackUserLabel(user, policy.Feedback.Ban.ParseMode)
+			vars["user_mention"] = feedbackUserMention(user, policy.Feedback.Ban.ParseMode)
+			s.sendActionFeedback(chat, nil, policy.Feedback.Ban, vars)
+		}
 	}
 
 	payload, _ := json.Marshal(map[string]any{
@@ -2335,7 +2337,9 @@ func (s *Service) banUser(chat *tele.Chat, user *tele.User) error {
 	} else if err != nil {
 		s.logger.Warn("load system state failed before ban", zap.Error(err))
 	}
-	if err := s.bot.Ban(chat, &tele.ChatMember{User: user}); err != nil {
+	// Telegram Bot API does not expose an official "report spam" method to bots.
+	// We can only ban and ask Telegram to revoke the user's recent chat messages.
+	if err := s.bot.Ban(chat, &tele.ChatMember{User: user}, true); err != nil {
 		return normalizeTelegramActionError("ban", err)
 	}
 	return nil
