@@ -201,6 +201,13 @@ is_skipped_owner_role() {
   esac
 }
 
+is_safe_owner_role() {
+  local role="$1"
+  local role_re='^[[:alnum:]_][[:alnum:]_.$@+.-]{0,127}$'
+
+  [[ "${role}" =~ ${role_re} ]]
+}
+
 precreate_plain_sql_owner_roles() {
   local backup="$1"
   local raw_role
@@ -229,7 +236,7 @@ precreate_plain_sql_owner_roles() {
       continue
     fi
 
-    if [[ ! "${role}" =~ ^[[:alnum:]_][[:alnum:]_.$@+.-]{0,127}$ ]]; then
+    if ! is_safe_owner_role "${role}"; then
       skipped+=("${role}")
       continue
     fi
