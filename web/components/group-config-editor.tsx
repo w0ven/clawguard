@@ -305,6 +305,14 @@ export const fieldDescriptors: FieldDescriptor[] = [
   },
   {
     tab: "filter",
+    path: ["filter", "ban_bot_inviter_on_violation"],
+    label: "Bot 违规时封禁邀请人",
+    description:
+      "Bot 允许入群并进入未毕业观察；仅当该 Bot 后续违规触发处罚且能识别明确邀请人时，才封禁邀请人并群内播报。",
+    kind: "switch",
+  },
+  {
+    tab: "filter",
     path: ["filter", "usernames", "enabled"],
     label: "用户名黑名单",
     description: "",

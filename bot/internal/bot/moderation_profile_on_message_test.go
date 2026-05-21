@@ -970,10 +970,12 @@ func assignScanValue(dest any, value any) error {
 }
 
 type telegramMockTransport struct {
-	mu      sync.Mutex
-	bio     string
-	methods []string
-	bodies  []string
+	mu              sync.Mutex
+	bio             string
+	failBanUserID   int64
+	failBanUserBody string
+	methods         []string
+	bodies          []string
 }
 
 func newMockTelegramBot(t *testing.T, bio string) (*tele.Bot, *telegramMockTransport) {
@@ -1007,7 +1009,20 @@ func (t *telegramMockTransport) RoundTrip(req *http.Request) (*http.Response, er
 	if requestBody != "" {
 		t.bodies = append(t.bodies, requestBody)
 	}
+	failBan := method == "kickChatMember" && t.failBanUserID != 0 && strings.Contains(requestBody, fmt.Sprintf(`"user_id":"%d"`, t.failBanUserID))
+	failBody := t.failBanUserBody
 	t.mu.Unlock()
+
+	if failBan {
+		if failBody == "" {
+			failBody = `{"ok":false,"description":"mock ban failed"}`
+		}
+		return &http.Response{
+			StatusCode: http.StatusBadRequest,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(failBody)),
+		}, nil
+	}
 
 	body := `{"ok":true,"result":true}`
 	switch method {

@@ -103,14 +103,15 @@ func (w WelcomeMessageConfig) MarshalJSON() ([]byte, error) {
 }
 
 type FilterConfig struct {
-	Keywords        FilterKeywordPolicy  `json:"keywords"`
-	Regex           FilterRegexPolicy    `json:"regex"`
-	Links           FilterLinksPolicy    `json:"links"`
-	Usernames       FilterUsernamePolicy `json:"usernames"`
-	NewUser         FilterNewUserPolicy  `json:"new_user"`
-	NonTextMessages string               `json:"non_text_messages"`
-	OtherBotsAction string               `json:"other_bots_action"` // "audit" | "kick" | "ban" | "off"
-	BotWhitelist    []string             `json:"bot_whitelist"`     // username (without @)
+	Keywords                 FilterKeywordPolicy  `json:"keywords"`
+	Regex                    FilterRegexPolicy    `json:"regex"`
+	Links                    FilterLinksPolicy    `json:"links"`
+	Usernames                FilterUsernamePolicy `json:"usernames"`
+	NewUser                  FilterNewUserPolicy  `json:"new_user"`
+	NonTextMessages          string               `json:"non_text_messages"`
+	OtherBotsAction          string               `json:"other_bots_action"` // "audit" | "kick" | "ban" | "off"
+	BotWhitelist             []string             `json:"bot_whitelist"`     // username (without @)
+	BanBotInviterOnViolation bool                 `json:"ban_bot_inviter_on_violation"`
 }
 
 type FilterKeywordPolicy struct {
@@ -282,9 +283,10 @@ var DefaultPolicy = GuardPolicy{
 			NoForwards:           true,
 			MaxMessagesPerMinute: 5,
 		},
-		NonTextMessages: "ai_review",
-		OtherBotsAction: "audit",
-		BotWhitelist:    []string{},
+		NonTextMessages:          "ai_review",
+		OtherBotsAction:          "audit",
+		BotWhitelist:             []string{},
+		BanBotInviterOnViolation: false,
 	},
 	Messages: MessagesPolicy{
 		KeywordReplies: []KeywordReplyRule{},

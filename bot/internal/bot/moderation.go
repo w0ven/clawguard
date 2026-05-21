@@ -724,6 +724,7 @@ func (s *Service) applyFilterAction(ctx context.Context, msg *tele.Message, poli
 	}
 
 	s.resetTrustAfterViolation(ctx, msg, actionForViolation, stringPtr(result.Reason))
+	s.maybeBanBotInviterAfterViolation(ctx, msg, policy, actionForViolation, result.Reason)
 
 	// 动作反馈（根据 action 派发到不同模板）
 	s.dispatchActionFeedback(msg, policy, actionForViolation, humanReason(result.Reason, matched), matched)
@@ -1899,7 +1900,157 @@ func (s *Service) applyAIAction(ctx context.Context, msg *tele.Message, policy c
 	}
 
 	s.resetTrustAfterViolation(ctx, msg, action, stringPtr(output.Verdict.Reason))
+	s.maybeBanBotInviterAfterViolation(ctx, msg, policy, action, output.Verdict.Reason)
 	return nil
+}
+
+func (s *Service) maybeBanBotInviterAfterViolation(ctx context.Context, msg *tele.Message, policy config.GuardPolicy, action string, reason string) {
+	if msg == nil || msg.Chat == nil || msg.Sender == nil || !isOtherBot(msg.Sender, s.bot) {
+		return
+	}
+	if !policy.Filter.BanBotInviterOnViolation {
+		return
+	}
+	normalized := normalizeBotInviterPenaltyAction(action)
+	if normalized == "" {
+		return
+	}
+
+	outcome := "skipped"
+	auditReason := reason
+	inviter, trust, err := s.botInviterFromTrust(ctx, msg.Chat.ID, msg.Sender.ID)
+	if err != nil {
+		outcome = "failed"
+		auditReason = err.Error()
+		s.logger.Warn("load bot inviter failed", zap.Error(err), zap.Int64("chat_id", msg.Chat.ID), zap.Int64("bot_user_id", msg.Sender.ID))
+		s.writeBotInviterAudit(ctx, msg, nil, action, outcome, auditReason)
+		return
+	}
+	if trust != nil && !trust.IsBot {
+		outcome = "skipped"
+		auditReason = "target is not tracked as bot"
+		s.writeBotInviterAudit(ctx, msg, nil, action, outcome, auditReason)
+		return
+	}
+	if inviter == nil || !s.validBotInviter(inviter, msg.Sender) {
+		if auditReason == "" {
+			auditReason = "missing valid inviter"
+		}
+		s.writeBotInviterAudit(ctx, msg, inviter, action, outcome, auditReason)
+		return
+	}
+
+	if err := s.banUser(msg.Chat, inviter); err != nil {
+		outcome = "failed"
+		auditReason = err.Error()
+		s.logger.Warn("ban bot inviter failed", zap.Error(err), zap.Int64("chat_id", msg.Chat.ID), zap.Int64("bot_user_id", msg.Sender.ID), zap.Int64("inviter_user_id", inviter.ID))
+		s.writeBotInviterAudit(ctx, msg, inviter, action, outcome, auditReason)
+		return
+	}
+
+	outcome = "success"
+	if auditReason == "" {
+		auditReason = "邀请违规 Bot 连坐"
+	}
+	s.announceBotInviterBan(ctx, msg.Chat, inviter, msg.Sender)
+	s.writeBotInviterAudit(ctx, msg, inviter, action, outcome, auditReason)
+	_ = normalized
+}
+
+func normalizeBotInviterPenaltyAction(action string) string {
+	switch strings.TrimSpace(strings.ToLower(action)) {
+	case "ban", "delete_ban":
+		return "ban"
+	case "kick":
+		return "kick"
+	default:
+		return ""
+	}
+}
+
+func (s *Service) botInviterFromTrust(ctx context.Context, chatID int64, botUserID int64) (*tele.User, *store.UserTrust, error) {
+	trust, err := s.queries.GetUserTrust(ctx, chatID, botUserID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil, nil
+		}
+		return nil, nil, err
+	}
+	inviter := parseBotInviterFromNotes(trust.Notes)
+	return inviter, &trust, nil
+}
+
+func parseBotInviterFromNotes(notes *string) *tele.User {
+	if notes == nil || strings.TrimSpace(*notes) == "" {
+		return nil
+	}
+	var parsed botInviteTrustNotes
+	if err := json.Unmarshal([]byte(*notes), &parsed); err != nil || parsed.Inviter == nil || parsed.Inviter.UserID == 0 {
+		return nil
+	}
+	return &tele.User{
+		ID:        parsed.Inviter.UserID,
+		IsBot:     parsed.Inviter.IsBot,
+		Username:  parsed.Inviter.Username,
+		FirstName: parsed.Inviter.FirstName,
+		LastName:  parsed.Inviter.LastName,
+	}
+}
+
+func (s *Service) validBotInviter(inviter *tele.User, botUser *tele.User) bool {
+	if inviter == nil || botUser == nil {
+		return false
+	}
+	if inviter.IsBot || inviter.ID == botUser.ID {
+		return false
+	}
+	return s.bot == nil || s.bot.Me == nil || inviter.ID != s.bot.Me.ID
+}
+
+func (s *Service) announceBotInviterBan(ctx context.Context, chat *tele.Chat, inviter *tele.User, botUser *tele.User) {
+	if chat == nil || inviter == nil || botUser == nil {
+		return
+	}
+	text := fmt.Sprintf("🚫 %s 已被封禁，原因：邀请违规 Bot 连坐（违规 Bot：%s）", htmlEscape(userDisplayForOwner(inviter)), htmlEscape(userDisplayForOwner(botUser)))
+	if _, err := s.sendThrottled(ctx, chat, text, &tele.SendOptions{ParseMode: tele.ModeHTML}); err != nil {
+		s.logger.Warn("send bot inviter ban announcement failed", zap.Error(err), zap.Int64("chat_id", chat.ID), zap.Int64("inviter_user_id", inviter.ID), zap.Int64("bot_user_id", botUser.ID))
+	}
+}
+
+func (s *Service) writeBotInviterAudit(ctx context.Context, msg *tele.Message, inviter *tele.User, originalAction string, outcome string, reason string) {
+	if msg == nil || msg.Chat == nil || msg.Sender == nil {
+		return
+	}
+	chatID := msg.Chat.ID
+	before := map[string]any{
+		"source": "system:bot_inviter_liability",
+		"target": botInviterAuditUser(inviter),
+		"bot":    botInviterAuditUser(msg.Sender),
+	}
+	after := map[string]any{
+		"source":          "system:bot_inviter_liability",
+		"action":          "ban_bot_inviter",
+		"reason":          reason,
+		"message_id":      msg.ID,
+		"original_action": originalAction,
+		"outcome":         outcome,
+		"target":          botInviterAuditUser(inviter),
+		"bot":             botInviterAuditUser(msg.Sender),
+	}
+	s.WriteRuntimeAudit(ctx, "moderation", &chatID, "ban_bot_inviter", before, after)
+}
+
+func botInviterAuditUser(user *tele.User) map[string]any {
+	if user == nil {
+		return nil
+	}
+	return map[string]any{
+		"user_id":    user.ID,
+		"username":   user.Username,
+		"first_name": user.FirstName,
+		"last_name":  user.LastName,
+		"display":    displayName(user),
+	}
 }
 
 func (s *Service) writeModerationAudit(ctx context.Context, source string, chat *tele.Chat, target *tele.User, action string, reason string, extra map[string]any) {

@@ -488,6 +488,7 @@ func (s *Service) handleOtherBotJoined(update *tele.ChatMemberUpdate, user *tele
 		s.logger.Warn("load policy for other bot join failed", zap.Error(err), zap.Int64("chat_id", update.Chat.ID), zap.Int64("user_id", user.ID))
 		policy = config.DefaultPolicy
 	}
+	inviter := s.otherBotInviter(update, user)
 	if isBotWhitelisted(user, policy.Filter.BotWhitelist) {
 		_, err := s.upsertBotTrust(ctx, update.Chat, user, "trusted", 1, "whitelisted bot", nil)
 		return err
@@ -504,23 +505,72 @@ func (s *Service) handleOtherBotJoined(update *tele.ChatMemberUpdate, user *tele
 		if err := s.kickUser(update.Chat, user); err != nil {
 			return err
 		}
-		_, err := s.upsertBotTrust(ctx, update.Chat, user, "banned", 0, "auto-kicked: other bot", stringPtr("auto-kicked: other bot"))
+		_, err := s.upsertBotTrust(ctx, update.Chat, user, "banned", 0, botTrustNotes("auto-kicked: other bot", inviter), stringPtr("auto-kicked: other bot"))
 		s.notifyOwnersOtherBot(ctx, update.Chat, user, "kick", "非白名单 bot 已自动移出")
 		return err
 	case "ban":
 		if err := s.banUser(update.Chat, user); err != nil {
 			return err
 		}
-		_, err := s.upsertBotTrust(ctx, update.Chat, user, "banned", 0, "auto-banned: other bot", stringPtr("auto-banned: other bot"))
+		_, err := s.upsertBotTrust(ctx, update.Chat, user, "banned", 0, botTrustNotes("auto-banned: other bot", inviter), stringPtr("auto-banned: other bot"))
 		s.notifyOwnersOtherBot(ctx, update.Chat, user, "ban", "非白名单 bot 已自动封禁")
 		return err
 	case "audit":
 		fallthrough
 	default:
-		_, err := s.upsertBotTrust(ctx, update.Chat, user, "new", 0.5, "audit: other bot", nil)
+		_, err := s.upsertBotTrust(ctx, update.Chat, user, "new", 0.5, botTrustNotes("audit: other bot", inviter), nil)
 		s.notifyOwnersOtherBot(ctx, update.Chat, user, "audit", "非白名单 bot 已进入 AI 审核")
 		return err
 	}
+}
+
+func (s *Service) otherBotInviter(update *tele.ChatMemberUpdate, botUser *tele.User) *tele.User {
+	if update == nil || update.Sender == nil || botUser == nil {
+		return nil
+	}
+	inviter := update.Sender
+	if inviter.IsBot || inviter.ID == botUser.ID {
+		return nil
+	}
+	if s.bot != nil && s.bot.Me != nil && inviter.ID == s.bot.Me.ID {
+		return nil
+	}
+	return inviter
+}
+
+type botInviteTrustNotes struct {
+	Reason  string              `json:"reason"`
+	Inviter *botInviteTrustUser `json:"inviter,omitempty"`
+}
+
+type botInviteTrustUser struct {
+	UserID    int64  `json:"user_id"`
+	IsBot     bool   `json:"is_bot,omitempty"`
+	Username  string `json:"username,omitempty"`
+	FirstName string `json:"first_name,omitempty"`
+	LastName  string `json:"last_name,omitempty"`
+	Display   string `json:"display,omitempty"`
+}
+
+func botTrustNotes(reason string, inviter *tele.User) string {
+	if inviter == nil {
+		return reason
+	}
+	raw, err := json.Marshal(botInviteTrustNotes{
+		Reason: reason,
+		Inviter: &botInviteTrustUser{
+			UserID:    inviter.ID,
+			IsBot:     inviter.IsBot,
+			Username:  inviter.Username,
+			FirstName: inviter.FirstName,
+			LastName:  inviter.LastName,
+			Display:   displayName(inviter),
+		},
+	})
+	if err != nil {
+		return reason
+	}
+	return string(raw)
 }
 
 func (s *Service) upsertBotTrust(ctx context.Context, chat *tele.Chat, user *tele.User, status string, score float64, notes string, banReason *string) (store.UserTrust, error) {

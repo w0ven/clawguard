@@ -19,12 +19,13 @@ import (
 )
 
 type otherBotMockDB struct {
-	mu      sync.Mutex
-	now     time.Time
-	policy  config.GuardPolicy
-	trust   *store.UserTrust
-	audits  int
-	noTrust bool
+	mu       sync.Mutex
+	now      time.Time
+	policy   config.GuardPolicy
+	trust    *store.UserTrust
+	audits   int
+	auditLog []store.InsertAuditEntryParams
+	noTrust  bool
 }
 
 func newOtherBotMockDB(policy config.GuardPolicy) *otherBotMockDB {
@@ -56,6 +57,8 @@ func (db *otherBotMockDB) QueryRow(_ context.Context, query string, args ...any)
 		return mockScanRow(args[0].(int64), "group", db.now, (*int64)(nil), true, "")
 	case strings.Contains(query, "FROM admins"):
 		return mockErrorRow{err: pgx.ErrNoRows}
+	case strings.Contains(query, "FROM system_state"):
+		return mockScanRow(int32(1), false, false, false, (*string)(nil), db.now, (*int64)(nil))
 	case strings.Contains(query, "FROM user_trust"):
 		db.mu.Lock()
 		defer db.mu.Unlock()
@@ -113,6 +116,22 @@ func (db *otherBotMockDB) QueryRow(_ context.Context, query string, args ...any)
 		trust := *db.trust
 		db.mu.Unlock()
 		return scanTrustRow(trust)
+	case strings.Contains(query, "INSERT INTO config_audit"):
+		params := store.InsertAuditEntryParams{
+			Scope:   args[0].(string),
+			ChatID:  args[1].(*int64),
+			AdminID: args[2].(int64),
+			Action:  args[3].(string),
+			Before:  args[4].([]byte),
+			After:   args[5].([]byte),
+			Diff:    args[6].(*string),
+		}
+		db.mu.Lock()
+		db.auditLog = append(db.auditLog, params)
+		db.audits++
+		db.mu.Unlock()
+		createdAt := db.now.Add(6 * time.Minute)
+		return mockScanRow(int64(len(db.auditLog)), params.Scope, params.ChatID, params.AdminID, params.Action, params.Before, params.After, params.Diff, createdAt)
 	default:
 		return mockErrorRow{err: fmt.Errorf("unexpected query: %s", query)}
 	}
@@ -150,6 +169,7 @@ func TestHandleOtherBotJoinedActions(t *testing.T) {
 			svc := &Service{logger: zap.NewNop(), queries: store.New(db), bot: botClient, sender: botClient, sendLimiter: NewSendLimiter()}
 			update := &tele.ChatMemberUpdate{
 				Chat:          &tele.Chat{ID: -1001, Title: "group", Type: tele.ChatSuperGroup},
+				Sender:        &tele.User{ID: 66, FirstName: "Alice"},
 				OldChatMember: &tele.ChatMember{User: &tele.User{ID: 77, IsBot: true, Username: "helperbot"}, Role: tele.Left},
 				NewChatMember: &tele.ChatMember{User: &tele.User{ID: 77, IsBot: true, Username: "helperbot"}, Role: tele.Member},
 			}
@@ -158,6 +178,15 @@ func TestHandleOtherBotJoinedActions(t *testing.T) {
 			}
 			if db.trust == nil || db.trust.Status != tt.wantStatus || !db.trust.IsBot {
 				t.Fatalf("trust = %+v, want status=%s is_bot=true", db.trust, tt.wantStatus)
+			}
+			if tt.name == "audit" {
+				inviter := parseBotInviterFromNotes(db.trust.Notes)
+				if inviter == nil || inviter.ID != 66 {
+					t.Fatalf("inviter notes = %v, want user 66", db.trust.Notes)
+				}
+			}
+			if tt.name == "whitelist" && parseBotInviterFromNotes(db.trust.Notes) != nil {
+				t.Fatalf("whitelisted bot should not record inviter for liability, notes=%v", db.trust.Notes)
 			}
 			methods := transport.Methods()
 			for _, want := range tt.wantMethods {
@@ -183,6 +212,148 @@ func TestEnsureUserTrustCreatesUnknownBotAsNew(t *testing.T) {
 	}
 	if trust.Status != "new" || !trust.IsBot {
 		t.Fatalf("trust = %+v, want new bot", trust)
+	}
+}
+
+func TestMaybeBanBotInviterAfterViolationBansAndAnnounces(t *testing.T) {
+	policy := config.DefaultPolicy
+	policy.Filter.BanBotInviterOnViolation = true
+	db := newOtherBotMockDB(policy)
+	db.trust = &store.UserTrust{
+		ChatID:          -1001,
+		UserID:          77,
+		Username:        stringPtr("badbot"),
+		JoinedAt:        db.now,
+		UpdatedAt:       db.now,
+		StatusChangedAt: db.now,
+		Status:          "new",
+		Score:           0.5,
+		Notes:           stringPtr(botTrustNotes("audit: other bot", &tele.User{ID: 66, FirstName: "Alice"})),
+		IsBot:           true,
+	}
+	botClient, transport := newMockTelegramBot(t, "")
+	svc := &Service{logger: zap.NewNop(), queries: store.New(db), bot: botClient, sender: botClient, sendLimiter: NewSendLimiter()}
+	msg := &tele.Message{ID: 123, Chat: &tele.Chat{ID: -1001, Title: "group", Type: tele.ChatSuperGroup}, Sender: &tele.User{ID: 77, IsBot: true, Username: "badbot"}}
+
+	svc.maybeBanBotInviterAfterViolation(context.Background(), msg, policy, "ban", "spam")
+
+	methods := transport.Methods()
+	if got := countString(methods, "kickChatMember"); got != 1 {
+		t.Fatalf("kickChatMember calls = %d, want 1; methods=%v", got, methods)
+	}
+	if !containsString(methods, "sendMessage") {
+		t.Fatalf("methods = %v, want sendMessage announcement", methods)
+	}
+	bodies := strings.Join(transport.RequestBodies(), "\n")
+	if !strings.Contains(bodies, "邀请违规 Bot") {
+		t.Fatalf("announcement bodies missing reason: %s", bodies)
+	}
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	found := false
+	for _, entry := range db.auditLog {
+		if entry.Action == "ban_bot_inviter" && strings.Contains(string(entry.After), `"outcome":"success"`) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("audit log = %+v, want successful ban_bot_inviter", db.auditLog)
+	}
+}
+
+func TestMaybeBanBotInviterAfterViolationSkippedInvalidInviter(t *testing.T) {
+	tests := []struct {
+		name    string
+		inviter *tele.User
+	}{
+		{name: "missing"},
+		{name: "bot", inviter: &tele.User{ID: 66, IsBot: true, Username: "otherbot"}},
+		{name: "same as bot", inviter: &tele.User{ID: 77, FirstName: "badbot"}},
+		{name: "self bot", inviter: &tele.User{ID: 999, FirstName: "ClawGuard"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			policy := config.DefaultPolicy
+			policy.Filter.BanBotInviterOnViolation = true
+			db := newOtherBotMockDB(policy)
+			notes := "audit: other bot"
+			if tt.inviter != nil {
+				notes = botTrustNotes("audit: other bot", tt.inviter)
+			}
+			db.trust = &store.UserTrust{
+				ChatID:          -1001,
+				UserID:          77,
+				JoinedAt:        db.now,
+				UpdatedAt:       db.now,
+				StatusChangedAt: db.now,
+				Status:          "new",
+				Score:           0.5,
+				Notes:           stringPtr(notes),
+				IsBot:           true,
+			}
+			botClient, transport := newMockTelegramBot(t, "")
+			svc := &Service{logger: zap.NewNop(), queries: store.New(db), bot: botClient, sender: botClient, sendLimiter: NewSendLimiter()}
+			msg := &tele.Message{ID: 123, Chat: &tele.Chat{ID: -1001, Title: "group", Type: tele.ChatSuperGroup}, Sender: &tele.User{ID: 77, IsBot: true, Username: "badbot"}}
+
+			svc.maybeBanBotInviterAfterViolation(context.Background(), msg, policy, "ban", "spam")
+
+			if got := countString(transport.Methods(), "kickChatMember"); got != 0 {
+				t.Fatalf("kickChatMember calls = %d, want 0; methods=%v", got, transport.Methods())
+			}
+			db.mu.Lock()
+			defer db.mu.Unlock()
+			foundSkipped := false
+			for _, entry := range db.auditLog {
+				if entry.Action == "ban_bot_inviter" && strings.Contains(string(entry.After), `"outcome":"skipped"`) {
+					foundSkipped = true
+				}
+			}
+			if !foundSkipped {
+				t.Fatalf("audit log = %+v, want skipped ban_bot_inviter", db.auditLog)
+			}
+		})
+	}
+}
+
+func TestMaybeBanBotInviterAfterViolationBanFailureAuditsFailed(t *testing.T) {
+	policy := config.DefaultPolicy
+	policy.Filter.BanBotInviterOnViolation = true
+	db := newOtherBotMockDB(policy)
+	db.trust = &store.UserTrust{
+		ChatID:          -1001,
+		UserID:          77,
+		JoinedAt:        db.now,
+		UpdatedAt:       db.now,
+		StatusChangedAt: db.now,
+		Status:          "new",
+		Score:           0.5,
+		Notes:           stringPtr(botTrustNotes("audit: other bot", &tele.User{ID: 66, FirstName: "Alice"})),
+		IsBot:           true,
+	}
+	botClient, transport := newMockTelegramBot(t, "")
+	transport.failBanUserID = 66
+	svc := &Service{logger: zap.NewNop(), queries: store.New(db), bot: botClient, sender: botClient, sendLimiter: NewSendLimiter()}
+	msg := &tele.Message{ID: 123, Chat: &tele.Chat{ID: -1001, Title: "group", Type: tele.ChatSuperGroup}, Sender: &tele.User{ID: 77, IsBot: true, Username: "badbot"}}
+
+	svc.maybeBanBotInviterAfterViolation(context.Background(), msg, policy, "ban", "spam")
+
+	methods := transport.Methods()
+	if got := countString(methods, "kickChatMember"); got != 1 {
+		t.Fatalf("kickChatMember calls = %d, want 1; methods=%v", got, methods)
+	}
+	if containsString(methods, "sendMessage") {
+		t.Fatalf("methods = %v, did not expect announcement on failed inviter ban", methods)
+	}
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	foundFailed := false
+	for _, entry := range db.auditLog {
+		if entry.Action == "ban_bot_inviter" && strings.Contains(string(entry.After), `"outcome":"failed"`) {
+			foundFailed = true
+		}
+	}
+	if !foundFailed {
+		t.Fatalf("audit log = %+v, want failed ban_bot_inviter", db.auditLog)
 	}
 }
 
