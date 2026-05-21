@@ -558,13 +558,25 @@ func (s *Service) notifyOwnersOtherBot(ctx context.Context, chat *tele.Chat, use
 		return
 	}
 	chatID := chat.ID
-	s.WriteRuntimeAudit(ctx, "other_bot", &chatID, action, map[string]any{
-		"chat_id": chat.ID,
-		"title":   chat.Title,
+	s.WriteRuntimeAudit(ctx, "other_bot", &chatID, "other_bot_"+action, map[string]any{
+		"source": "system:other_bot_join",
+		"chat": map[string]any{
+			"id":    chat.ID,
+			"title": chat.Title,
+			"type":  chat.Type,
+		},
+		"target": map[string]any{
+			"user_id":    user.ID,
+			"username":   user.Username,
+			"first_name": user.FirstName,
+			"last_name":  user.LastName,
+			"display":    displayName(user),
+		},
 	}, map[string]any{
-		"user_id":  user.ID,
-		"username": user.Username,
-		"action":   action,
+		"source":  "system:other_bot_join",
+		"action":  action,
+		"reason":  message,
+		"outcome": "success",
 	})
 	text := fmt.Sprintf("⚠️ %s：%s（%d）", htmlEscape(message), htmlEscape(userDisplayForOwner(user)), user.ID)
 	s.sendBotPermissionWarningToOwners(ctx, chat, text)
@@ -2003,6 +2015,12 @@ func (s *Service) handleWarnCommand(c tele.Context) error {
 		})
 	}
 
+	s.writeCommandModerationAudit(context.Background(), "warn", c.Sender(), chat, &tele.User{
+		ID:        target.UserID,
+		Username:  target.Username,
+		FirstName: target.Display,
+	}, "warn", reason, target.MessageID, msg.ID, "success", "")
+
 	return c.Send(text, &tele.SendOptions{ParseMode: tele.ModeHTML})
 }
 
@@ -2019,6 +2037,7 @@ func (s *Service) handleUnbanCommand(c tele.Context) error {
 
 	warnings := make([]string, 0, 2)
 	if warning, err := s.SafeUnbanChatUser(context.Background(), chat.ID, target.UserID); err != nil {
+		s.writeCommandModerationAudit(context.Background(), "unban", c.Sender(), chat, &tele.User{ID: target.UserID, Username: target.Username, FirstName: target.Display}, "unban", "manual_unban", target.MessageID, msg.ID, "failed", err.Error())
 		return c.Send("解封失败: "+htmlEscape(err.Error()), &tele.SendOptions{ParseMode: tele.ModeHTML})
 	} else if strings.TrimSpace(warning) != "" {
 		warnings = append(warnings, warning)
@@ -2058,6 +2077,12 @@ func (s *Service) handleUnbanCommand(c tele.Context) error {
 	if len(warnings) > 0 {
 		text += "\n安全提示：" + htmlEscape(strings.Join(warnings, "；"))
 	}
+	s.writeCommandModerationAudit(context.Background(), "unban", c.Sender(), chat, &tele.User{
+		ID:        target.UserID,
+		Username:  target.Username,
+		FirstName: target.Display,
+	}, "unban", "manual_unban", target.MessageID, msg.ID, "success", "")
+
 	return c.Send(text, &tele.SendOptions{ParseMode: tele.ModeHTML})
 }
 
@@ -2093,6 +2118,7 @@ func (s *Service) handleSpamCommand(c tele.Context) error {
 	// 3. Ban user. Bots cannot file an official Telegram spam report; revoke_messages
 	// is the available Bot API mechanism for removing the target user's chat history.
 	if err := s.banUser(chat, targetUser); err != nil {
+		s.writeCommandModerationAudit(ctx, "spam", c.Sender(), chat, targetUser, "ban", "spam", target.MessageID, msg.ID, "failed", err.Error())
 		return c.Send("封禁失败: "+htmlEscape(err.Error()), &tele.SendOptions{ParseMode: tele.ModeHTML})
 	}
 
@@ -2118,16 +2144,7 @@ func (s *Service) handleSpamCommand(c tele.Context) error {
 	})
 
 	// 4. Audit log
-	diff := "manual_ban"
-	_, _ = s.queries.InsertAuditEntry(ctx, store.InsertAuditEntryParams{
-		Scope:   "moderation",
-		ChatID:  &chat.ID,
-		AdminID: c.Sender().ID,
-		Action:  "manual_ban",
-		Before:  mustJSONBytes(map[string]any{"user_id": target.UserID}),
-		After:   mustJSONBytes(map[string]any{"user_id": target.UserID, "banned": true, "reason": "spam"}),
-		Diff:    &diff,
-	})
+	s.writeCommandModerationAudit(ctx, "spam", c.Sender(), chat, targetUser, "ban", "spam", target.MessageID, msg.ID, "success", "")
 
 	// 5. Send exactly one user-visible result: configured ban feedback, or a fallback confirmation.
 	policy, _ := config.LoadPolicy(ctx, s.queries, chat.ID)
@@ -2153,6 +2170,52 @@ func (s *Service) handleSpamCommand(c tele.Context) error {
 	}
 
 	return nil
+}
+
+func (s *Service) writeCommandModerationAudit(ctx context.Context, command string, operator *tele.User, chat *tele.Chat, target *tele.User, action string, reason string, referencedMessageID int, commandMessageID int, outcome string, errText string) {
+	if chat == nil || target == nil {
+		return
+	}
+	chatID := chat.ID
+	adminID := int64(0)
+	operatorPayload := map[string]any{}
+	if operator != nil {
+		adminID = operator.ID
+		operatorPayload = map[string]any{
+			"user_id":    operator.ID,
+			"username":   operator.Username,
+			"first_name": operator.FirstName,
+			"last_name":  operator.LastName,
+			"display":    displayName(operator),
+		}
+	}
+	before := map[string]any{
+		"source":   "command:" + command,
+		"operator": operatorPayload,
+		"chat": map[string]any{
+			"id":       chat.ID,
+			"title":    chat.Title,
+			"username": chat.Username,
+			"type":     chat.Type,
+		},
+		"target": map[string]any{
+			"user_id":    target.ID,
+			"username":   target.Username,
+			"first_name": target.FirstName,
+			"last_name":  target.LastName,
+			"display":    displayName(target),
+		},
+	}
+	after := map[string]any{
+		"source":                "command:" + command,
+		"action":                action,
+		"reason":                reason,
+		"message_id":            commandMessageID,
+		"referenced_message_id": referencedMessageID,
+		"outcome":               outcome,
+		"error":                 errText,
+	}
+	s.WriteRuntimeAuditWithAdmin(ctx, "moderation", &chatID, adminID, "command_"+command+"_"+action, before, after)
 }
 
 type commandTarget struct {
