@@ -184,6 +184,9 @@ func extractTmeURLs(msg *tele.Message) []string {
 			add(entity.URL)
 		}
 	}
+	if msg.PreviewOptions != nil {
+		add(msg.PreviewOptions.URL)
+	}
 
 	return urls
 }

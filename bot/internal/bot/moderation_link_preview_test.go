@@ -61,6 +61,69 @@ func TestBuildReviewableContent_LinkPreviewFetched(t *testing.T) {
 	}
 }
 
+func TestBuildReviewableContent_LinkPreviewOptionsURLForwardFetched(t *testing.T) {
+	msg := &tele.Message{
+		Text:           "💍",
+		OriginalSender: &tele.User{FirstName: "Dexter"},
+		PreviewOptions: &tele.PreviewOptions{
+			URL: "https://t.me/Svcby/129",
+		},
+	}
+
+	var calls int
+	rv := buildReviewableContentWithOptions(context.Background(), msg, nil, func(_ context.Context, rawURL string, _ *redis.Client, userID int64) (*LinkPreview, error) {
+		calls++
+		if userID != 0 {
+			t.Fatalf("userID = %d, want 0", userID)
+		}
+		if rawURL != "https://t.me/Svcby/129" {
+			t.Fatalf("rawURL = %q", rawURL)
+		}
+		return &LinkPreview{
+			URL:         rawURL,
+			Title:       "预览标题",
+			Description: "预览描述",
+			Source:      "t.me/Svcby/129",
+		}, nil
+	})
+
+	if calls != 1 {
+		t.Fatalf("fetch calls = %d, want 1", calls)
+	}
+	if rv.Skip {
+		t.Fatalf("Skip 不应该为 true")
+	}
+	if !strings.Contains(rv.Text, "【链接预览 t.me/Svcby/129】") {
+		t.Fatalf("Text 缺少链接预览标记: %q", rv.Text)
+	}
+	if !strings.Contains(rv.Text, "标题: 预览标题") {
+		t.Fatalf("Text 缺少标题: %q", rv.Text)
+	}
+	if !strings.Contains(rv.Text, "【本次消息】[转发自: Dexter] 💍") {
+		t.Fatalf("Text 缺少转发正文: %q", rv.Text)
+	}
+}
+
+func TestExtractTmeURLs_DeduplicatesTextAndPreviewOptionsURL(t *testing.T) {
+	msg := &tele.Message{
+		Text: "粉 https://t.me/dupe/1",
+		Entities: tele.Entities{
+			{Type: tele.EntityURL, Offset: 2, Length: len("https://t.me/dupe/1")},
+		},
+		PreviewOptions: &tele.PreviewOptions{
+			URL: "https://t.me/dupe/1",
+		},
+	}
+
+	urls := extractTmeURLs(msg)
+	if len(urls) != 1 {
+		t.Fatalf("len(urls) = %d, want 1 (%v)", len(urls), urls)
+	}
+	if urls[0] != "https://t.me/dupe/1" {
+		t.Fatalf("urls[0] = %q", urls[0])
+	}
+}
+
 func TestBuildReviewableContent_LinkPreviewTimeoutFallback(t *testing.T) {
 	msg := &tele.Message{
 		Text: "粉 https://t.me/da91wang/9",
