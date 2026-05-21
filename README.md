@@ -214,6 +214,29 @@ bash scripts/prod-smoke.sh --since 5m --url https://rfcguard.misaka.si --compose
 
 脚本不会读取生产 secret，也不会向 Telegram 发送消息；只使用 `docker compose`、`docker inspect`、bot 容器日志和公开 URL 的 HTTP 响应。默认参数为 `--since 5m`、`--url https://rfcguard.misaka.si`、`--compose docker-compose.yml`，默认应用目录为 `/root/clawguard`，如需在其他目录调试可设置 `APP_DIR=/path/to/clawguard`。
 
+### 备份恢复演练
+
+需要验证数据库备份时，使用恢复演练脚本把备份恢复到临时 PostgreSQL 容器，再做表行数与 migration 校验：
+
+```bash
+cd /root/clawguard
+bash scripts/restore-rehearsal.sh
+```
+
+可显式指定备份文件：
+
+```bash
+BACKUP_PATH=/root/clawguard/backups/clawguard-20260420-050542.sql.gz bash scripts/restore-rehearsal.sh
+```
+
+脚本只会创建临时容器和临时数据库名，不会触碰生产 PostgreSQL；默认结束后自动清理，排查问题时可用 `KEEP=1` 保留现场。
+
+### 当前收尾原则
+
+- 现在只做**必要项**，不再按旧 P2/P3 backlog 自动扩展。
+- 优先保留的运维脚本：`scripts/prod-smoke.sh`、`scripts/restore-rehearsal.sh`。
+- 其他功能型优化（album 聚合、telebot 升级、贴纸转码、AI 事件表大统一、人工复核、shadow mode、Action dispatcher 重构）先暂停，除非后面真遇到生产问题。
+
 ### Cloudflare Tunnel 配置
 
 Tunnel 入口指向宿主机 `127.0.0.1:8090`：
