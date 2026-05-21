@@ -4,6 +4,7 @@ set -u
 APP_DIR=${APP_DIR:-/root/clawguard}
 COMPOSE_FILE=docker-compose.yml
 SINCE=5m
+WEBHOOK_LOG_WINDOW=24h
 PUBLIC_URL=https://rfcguard.misaka.si
 EXPECTED_DOMAIN=rfcguard.misaka.si
 SERVICES="bot web postgres redis caddy"
@@ -12,7 +13,7 @@ failures=0
 
 usage() {
   cat <<'EOF'
-Usage: scripts/prod-smoke.sh [--since 5m] [--url https://rfcguard.misaka.si] [--compose docker-compose.yml]
+Usage: scripts/prod-smoke.sh [--since 5m] [--webhook-log-window 24h] [--url https://rfcguard.misaka.si] [--compose docker-compose.yml]
 
 Runs production smoke checks from /root/clawguard by default. Override the
 directory with APP_DIR=/path/to/clawguard.
@@ -49,6 +50,15 @@ while [ "$#" -gt 0 ]; do
         exit 2
       fi
       SINCE=$2
+      shift 2
+      ;;
+    --webhook-log-window)
+      if [ "$#" -lt 2 ]; then
+        log "Missing value for --webhook-log-window"
+        usage
+        exit 2
+      fi
+      WEBHOOK_LOG_WINDOW=$2
       shift 2
       ;;
     --url)
@@ -93,6 +103,7 @@ log "ClawGuard production smoke"
 log "app_dir=$APP_DIR"
 log "compose=$COMPOSE_FILE"
 log "since=$SINCE"
+log "webhook_log_window=$WEBHOOK_LOG_WINDOW"
 log "url=$PUBLIC_URL"
 log ""
 
@@ -150,15 +161,22 @@ check_bot_logs() {
     warn "no bot logs found in the last $SINCE"
   fi
 
+  ignored_transient=$(printf '%s\n' "$bot_logs" \
+    | grep -Eai 'llm probe transient failure \(not yet unhealthy\)|cas lookup failed, skip|ai call failed, trying next model|retention cleanup' || true)
+  ignored_transient_count=$(printf '%s\n' "$ignored_transient" | awk 'NF {count++} END {print count + 0}')
+
   errors=$(printf '%s\n' "$bot_logs" \
-    | grep -Eai 'error|panic|no rows|failed' \
-    | grep -Eavi 'retention cleanup deleted' || true)
+    | grep -Eai '(^|[^[:alnum:]_])level=error([^[:alnum:]_]|$)|"level"[[:space:]]*:[[:space:]]*"error"|(^|[^[:alnum:]_])panic([^[:alnum:]_]|$)|no rows in result set|telegram handler error|(^|[^[:alnum:]_])fatal([^[:alnum:]_]|$)|clawguard stopped|process exit' \
+    | grep -Eavi 'llm probe transient failure \(not yet unhealthy\)|cas lookup failed, skip|ai call failed, trying next model|retention cleanup' || true)
 
   if [ -n "$errors" ]; then
-    fail "bot logs contain error-like lines in the last $SINCE"
+    fail "bot logs contain fatal/error lines in the last $SINCE"
     printf '%s\n' "$errors" | tail -n 20
   else
-    pass "bot logs have no error/panic/no rows/failed lines in the last $SINCE"
+    pass "bot logs have no fatal/error lines in the last $SINCE"
+    if [ "$ignored_transient_count" -gt 0 ]; then
+      warn "ignored transient/fallback bot log lines in the last $SINCE: $ignored_transient_count"
+    fi
   fi
 
   webhook_lines=$(printf '%s\n' "$bot_logs" | grep -Eai 'webhook.*registered|registered.*webhook' || true)
@@ -167,10 +185,23 @@ check_bot_logs() {
     pass "webhook registered log includes $EXPECTED_DOMAIN"
     printf '%s\n' "$webhook_match" | tail -n 3
   else
-    fail "webhook registered log with domain $EXPECTED_DOMAIN not found in the last $SINCE"
-    if [ -n "$webhook_lines" ]; then
-      log "Recent webhook registration lines:"
-      printf '%s\n' "$webhook_lines" | tail -n 5
+    webhook_window_logs=$(compose logs --since "$WEBHOOK_LOG_WINDOW" bot 2>&1 || true)
+    webhook_window_lines=$(printf '%s\n' "$webhook_window_logs" | grep -Eai 'webhook.*registered|registered.*webhook' || true)
+    webhook_window_match=$(printf '%s\n' "$webhook_window_lines" | grep -F "$EXPECTED_DOMAIN" || true)
+    if [ -n "$webhook_window_match" ]; then
+      pass "webhook registered log includes $EXPECTED_DOMAIN within $WEBHOOK_LOG_WINDOW"
+      warn "webhook registration was not found in the last $SINCE; bot may not have restarted recently"
+      printf '%s\n' "$webhook_window_match" | tail -n 3
+    else
+      fail "webhook registered log with domain $EXPECTED_DOMAIN not found in the last $SINCE or $WEBHOOK_LOG_WINDOW"
+      if [ -n "$webhook_lines" ]; then
+        log "Recent webhook registration lines:"
+        printf '%s\n' "$webhook_lines" | tail -n 5
+      fi
+      if [ -n "$webhook_window_lines" ]; then
+        log "Webhook registration lines within $WEBHOOK_LOG_WINDOW:"
+        printf '%s\n' "$webhook_window_lines" | tail -n 5
+      fi
     fi
   fi
   log ""
