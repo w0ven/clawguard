@@ -203,6 +203,17 @@ ssh root@YOUR_SERVER "cd /root/clawguard && docker compose pull bot web && docke
 
 **前端环境变量**（`NEXT_PUBLIC_*`）必须在 GitHub Repository Variables 配置，因为 Next.js 会在 build 时把它们编进 bundle；远程 `.env` 只作用于后端 runtime。
 
+### 部署后 smoke 检查
+
+部署完成后可在生产机 `/root/clawguard` 目录运行健康回归脚本，快速确认 Compose 服务、bot 近期错误日志、webhook 注册域名、公开 Web 入口安全响应头，以及当前镜像 revision/digest：
+
+```bash
+cd /root/clawguard
+bash scripts/prod-smoke.sh --since 5m --url https://rfcguard.misaka.si --compose docker-compose.yml
+```
+
+脚本不会读取生产 secret，也不会向 Telegram 发送消息；只使用 `docker compose`、`docker inspect`、bot 容器日志和公开 URL 的 HTTP 响应。默认参数为 `--since 5m`、`--url https://rfcguard.misaka.si`、`--compose docker-compose.yml`，默认应用目录为 `/root/clawguard`，如需在其他目录调试可设置 `APP_DIR=/path/to/clawguard`。
+
 ### Cloudflare Tunnel 配置
 
 Tunnel 入口指向宿主机 `127.0.0.1:8090`：
