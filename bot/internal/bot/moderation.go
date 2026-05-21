@@ -723,8 +723,8 @@ func (s *Service) applyFilterAction(ctx context.Context, msg *tele.Message, poli
 		return fmt.Errorf("insert filter violation: %w", err)
 	}
 
-	s.resetTrustAfterViolation(ctx, msg, actionForViolation, stringPtr(result.Reason))
 	s.maybeBanBotInviterAfterViolation(ctx, msg, policy, actionForViolation, result.Reason)
+	s.resetTrustAfterViolation(ctx, msg, actionForViolation, stringPtr(result.Reason))
 
 	// 动作反馈（根据 action 派发到不同模板）
 	s.dispatchActionFeedback(msg, policy, actionForViolation, humanReason(result.Reason, matched), matched)
@@ -1844,6 +1844,8 @@ func (s *Service) applyAIAction(ctx context.Context, msg *tele.Message, policy c
 		score = minFloat64(1, trust.Score+0.05)
 	}
 
+	s.maybeBanBotInviterAfterViolation(ctx, msg, policy, action, output.Verdict.Reason)
+
 	updated := trust
 	if !isEdited {
 		var err error
@@ -1900,7 +1902,6 @@ func (s *Service) applyAIAction(ctx context.Context, msg *tele.Message, policy c
 	}
 
 	s.resetTrustAfterViolation(ctx, msg, action, stringPtr(output.Verdict.Reason))
-	s.maybeBanBotInviterAfterViolation(ctx, msg, policy, action, output.Verdict.Reason)
 	return nil
 }
 

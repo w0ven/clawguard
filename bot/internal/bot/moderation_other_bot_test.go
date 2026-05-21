@@ -12,6 +12,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/openclaw/clawguard/internal/ai"
 	"github.com/openclaw/clawguard/internal/config"
 	"github.com/openclaw/clawguard/internal/store"
 	"go.uber.org/zap"
@@ -113,6 +114,31 @@ func (db *otherBotMockDB) QueryRow(_ context.Context, query string, args ...any)
 			return mockErrorRow{err: errors.New("missing trust")}
 		}
 		db.trust.IsBot = args[2].(bool)
+		trust := *db.trust
+		db.mu.Unlock()
+		return scanTrustRow(trust)
+	case strings.Contains(query, "SET messages_checked = messages_checked"):
+		db.mu.Lock()
+		if db.trust == nil {
+			db.mu.Unlock()
+			return mockErrorRow{err: errors.New("missing trust")}
+		}
+		db.trust.MessagesChecked += args[2].(int32)
+		db.trust.MessagesClean += args[3].(int32)
+		db.trust.Score = args[4].(float64)
+		db.trust.UpdatedAt = db.now
+		trust := *db.trust
+		db.mu.Unlock()
+		return scanTrustRow(trust)
+	case strings.Contains(query, "SET messages_clean = 0"):
+		db.mu.Lock()
+		if db.trust == nil {
+			db.mu.Unlock()
+			return mockErrorRow{err: errors.New("missing trust")}
+		}
+		db.trust.MessagesClean = 0
+		db.trust.Score = args[2].(float64)
+		db.trust.UpdatedAt = db.now
 		trust := *db.trust
 		db.mu.Unlock()
 		return scanTrustRow(trust)
@@ -258,6 +284,112 @@ func TestMaybeBanBotInviterAfterViolationBansAndAnnounces(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("audit log = %+v, want successful ban_bot_inviter", db.auditLog)
+	}
+}
+
+func TestApplyAIActionBotBanBansInviterBeforeTrustReset(t *testing.T) {
+	policy := config.DefaultPolicy
+	policy.Filter.BanBotInviterOnViolation = true
+	db := newOtherBotMockDB(policy)
+	db.trust = &store.UserTrust{
+		ChatID:          -1001,
+		UserID:          77,
+		Username:        stringPtr("badbot"),
+		JoinedAt:        db.now,
+		UpdatedAt:       db.now,
+		StatusChangedAt: db.now,
+		Status:          "new",
+		Score:           0.5,
+		MessagesChecked: 3,
+		MessagesClean:   3,
+		Notes:           stringPtr(botTrustNotes("audit: other bot", &tele.User{ID: 66, FirstName: "Alice"})),
+		IsBot:           true,
+	}
+	botClient, transport := newMockTelegramBot(t, "")
+	svc := &Service{logger: zap.NewNop(), queries: store.New(db), bot: botClient, sender: botClient, sendLimiter: NewSendLimiter()}
+	msg := &tele.Message{
+		ID:     123,
+		Text:   "spam",
+		Chat:   &tele.Chat{ID: -1001, Title: "group", Type: tele.ChatSuperGroup},
+		Sender: &tele.User{ID: 77, IsBot: true, Username: "badbot"},
+	}
+	output := ai.CheckOutput{Verdict: ai.Verdict{Verdict: "spam", Confidence: 0.99, Category: "spam", Reason: "bot spam"}, Model: "message-model"}
+
+	if err := svc.applyAIAction(context.Background(), msg, policy, *db.trust, output, "ban", false); err != nil {
+		t.Fatalf("applyAIAction() error = %v", err)
+	}
+
+	methods := transport.Methods()
+	if got := countString(methods, "kickChatMember"); got != 2 {
+		t.Fatalf("kickChatMember calls = %d, want 2 for bot and inviter; methods=%v bodies=%v", got, methods, transport.RequestBodies())
+	}
+	if !containsString(methods, "deleteMessage") {
+		t.Fatalf("methods = %v, want bot message delete", methods)
+	}
+	if !containsString(methods, "sendMessage") {
+		t.Fatalf("methods = %v, want inviter announcement", methods)
+	}
+	bodies := strings.Join(transport.RequestBodies(), "\n")
+	if !strings.Contains(bodies, "邀请违规 Bot") {
+		t.Fatalf("announcement bodies missing inviter reason: %s", bodies)
+	}
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	if db.trust == nil || db.trust.Status != "banned" || db.trust.Score != 0 {
+		t.Fatalf("trust = %+v, want banned score 0", db.trust)
+	}
+	if db.trust.Notes == nil || *db.trust.Notes != "bot spam" {
+		t.Fatalf("trust notes = %v, want reset reason to prove liability ran before reset", db.trust.Notes)
+	}
+	found := false
+	for _, entry := range db.auditLog {
+		if entry.Action == "ban_bot_inviter" && strings.Contains(string(entry.After), `"outcome":"success"`) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("audit log = %+v, want successful ban_bot_inviter", db.auditLog)
+	}
+}
+
+func TestApplyAIActionNoneDoesNotBanBotInviter(t *testing.T) {
+	policy := config.DefaultPolicy
+	policy.Filter.BanBotInviterOnViolation = true
+	db := newOtherBotMockDB(policy)
+	db.trust = &store.UserTrust{
+		ChatID:          -1001,
+		UserID:          77,
+		Username:        stringPtr("goodbot"),
+		JoinedAt:        db.now,
+		UpdatedAt:       db.now,
+		StatusChangedAt: db.now,
+		Status:          "new",
+		Score:           0.5,
+		MessagesChecked: 3,
+		MessagesClean:   3,
+		Notes:           stringPtr(botTrustNotes("audit: other bot", &tele.User{ID: 66, FirstName: "Alice"})),
+		IsBot:           true,
+	}
+	botClient, transport := newMockTelegramBot(t, "")
+	svc := &Service{logger: zap.NewNop(), queries: store.New(db), bot: botClient, sender: botClient, sendLimiter: NewSendLimiter()}
+	msg := &tele.Message{
+		ID:     123,
+		Text:   "clean",
+		Chat:   &tele.Chat{ID: -1001, Title: "group", Type: tele.ChatSuperGroup},
+		Sender: &tele.User{ID: 77, IsBot: true, Username: "goodbot"},
+	}
+	output := ai.CheckOutput{Verdict: ai.Verdict{Verdict: "clean", Confidence: 0.99, Category: "clean", Reason: "clean"}, Model: "message-model"}
+
+	if err := svc.applyAIAction(context.Background(), msg, policy, *db.trust, output, "none", false); err != nil {
+		t.Fatalf("applyAIAction() error = %v", err)
+	}
+
+	methods := transport.Methods()
+	if got := countString(methods, "kickChatMember"); got != 0 {
+		t.Fatalf("kickChatMember calls = %d, want 0; methods=%v", got, methods)
+	}
+	if containsString(methods, "sendMessage") {
+		t.Fatalf("methods = %v, did not expect inviter announcement", methods)
 	}
 }
 
