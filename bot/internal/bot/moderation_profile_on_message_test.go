@@ -418,6 +418,7 @@ func (db *moderationProfileMatchMockDB) QueryRow(_ context.Context, query string
 			trust.BannedAt,
 			trust.BannedReason,
 			trust.Notes,
+			trust.IsBot,
 		)
 	case strings.Contains(query, "INSERT INTO ai_decisions"):
 		params := store.InsertAIDecisionParams{
@@ -564,6 +565,7 @@ func (db *moderationProfileMatchMockDB) QueryRow(_ context.Context, query string
 			trust.BannedAt,
 			trust.BannedReason,
 			trust.Notes,
+			trust.IsBot,
 		)
 	case strings.Contains(query, "SET messages_clean = 0"):
 		db.mu.Lock()
@@ -589,6 +591,7 @@ func (db *moderationProfileMatchMockDB) QueryRow(_ context.Context, query string
 			trust.BannedAt,
 			trust.BannedReason,
 			trust.Notes,
+			trust.IsBot,
 		)
 	case strings.Contains(query, "SET status = $3"):
 		db.mu.Lock()
@@ -619,6 +622,7 @@ func (db *moderationProfileMatchMockDB) QueryRow(_ context.Context, query string
 			trust.BannedAt,
 			trust.BannedReason,
 			trust.Notes,
+			trust.IsBot,
 		)
 	default:
 		return mockErrorRow{err: fmt.Errorf("unexpected query: %s", query)}

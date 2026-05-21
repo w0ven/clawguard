@@ -336,6 +336,27 @@ func (s *Service) registerHandlers() {
 	s.bot.Handle(tele.OnVideoNote, func(c tele.Context) error {
 		return s.runHandler("video_note", c, s.handleIncomingMessage)
 	})
+	s.bot.Handle(tele.OnPoll, func(c tele.Context) error {
+		return s.runHandler("poll", c, s.handleIncomingMessage)
+	})
+	s.bot.Handle(tele.OnDice, func(c tele.Context) error {
+		return s.runHandler("dice", c, s.handleIncomingMessage)
+	})
+	s.bot.Handle(tele.OnLocation, func(c tele.Context) error {
+		return s.runHandler("location", c, s.handleIncomingMessage)
+	})
+	s.bot.Handle(tele.OnVenue, func(c tele.Context) error {
+		return s.runHandler("venue", c, s.handleIncomingMessage)
+	})
+	s.bot.Handle(tele.OnGame, func(c tele.Context) error {
+		return s.runHandler("game", c, s.handleIncomingMessage)
+	})
+	s.bot.Handle(tele.OnInvoice, func(c tele.Context) error {
+		return s.runHandler("invoice", c, s.handleIncomingMessage)
+	})
+	// TODO: telebot.v3 v3.3.8 exposes Message.Story/ReplyToStory/Giveaway fields,
+	// but has no OnStory, OnPaidMedia, OnGiveaway, or OnGiveawayCreated endpoints.
+	// Register these handlers after upgrading telebot to a version that dispatches them.
 	s.bot.Handle("/cas", func(c tele.Context) error {
 		return s.runCommandHandler("cas", c, s.handleCASCommand)
 	})
@@ -441,10 +462,6 @@ func (s *Service) handleChatMemberUpdate(c tele.Context) error {
 		return s.handleBotChatMemberUpdate(update)
 	}
 
-	if member.User.IsBot {
-		return nil
-	}
-
 	if isLeaveTransition(update.OldChatMember, member) {
 		s.cleanupVerificationStateOnLeave(context.Background(), update.Chat, member.User)
 		return nil
@@ -454,7 +471,117 @@ func (s *Service) handleChatMemberUpdate(c tele.Context) error {
 		return nil
 	}
 
+	if member.User.IsBot {
+		return s.handleOtherBotJoined(update, member.User)
+	}
+
 	return s.startVerification(update.Chat, member.User, nil)
+}
+
+func (s *Service) handleOtherBotJoined(update *tele.ChatMemberUpdate, user *tele.User) error {
+	if update == nil || update.Chat == nil || user == nil {
+		return nil
+	}
+	ctx := context.Background()
+	policy, err := config.LoadPolicy(ctx, s.queries, update.Chat.ID)
+	if err != nil {
+		s.logger.Warn("load policy for other bot join failed", zap.Error(err), zap.Int64("chat_id", update.Chat.ID), zap.Int64("user_id", user.ID))
+		policy = config.DefaultPolicy
+	}
+	if isBotWhitelisted(user, policy.Filter.BotWhitelist) {
+		_, err := s.upsertBotTrust(ctx, update.Chat, user, "trusted", 1, "whitelisted bot", nil)
+		return err
+	}
+
+	action := strings.TrimSpace(strings.ToLower(policy.Filter.OtherBotsAction))
+	if action == "" {
+		action = config.DefaultPolicy.Filter.OtherBotsAction
+	}
+	switch action {
+	case "off":
+		return nil
+	case "kick":
+		if err := s.kickUser(update.Chat, user); err != nil {
+			return err
+		}
+		_, err := s.upsertBotTrust(ctx, update.Chat, user, "banned", 0, "auto-kicked: other bot", stringPtr("auto-kicked: other bot"))
+		s.notifyOwnersOtherBot(ctx, update.Chat, user, "kick", "非白名单 bot 已自动移出")
+		return err
+	case "ban":
+		if err := s.banUser(update.Chat, user); err != nil {
+			return err
+		}
+		_, err := s.upsertBotTrust(ctx, update.Chat, user, "banned", 0, "auto-banned: other bot", stringPtr("auto-banned: other bot"))
+		s.notifyOwnersOtherBot(ctx, update.Chat, user, "ban", "非白名单 bot 已自动封禁")
+		return err
+	case "audit":
+		fallthrough
+	default:
+		_, err := s.upsertBotTrust(ctx, update.Chat, user, "new", 0.5, "audit: other bot", nil)
+		s.notifyOwnersOtherBot(ctx, update.Chat, user, "audit", "非白名单 bot 已进入 AI 审核")
+		return err
+	}
+}
+
+func (s *Service) upsertBotTrust(ctx context.Context, chat *tele.Chat, user *tele.User, status string, score float64, notes string, banReason *string) (store.UserTrust, error) {
+	var bannedAt *time.Time
+	var bannedReason []byte
+	if status == "banned" {
+		now := time.Now()
+		bannedAt = &now
+		reason := notes
+		if banReason != nil {
+			reason = *banReason
+		}
+		bannedReason = buildUserTrustBanReason("other_bot", reason, "join")
+	}
+	return s.queries.UpsertUserTrust(ctx, store.UpsertUserTrustParams{
+		ChatID:          chat.ID,
+		UserID:          user.ID,
+		Username:        userFieldPtr(user.Username),
+		FirstName:       userFieldPtr(user.FirstName),
+		LastName:        userFieldPtr(user.LastName),
+		JoinedAt:        time.Now(),
+		Status:          status,
+		Score:           score,
+		MessagesChecked: 0,
+		MessagesClean:   0,
+		BannedAt:        bannedAt,
+		BannedReason:    bannedReason,
+		Notes:           stringPtr(notes),
+		IsBot:           true,
+	})
+}
+
+func (s *Service) notifyOwnersOtherBot(ctx context.Context, chat *tele.Chat, user *tele.User, action string, message string) {
+	if chat == nil || user == nil {
+		return
+	}
+	chatID := chat.ID
+	s.WriteRuntimeAudit(ctx, "other_bot", &chatID, action, map[string]any{
+		"chat_id": chat.ID,
+		"title":   chat.Title,
+	}, map[string]any{
+		"user_id":  user.ID,
+		"username": user.Username,
+		"action":   action,
+	})
+	text := fmt.Sprintf("⚠️ %s：%s（%d）", htmlEscape(message), htmlEscape(userDisplayForOwner(user)), user.ID)
+	s.sendBotPermissionWarningToOwners(ctx, chat, text)
+}
+
+func userDisplayForOwner(user *tele.User) string {
+	if user == nil {
+		return "unknown"
+	}
+	if username := strings.TrimSpace(user.Username); username != "" {
+		return "@" + strings.TrimPrefix(username, "@")
+	}
+	name := strings.TrimSpace(strings.TrimSpace(user.FirstName + " " + user.LastName))
+	if name != "" {
+		return name
+	}
+	return strconv.FormatInt(user.ID, 10)
 }
 
 func (s *Service) handleBotChatMemberUpdate(update *tele.ChatMemberUpdate) error {
@@ -755,6 +882,7 @@ func (s *Service) upsertJoinSideEffects(ctx context.Context, chat *tele.Chat, us
 		Score:           0.5,
 		MessagesChecked: 0,
 		MessagesClean:   0,
+		IsBot:           user.IsBot,
 	}); err != nil {
 		s.logger.Warn("upsert user trust on join failed", zap.Error(err), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
 	}

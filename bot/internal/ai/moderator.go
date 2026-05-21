@@ -121,6 +121,7 @@ type CheckInput struct {
 	VideoFileUniqueID string
 	Policy            config.AIPolicy
 	SkipCache         bool
+	IsUngraduated     bool
 }
 
 type CheckOutput struct {
@@ -210,7 +211,7 @@ func (m *Moderator) CheckMessage(ctx context.Context, input CheckInput) (CheckOu
 	} else if !errors.Is(err, pgx.ErrNoRows) {
 		m.logger.Warn("load system state failed, allow ai path", zap.Error(err))
 	}
-	if input.Policy.SkipMessagesShorterThan > 0 && len([]rune(strings.TrimSpace(input.Text))) < input.Policy.SkipMessagesShorterThan {
+	if input.Policy.SkipMessagesShorterThan > 0 && !input.IsUngraduated && len([]rune(strings.TrimSpace(input.Text))) < input.Policy.SkipMessagesShorterThan {
 		return CheckOutput{Skipped: true}, nil
 	}
 	if !input.SkipCache {

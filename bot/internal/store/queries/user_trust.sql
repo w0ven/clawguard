@@ -1,5 +1,5 @@
 -- name: GetUserTrust :one
-SELECT chat_id, user_id, username, first_name, last_name, joined_at, updated_at, status_changed_at, status, score, messages_checked, messages_clean, graduated_at, banned_at, banned_reason, notes
+SELECT chat_id, user_id, username, first_name, last_name, joined_at, updated_at, status_changed_at, status, score, messages_checked, messages_clean, graduated_at, banned_at, banned_reason, notes, is_bot
 FROM user_trust
 WHERE chat_id = $1 AND user_id = $2;
 
@@ -12,7 +12,7 @@ SET status = 'new',
 WHERE chat_id = $1
   AND user_id = $2
   AND status = 'archived'
-RETURNING chat_id, user_id, username, first_name, last_name, joined_at, updated_at, status_changed_at, status, score, messages_checked, messages_clean, graduated_at, banned_at, banned_reason, notes;
+RETURNING chat_id, user_id, username, first_name, last_name, joined_at, updated_at, status_changed_at, status, score, messages_checked, messages_clean, graduated_at, banned_at, banned_reason, notes, is_bot;
 
 -- name: UpsertUserTrust :one
 INSERT INTO user_trust (
@@ -31,8 +31,9 @@ INSERT INTO user_trust (
     graduated_at,
     banned_at,
     banned_reason,
-    notes
-) VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW(), $7, $8, $9, $10, $11, $12, $13, $14)
+    notes,
+    is_bot
+) VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW(), $7, $8, $9, $10, $11, $12, $13, $14, $15)
 ON CONFLICT (chat_id, user_id) DO UPDATE
 SET joined_at = LEAST(user_trust.joined_at, EXCLUDED.joined_at),
     username = COALESCE(EXCLUDED.username, user_trust.username),
@@ -48,8 +49,9 @@ SET joined_at = LEAST(user_trust.joined_at, EXCLUDED.joined_at),
     graduated_at = CASE WHEN user_trust.status IN ('banned', 'archived') THEN user_trust.graduated_at ELSE EXCLUDED.graduated_at END,
     banned_at = CASE WHEN user_trust.status IN ('banned', 'archived') THEN user_trust.banned_at ELSE EXCLUDED.banned_at END,
     banned_reason = CASE WHEN user_trust.status IN ('banned', 'archived') THEN user_trust.banned_reason ELSE EXCLUDED.banned_reason END,
-    notes = CASE WHEN user_trust.status IN ('banned', 'archived') THEN user_trust.notes ELSE EXCLUDED.notes END
-RETURNING chat_id, user_id, username, first_name, last_name, joined_at, updated_at, status_changed_at, status, score, messages_checked, messages_clean, graduated_at, banned_at, banned_reason, notes;
+    notes = CASE WHEN user_trust.status IN ('banned', 'archived') THEN user_trust.notes ELSE EXCLUDED.notes END,
+    is_bot = EXCLUDED.is_bot
+RETURNING chat_id, user_id, username, first_name, last_name, joined_at, updated_at, status_changed_at, status, score, messages_checked, messages_clean, graduated_at, banned_at, banned_reason, notes, is_bot;
 
 -- name: IncrementUserTrustCounters :one
 UPDATE user_trust
@@ -59,7 +61,7 @@ SET messages_checked = messages_checked + $3,
     updated_at = NOW()
 WHERE chat_id = $1 AND user_id = $2
   AND status NOT IN ('banned', 'archived')
-RETURNING chat_id, user_id, username, first_name, last_name, joined_at, updated_at, status_changed_at, status, score, messages_checked, messages_clean, graduated_at, banned_at, banned_reason, notes;
+RETURNING chat_id, user_id, username, first_name, last_name, joined_at, updated_at, status_changed_at, status, score, messages_checked, messages_clean, graduated_at, banned_at, banned_reason, notes, is_bot;
 
 -- name: UpdateUserTrustStatus :one
 UPDATE user_trust
@@ -73,7 +75,14 @@ SET status = $3,
     updated_at = NOW()
 WHERE chat_id = $1 AND user_id = $2
   AND status NOT IN ('banned', 'archived')
-RETURNING chat_id, user_id, username, first_name, last_name, joined_at, updated_at, status_changed_at, status, score, messages_checked, messages_clean, graduated_at, banned_at, banned_reason, notes;
+RETURNING chat_id, user_id, username, first_name, last_name, joined_at, updated_at, status_changed_at, status, score, messages_checked, messages_clean, graduated_at, banned_at, banned_reason, notes, is_bot;
+
+-- name: UpdateUserTrustIsBot :one
+UPDATE user_trust
+SET is_bot = $3,
+    updated_at = NOW()
+WHERE chat_id = $1 AND user_id = $2
+RETURNING chat_id, user_id, username, first_name, last_name, joined_at, updated_at, status_changed_at, status, score, messages_checked, messages_clean, graduated_at, banned_at, banned_reason, notes, is_bot;
 
 -- name: ResetUserTrustClean :one
 UPDATE user_trust
@@ -82,7 +91,7 @@ SET messages_clean = 0,
     updated_at = NOW()
 WHERE chat_id = $1 AND user_id = $2
   AND status NOT IN ('banned', 'archived')
-RETURNING chat_id, user_id, username, first_name, last_name, joined_at, updated_at, status_changed_at, status, score, messages_checked, messages_clean, graduated_at, banned_at, banned_reason, notes;
+RETURNING chat_id, user_id, username, first_name, last_name, joined_at, updated_at, status_changed_at, status, score, messages_checked, messages_clean, graduated_at, banned_at, banned_reason, notes, is_bot;
 
 -- name: AdjustUserTrustScore :one
 INSERT INTO user_trust (
@@ -104,7 +113,7 @@ INSERT INTO user_trust (
 ON CONFLICT (chat_id, user_id) DO UPDATE
 SET score = CASE WHEN user_trust.status IN ('banned', 'archived') THEN user_trust.score ELSE LEAST(1, GREATEST(0, user_trust.score + $3)) END,
     updated_at = CASE WHEN user_trust.status IN ('banned', 'archived') THEN user_trust.updated_at ELSE NOW() END
-RETURNING chat_id, user_id, username, first_name, last_name, joined_at, updated_at, status_changed_at, status, score, messages_checked, messages_clean, graduated_at, banned_at, banned_reason, notes;
+RETURNING chat_id, user_id, username, first_name, last_name, joined_at, updated_at, status_changed_at, status, score, messages_checked, messages_clean, graduated_at, banned_at, banned_reason, notes, is_bot;
 
 
 -- name: UnbanUserTrust :one
@@ -120,7 +129,7 @@ SET status = 'new',
 WHERE chat_id = $1
   AND user_id = $2
   AND status = 'banned'
-RETURNING chat_id, user_id, username, first_name, last_name, joined_at, updated_at, status_changed_at, status, score, messages_checked, messages_clean, graduated_at, banned_at, banned_reason, notes;
+RETURNING chat_id, user_id, username, first_name, last_name, joined_at, updated_at, status_changed_at, status, score, messages_checked, messages_clean, graduated_at, banned_at, banned_reason, notes, is_bot;
 
 -- name: ClearUserTrustBanMeta :exec
 UPDATE user_trust
@@ -147,7 +156,7 @@ WHERE ($1::BIGINT IS NULL OR chat_id = $1)
   AND ($7::BOOLEAN OR chat_id = ANY($8::BIGINT[]));
 
 -- name: ListUserTrustPaginated :many
-SELECT chat_id, user_id, username, first_name, last_name, joined_at, updated_at, status_changed_at, status, score, messages_checked, messages_clean, graduated_at, banned_at, banned_reason, notes
+SELECT chat_id, user_id, username, first_name, last_name, joined_at, updated_at, status_changed_at, status, score, messages_checked, messages_clean, graduated_at, banned_at, banned_reason, notes, is_bot
 FROM user_trust
 WHERE ($1::BIGINT IS NULL OR chat_id = $1)
   AND ($2::BIGINT IS NULL OR user_id = $2)

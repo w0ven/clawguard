@@ -109,6 +109,8 @@ type FilterConfig struct {
 	Usernames       FilterUsernamePolicy `json:"usernames"`
 	NewUser         FilterNewUserPolicy  `json:"new_user"`
 	NonTextMessages string               `json:"non_text_messages"`
+	OtherBotsAction string               `json:"other_bots_action"` // "audit" | "kick" | "ban" | "off"
+	BotWhitelist    []string             `json:"bot_whitelist"`     // username (without @)
 }
 
 type FilterKeywordPolicy struct {
@@ -187,21 +189,22 @@ type LoggingConfig struct {
 }
 
 type AIPolicy struct {
-	Enabled                 bool              `json:"enabled"`
-	ImageModerationEnabled  bool              `json:"image_moderation_enabled"`
-	PrimaryProvider         string            `json:"primary_provider"`
-	PrimaryModel            string            `json:"primary_model"`
-	FallbackChain           []string          `json:"fallback_chain"`
-	PrimaryModelRef         string            `json:"primary_model_ref,omitempty"`
-	FallbackModelRefs       []string          `json:"fallback_model_refs,omitempty"`
-	CapabilityRequirements  []string          `json:"capability_requirements,omitempty"`
-	AutoDegrade             bool              `json:"auto_degrade,omitempty"`
-	ProbeEnabled            bool              `json:"probe_enabled,omitempty"`
-	ProbeIntervalSeconds    int               `json:"probe_interval_seconds,omitempty"`
-	Temperature             float64           `json:"temperature"`
-	TimeoutMs               int               `json:"timeout_ms"`
-	MaxRetries              int               `json:"max_retries"`
-	GraduateAfterMessages   int               `json:"graduate_after_messages"`
+	Enabled                bool     `json:"enabled"`
+	ImageModerationEnabled bool     `json:"image_moderation_enabled"`
+	PrimaryProvider        string   `json:"primary_provider"`
+	PrimaryModel           string   `json:"primary_model"`
+	FallbackChain          []string `json:"fallback_chain"`
+	PrimaryModelRef        string   `json:"primary_model_ref,omitempty"`
+	FallbackModelRefs      []string `json:"fallback_model_refs,omitempty"`
+	CapabilityRequirements []string `json:"capability_requirements,omitempty"`
+	AutoDegrade            bool     `json:"auto_degrade,omitempty"`
+	ProbeEnabled           bool     `json:"probe_enabled,omitempty"`
+	ProbeIntervalSeconds   int      `json:"probe_interval_seconds,omitempty"`
+	Temperature            float64  `json:"temperature"`
+	TimeoutMs              int      `json:"timeout_ms"`
+	MaxRetries             int      `json:"max_retries"`
+	GraduateAfterMessages  int      `json:"graduate_after_messages"`
+	// DEPRECATED: 不再用于毕业判定，仅为向后兼容保留
 	GraduateAfterDays       int               `json:"graduate_after_days"`
 	PerUserDailyLimit       int               `json:"per_user_daily_limit"`
 	SkipMessagesShorterThan int               `json:"skip_messages_shorter_than"`
@@ -280,6 +283,8 @@ var DefaultPolicy = GuardPolicy{
 			MaxMessagesPerMinute: 5,
 		},
 		NonTextMessages: "ai_review",
+		OtherBotsAction: "audit",
+		BotWhitelist:    []string{},
 	},
 	Messages: MessagesPolicy{
 		KeywordReplies: []KeywordReplyRule{},
@@ -312,7 +317,7 @@ var DefaultPolicy = GuardPolicy{
 		Temperature:             0,
 		TimeoutMs:               10000,
 		MaxRetries:              2,
-		GraduateAfterMessages:   10,
+		GraduateAfterMessages:   5,
 		GraduateAfterDays:       7,
 		PerUserDailyLimit:       50,
 		SkipMessagesShorterThan: 5,
@@ -497,6 +502,13 @@ func applyFilterDefaults(policy *FilterConfig) {
 	if strings.TrimSpace(policy.NonTextMessages) == "" {
 		policy.NonTextMessages = DefaultPolicy.Filter.NonTextMessages
 	}
+	policy.OtherBotsAction = strings.TrimSpace(strings.ToLower(policy.OtherBotsAction))
+	switch policy.OtherBotsAction {
+	case "off", "audit", "kick", "ban":
+	default:
+		policy.OtherBotsAction = DefaultPolicy.Filter.OtherBotsAction
+	}
+	policy.BotWhitelist = normalizeBotWhitelist(policy.BotWhitelist)
 	if policy.Keywords.Action == "" {
 		policy.Keywords.Action = DefaultPolicy.Filter.Keywords.Action
 	}
@@ -512,6 +524,26 @@ func applyFilterDefaults(policy *FilterConfig) {
 	if policy.NewUser.MaxMessagesPerMinute <= 0 {
 		policy.NewUser.MaxMessagesPerMinute = DefaultPolicy.Filter.NewUser.MaxMessagesPerMinute
 	}
+}
+
+func normalizeBotWhitelist(values []string) []string {
+	if len(values) == 0 {
+		return []string{}
+	}
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		username := strings.TrimPrefix(strings.TrimSpace(strings.ToLower(value)), "@")
+		if username == "" {
+			continue
+		}
+		if _, ok := seen[username]; ok {
+			continue
+		}
+		seen[username] = struct{}{}
+		out = append(out, username)
+	}
+	return out
 }
 
 func applyMessagesDefaults(policy *MessagesPolicy) {

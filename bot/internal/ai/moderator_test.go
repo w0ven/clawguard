@@ -148,3 +148,32 @@ func TestPersistenceContextFallsBackToBackground(t *testing.T) {
 		t.Fatalf("expected fallback persistence context to have deadline")
 	}
 }
+
+func TestCheckMessageDoesNotSkipShortUngraduatedMessage(t *testing.T) {
+	ref := NewModelRef("p1", "m1")
+	models := fakeModelRegistry{items: map[ModelRef]Model{
+		ref: {ID: 1, ProviderID: 10, ProviderKey: "p1", ModelKey: "m1", Enabled: true, CapabilityTags: []string{"moderation"}},
+	}}
+	providers := moderatorProviderRegistry{clients: map[string]LLMClient{
+		"p1": moderatorCheckClient{result: &CheckResult{Verdicts: []Verdict{{Verdict: "clean", Confidence: 0.9, Category: "正常"}}, Model: "m1"}},
+	}}
+	moderator := NewModerator(context.Background(), nil, nil, nil, providers, models, NewResolver(models), nil)
+
+	output, err := moderator.CheckMessage(context.Background(), CheckInput{
+		ChatID:        1,
+		UserID:        2,
+		Text:          "好",
+		IsUngraduated: true,
+		Policy: config.AIPolicy{
+			PrimaryModelRef:         ref.String(),
+			SkipMessagesShorterThan: 5,
+			TimeoutMs:               1000,
+		},
+	})
+	if err != nil {
+		t.Fatalf("CheckMessage returned error: %v", err)
+	}
+	if output.Skipped {
+		t.Fatalf("short ungraduated message should not be skipped")
+	}
+}

@@ -33,6 +33,49 @@ func TestExtractReviewableContentNonCaptionMedia(t *testing.T) {
 	}
 }
 
+func TestExtractReviewableContentAdditionalTelegramTypes(t *testing.T) {
+	tests := []struct {
+		name       string
+		msg        *tele.Message
+		wantKind   string
+		wantParts  []string
+		wantPrefix string
+	}{
+		{
+			name:     "poll",
+			msg:      &tele.Message{Poll: &tele.Poll{Question: "选哪个", Options: []tele.PollOption{{Text: "A"}, {Text: "B"}}}},
+			wantKind: "poll",
+			wantParts: []string{
+				"[投票]", "标题=选哪个", "选项1=A", "选项2=B",
+			},
+		},
+		{name: "dice", msg: &tele.Message{Dice: &tele.Dice{Type: "🎰", Value: 64}}, wantKind: "dice", wantParts: []string{"[骰子]", "emoji=🎰", "value=64"}},
+		{name: "location", msg: &tele.Message{Location: &tele.Location{Lat: 31.23, Lng: 121.47}}, wantKind: "location", wantParts: []string{"[位置]", "lat=31.23", "lon=121.47"}},
+		{name: "venue", msg: &tele.Message{Venue: &tele.Venue{Title: "店", Address: "路", Location: tele.Location{Lat: 31.23, Lng: 121.47}}}, wantKind: "venue", wantParts: []string{"[地点]", "标题=店", "地址=路", "lat=31.23", "lon=121.47"}},
+		{name: "game", msg: &tele.Message{Game: &tele.Game{Title: "游戏", Description: "描述"}}, wantKind: "game", wantParts: []string{"[游戏]", "标题=游戏", "描述=描述"}},
+		{name: "invoice", msg: &tele.Message{Invoice: &tele.Invoice{Title: "订单", Description: "说明", Total: 123, Currency: "USD"}}, wantKind: "invoice", wantParts: []string{"[Invoice]", "标题=订单", "描述=说明", "总额=123", "货币=USD"}},
+		{name: "story", msg: &tele.Message{Story: &tele.Story{ID: 9, Poster: &tele.Chat{ID: -100, Title: "频道"}}}, wantKind: "story", wantParts: []string{"[Story 转发]", "来源=频道/9"}},
+		{name: "giveaway", msg: &tele.Message{Giveaway: &tele.Giveaway{PrizeDescription: "奖品", WinnerCount: 3, SelectionUnixtime: 1710000000}}, wantKind: "giveaway", wantParts: []string{"[赠品]", "描述=奖品", "数量=3", "截止=2024-03-10T"}},
+		{name: "giveaway_created", msg: &tele.Message{GiveawayCreated: &tele.GiveawayCreated{}}, wantKind: "giveaway_created", wantParts: []string{"[赠品]", "描述=created"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := buildReviewableContent(tt.msg)
+			if got.Skip {
+				t.Fatalf("Skip = true, want false")
+			}
+			if got.Kind != tt.wantKind {
+				t.Fatalf("Kind = %q, want %q", got.Kind, tt.wantKind)
+			}
+			for _, part := range tt.wantParts {
+				if !strings.Contains(got.Text, part) {
+					t.Fatalf("Text should contain %q, got %q", part, got.Text)
+				}
+			}
+		})
+	}
+}
+
 func TestAIModerationTextVideoFramesUsesFrameInstruction(t *testing.T) {
 	got := aiModerationText(reviewableContent{
 		Text:        "[视频]",
