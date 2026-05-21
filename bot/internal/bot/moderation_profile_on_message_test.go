@@ -2,6 +2,7 @@ package bot
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -245,6 +246,95 @@ func TestModerationDedupe_MessageAIWarnWinsOverProfileViolation(t *testing.T) {
 	}
 }
 
+func TestApplyAIActionSpamBanSendsSingleFeedbackAndRevokesMessages(t *testing.T) {
+	const (
+		chatID = -100123
+		userID = 42
+	)
+
+	svc, transport, db, msg, policy := newModerationDedupeTestService(t, chatID, userID)
+	output := ai.CheckOutput{Verdict: ai.Verdict{Verdict: "spam", Confidence: 0.99, Category: "spam", Reason: "spam"}, Model: "message-model"}
+	if err := svc.applyAIAction(context.Background(), msg, policy, db.currentTrust(), output, "ban", false); err != nil {
+		t.Fatalf("applyAIAction() error = %v", err)
+	}
+
+	assertModerationDedupeCounts(t, transport, 1, 1, 1)
+	assertTelegramRequestParam(t, transport, "kickChatMember", "revoke_messages", "true")
+}
+
+func TestBanUserRevokesMessages(t *testing.T) {
+	const (
+		chatID = -100123
+		userID = 42
+	)
+
+	botClient, transport := newMockTelegramBot(t, "")
+	db := newModerationProfileMatchMockDB(chatID, userID)
+	svc := &Service{logger: zap.NewNop(), queries: store.New(db), bot: botClient}
+
+	if err := svc.banUser(&tele.Chat{ID: chatID}, &tele.User{ID: userID}); err != nil {
+		t.Fatalf("banUser() error = %v", err)
+	}
+
+	assertTelegramRequestParam(t, transport, "kickChatMember", "revoke_messages", "true")
+}
+
+func TestApplyAIActionWarnSendsOnlyWarnFeedbackAtBanThreshold(t *testing.T) {
+	const (
+		chatID = -100123
+		userID = 42
+	)
+
+	svc, transport, db, msg, policy := newModerationDedupeTestService(t, chatID, userID)
+	policy.Warnings.Enabled = true
+	policy.Warnings.MaxWarns = 1
+	policy.Warnings.ActionAtMax = "ban"
+	output := ai.CheckOutput{Verdict: ai.Verdict{Verdict: "spam", Confidence: 0.99, Category: "spam", Reason: "spam"}, Model: "message-model"}
+	if err := svc.applyAIAction(context.Background(), msg, policy, db.currentTrust(), output, "warn", false); err != nil {
+		t.Fatalf("applyAIAction() error = %v", err)
+	}
+
+	assertModerationDedupeCounts(t, transport, 1, 1, 1)
+	if got := joinedTelegramBodies(transport); !strings.Contains(got, "spam") {
+		t.Fatalf("feedback body = %q, want warn reason", got)
+	}
+	assertTelegramRequestParam(t, transport, "kickChatMember", "revoke_messages", "true")
+}
+
+func TestSpamCommandSendsSingleFeedbackAndRevokesMessages(t *testing.T) {
+	const (
+		chatID  = -100123
+		adminID = 7
+		userID  = 42
+	)
+
+	botClient, transport := newMockTelegramBot(t, "")
+	db := newModerationProfileMatchMockDB(chatID, userID)
+	svc := &Service{logger: zap.NewNop(), queries: store.New(db), bot: botClient}
+	command := &tele.Message{
+		ID:     2001,
+		Text:   "/spam",
+		Chat:   &tele.Chat{ID: chatID, Type: tele.ChatSuperGroup, Title: "test-group"},
+		Sender: &tele.User{ID: adminID, Username: "admin"},
+		ReplyTo: &tele.Message{
+			ID:     1001,
+			Chat:   &tele.Chat{ID: chatID, Type: tele.ChatSuperGroup, Title: "test-group"},
+			Sender: &tele.User{ID: userID, Username: "new_user", FirstName: "new"},
+			Text:   "spam message",
+		},
+	}
+
+	if err := svc.handleSpamCommand(botClient.NewContext(tele.Update{Message: command})); err != nil {
+		t.Fatalf("handleSpamCommand() error = %v", err)
+	}
+
+	assertModerationDedupeCounts(t, transport, 1, 1, 1)
+	assertTelegramRequestParam(t, transport, "kickChatMember", "revoke_messages", "true")
+	if got := joinedTelegramBodies(transport); !strings.Contains(got, "spam") || strings.Contains(got, "已将") {
+		t.Fatalf("feedback body = %q, want configured spam feedback only", got)
+	}
+}
+
 func TestModerationDedupe_RedisUnavailableFallsBackToLocalLocks(t *testing.T) {
 	svc := &Service{
 		logger: zap.NewNop(),
@@ -313,6 +403,45 @@ func joinedTelegramBodies(transport *telegramMockTransport) string {
 		decoded = append(decoded, value)
 	}
 	return strings.Join(decoded, "\n")
+}
+
+func assertTelegramRequestParam(t *testing.T, transport *telegramMockTransport, method, key, want string) {
+	t.Helper()
+	transport.mu.Lock()
+	methods := append([]string(nil), transport.methods...)
+	bodies := append([]string(nil), transport.bodies...)
+	transport.mu.Unlock()
+
+	bodyIndex := 0
+	for _, gotMethod := range methods {
+		body := ""
+		if bodyIndex < len(bodies) {
+			body = bodies[bodyIndex]
+			bodyIndex++
+		}
+		if gotMethod != method {
+			continue
+		}
+		if strings.HasPrefix(strings.TrimSpace(body), "{") {
+			var values map[string]string
+			if err := json.Unmarshal([]byte(body), &values); err != nil {
+				t.Fatalf("parse %s JSON body %q: %v", method, body, err)
+			}
+			if got := values[key]; got != want {
+				t.Fatalf("%s %s = %q, want %q; body=%q", method, key, got, want, body)
+			}
+			return
+		}
+		values, err := url.ParseQuery(body)
+		if err != nil {
+			t.Fatalf("parse %s query body %q: %v", method, body, err)
+		}
+		if got := values.Get(key); got != want {
+			t.Fatalf("%s %s = %q, want %q; body=%q", method, key, got, want, body)
+		}
+		return
+	}
+	t.Fatalf("method %q not called; methods=%v", method, methods)
 }
 
 type moderationProfileMatchMockDB struct {
@@ -397,6 +526,12 @@ func (db *moderationProfileMatchMockDB) QueryRow(_ context.Context, query string
 			state.UpdatedAt,
 			state.UpdatedBy,
 		)
+	case strings.Contains(query, "FROM global_config"):
+		return mockErrorRow{err: pgx.ErrNoRows}
+	case strings.Contains(query, "FROM groups"):
+		return mockErrorRow{err: pgx.ErrNoRows}
+	case strings.Contains(query, "FROM admins"):
+		return mockErrorRow{err: pgx.ErrNoRows}
 	case strings.Contains(query, "FROM user_trust"):
 		db.mu.Lock()
 		trust := db.userTrust
@@ -539,6 +674,28 @@ func (db *moderationProfileMatchMockDB) QueryRow(_ context.Context, query string
 			warning.IssuedBy,
 			warning.CreatedAt,
 			warning.ConsumedAt,
+		)
+	case strings.Contains(query, "INSERT INTO banned_users"):
+		bannedAt := db.now.Add(5 * time.Minute)
+		return mockScanRow(
+			args[0].(int64),
+			args[1].(*string),
+			args[2].(string),
+			bannedAt,
+			args[3].(*int64),
+		)
+	case strings.Contains(query, "INSERT INTO config_audit"):
+		createdAt := db.now.Add(6 * time.Minute)
+		return mockScanRow(
+			int64(1),
+			args[0].(string),
+			args[1].(*int64),
+			args[2].(int64),
+			args[3].(string),
+			args[4].([]byte),
+			args[5].([]byte),
+			args[6].(*string),
+			createdAt,
 		)
 	case strings.Contains(query, "SET messages_checked = messages_checked"):
 		db.mu.Lock()
@@ -788,6 +945,8 @@ func (t *telegramMockTransport) RoundTrip(req *http.Request) (*http.Response, er
 		body = `{"ok":true,"result":{"id":999,"is_bot":true,"first_name":"test-bot","username":"test_bot"}}`
 	case "getChat":
 		body = fmt.Sprintf(`{"ok":true,"result":{"id":42,"type":"private","bio":%q}}`, t.bio)
+	case "getChatMember":
+		body = `{"ok":true,"result":{"user":{"id":1,"is_bot":false,"first_name":"admin"},"status":"administrator"}}`
 	case "sendMessage":
 		body = `{"ok":true,"result":{"message_id":999,"chat":{"id":-100123,"type":"supergroup"}}}`
 	}
