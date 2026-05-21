@@ -1760,7 +1760,7 @@ func (s *Service) applyAIAction(ctx context.Context, msg *tele.Message, policy c
 			}
 		} else {
 			s.logger.Info("skip duplicate ai ban user action", zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID), zap.Int("message_id", msg.ID))
-			auditOutcome = "skipped"
+			auditOutcome = "deduped"
 			return nil
 		}
 		nextStatus = "banned"
@@ -1785,7 +1785,7 @@ func (s *Service) applyAIAction(ctx context.Context, msg *tele.Message, policy c
 			}
 		} else {
 			s.logger.Info("skip duplicate ai mute user action", zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID), zap.Int("message_id", msg.ID))
-			auditOutcome = "skipped"
+			auditOutcome = "deduped"
 			return nil
 		}
 		nextStatus = "suspicious"
@@ -1810,7 +1810,7 @@ func (s *Service) applyAIAction(ctx context.Context, msg *tele.Message, policy c
 			}
 		} else {
 			s.logger.Info("skip duplicate ai warn user action", zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID), zap.Int("message_id", msg.ID))
-			auditOutcome = "skipped"
+			auditOutcome = "deduped"
 			return nil
 		}
 		nextStatus = "suspicious"
@@ -1833,7 +1833,7 @@ func (s *Service) applyAIAction(ctx context.Context, msg *tele.Message, policy c
 			defer actionRelease()
 		} else {
 			s.logger.Info("skip duplicate ai delete user action", zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID), zap.Int("message_id", msg.ID))
-			auditOutcome = "skipped"
+			auditOutcome = "deduped"
 			return nil
 		}
 		nextStatus = "suspicious"
@@ -2909,10 +2909,24 @@ func (s *Service) handleProfileOnMessageViolation(
 		s.logger.Info("skip duplicate on-message profile message delete", zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID), zap.Int("message_id", msg.ID))
 	}
 
-	s.resetTrustAfterViolation(ctx, msg, "ban", stringPtr("profile_match_on_message: "+matched))
 	if !actionOK {
+		extra := map[string]any{
+			"message_id": msg.ID,
+			"outcome":    "deduped",
+			"action":     "ban",
+		}
+		if aiOutput != nil {
+			extra["verdict"] = aiOutput.Verdict.Verdict
+			extra["category"] = aiOutput.Verdict.Category
+			extra["confidence"] = aiOutput.Verdict.Confidence
+			extra["model"] = aiOutput.Model
+			extra["reason"] = aiOutput.Verdict.Reason
+		}
+		s.writeModerationAudit(ctx, "ai", msg.Chat, msg.Sender, "ai_ban", matched, extra)
 		return nil
 	}
+
+	s.resetTrustAfterViolation(ctx, msg, "ban", stringPtr("profile_match_on_message: "+matched))
 	s.sendActionFeedback(msg.Chat, nil, policy.Feedback.Ban, map[string]string{
 		"user":         feedbackUserLabel(msg.Sender, policy.Feedback.Ban.ParseMode),
 		"user_mention": feedbackUserMention(msg.Sender, policy.Feedback.Ban.ParseMode),

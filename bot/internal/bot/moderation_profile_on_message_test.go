@@ -126,6 +126,7 @@ func TestModerationDedupe_ProfileViolationWinsOverMessageAI(t *testing.T) {
 		t.Fatalf("handleProfileOnMessageViolation() error = %v", err)
 	}
 
+	db.failTrustSideEffects = true
 	messageOutput := ai.CheckOutput{Verdict: ai.Verdict{Verdict: "spam", Confidence: 0.99, Category: "spam", Reason: "消息违规"}, Model: "message-model"}
 	if err := svc.applyAIAction(context.Background(), msg, policy, db.currentTrust(), messageOutput, "ban", false); err != nil {
 		t.Fatalf("applyAIAction() error = %v", err)
@@ -134,6 +135,36 @@ func TestModerationDedupe_ProfileViolationWinsOverMessageAI(t *testing.T) {
 	assertModerationDedupeCounts(t, transport, 1, 1, 1)
 	if got := joinedTelegramBodies(transport); !strings.Contains(got, "资料简介违规：资料违规") {
 		t.Fatalf("feedback body = %q, want profile reason", got)
+	}
+	if got := db.trustSideEffectCalls(); got != 0 {
+		t.Fatalf("deduped message AI trust side effects = %d, want 0", got)
+	}
+}
+
+func TestModerationDedupe_ProfileBanThenMessageAIWarnSkipsTrustSideEffects(t *testing.T) {
+	const (
+		chatID = -100123
+		userID = 42
+	)
+
+	svc, transport, db, msg, policy := newModerationDedupeTestService(t, chatID, userID)
+	profileOutput := ai.CheckOutput{Verdict: ai.Verdict{Verdict: "spam", Confidence: 0.99, Category: "spam", Reason: "资料违规"}, Model: "profile-model"}
+	if err := svc.handleProfileOnMessageViolation(context.Background(), msg, policy, "资料违规", &profileOutput); err != nil {
+		t.Fatalf("handleProfileOnMessageViolation() error = %v", err)
+	}
+
+	db.failTrustSideEffects = true
+	messageOutput := ai.CheckOutput{Verdict: ai.Verdict{Verdict: "violence", Confidence: 0.99, Category: "violence", Reason: "消息违规"}, Model: "message-model"}
+	if err := svc.applyAIAction(context.Background(), msg, policy, db.currentTrust(), messageOutput, "warn", false); err != nil {
+		t.Fatalf("applyAIAction() error = %v", err)
+	}
+
+	assertModerationDedupeCounts(t, transport, 1, 1, 1)
+	if got := joinedTelegramBodies(transport); !strings.Contains(got, "资料简介违规：资料违规") || strings.Contains(got, "消息违规") {
+		t.Fatalf("feedback body = %q, want only profile reason", got)
+	}
+	if got := db.trustSideEffectCalls(); got != 0 {
+		t.Fatalf("deduped message AI warn trust side effects = %d, want 0", got)
 	}
 }
 
@@ -149,6 +180,7 @@ func TestModerationDedupe_MessageAIWinsOverProfileViolation(t *testing.T) {
 		t.Fatalf("applyAIAction() error = %v", err)
 	}
 
+	db.failTrustSideEffects = true
 	profileOutput := ai.CheckOutput{Verdict: ai.Verdict{Verdict: "spam", Confidence: 0.99, Category: "spam", Reason: "资料违规"}, Model: "profile-model"}
 	if err := svc.handleProfileOnMessageViolation(context.Background(), msg, policy, "资料违规", &profileOutput); err != nil {
 		t.Fatalf("handleProfileOnMessageViolation() error = %v", err)
@@ -157,6 +189,15 @@ func TestModerationDedupe_MessageAIWinsOverProfileViolation(t *testing.T) {
 	assertModerationDedupeCounts(t, transport, 1, 1, 1)
 	if got := joinedTelegramBodies(transport); !strings.Contains(got, "消息违规") {
 		t.Fatalf("feedback body = %q, want message reason", got)
+	}
+	if got := db.trustSideEffectCalls(); got != 0 {
+		t.Fatalf("deduped profile trust side effects = %d, want 0", got)
+	}
+	db.mu.Lock()
+	decisions := len(db.aiDecisions)
+	db.mu.Unlock()
+	if decisions != 1 {
+		t.Fatalf("profile ai_decisions inserts = %d, want 1", decisions)
 	}
 }
 
@@ -453,6 +494,9 @@ type moderationProfileMatchMockDB struct {
 	violations  []store.InsertViolationParams
 	profileLogs []store.InsertProfileCheckLogParams
 	warnings    []store.Warning
+
+	failTrustSideEffects bool
+	trustSideEffects     int
 }
 
 func newModerationProfileMatchMockDB(chatID, userID int64) *moderationProfileMatchMockDB {
@@ -479,6 +523,20 @@ func (db *moderationProfileMatchMockDB) currentTrust() store.UserTrust {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 	return db.userTrust
+}
+
+func (db *moderationProfileMatchMockDB) trustSideEffectCalls() int {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	return db.trustSideEffects
+}
+
+func (db *moderationProfileMatchMockDB) recordTrustSideEffectLocked() pgx.Row {
+	if db.failTrustSideEffects {
+		db.trustSideEffects++
+		return mockErrorRow{err: fmt.Errorf("unexpected trust side effect on deduped action")}
+	}
+	return nil
 }
 
 func (db *moderationProfileMatchMockDB) Exec(_ context.Context, query string, args ...any) (pgconn.CommandTag, error) {
@@ -699,6 +757,10 @@ func (db *moderationProfileMatchMockDB) QueryRow(_ context.Context, query string
 		)
 	case strings.Contains(query, "SET messages_checked = messages_checked"):
 		db.mu.Lock()
+		if row := db.recordTrustSideEffectLocked(); row != nil {
+			db.mu.Unlock()
+			return row
+		}
 		db.userTrust.MessagesChecked += args[2].(int32)
 		db.userTrust.MessagesClean += args[3].(int32)
 		db.userTrust.Score = args[4].(float64)
@@ -726,6 +788,10 @@ func (db *moderationProfileMatchMockDB) QueryRow(_ context.Context, query string
 		)
 	case strings.Contains(query, "SET messages_clean = 0"):
 		db.mu.Lock()
+		if row := db.recordTrustSideEffectLocked(); row != nil {
+			db.mu.Unlock()
+			return row
+		}
 		db.userTrust.MessagesClean = 0
 		db.userTrust.Score = args[2].(float64)
 		db.userTrust.UpdatedAt = db.now.Add(2 * time.Minute)
@@ -752,6 +818,10 @@ func (db *moderationProfileMatchMockDB) QueryRow(_ context.Context, query string
 		)
 	case strings.Contains(query, "SET status = $3"):
 		db.mu.Lock()
+		if row := db.recordTrustSideEffectLocked(); row != nil {
+			db.mu.Unlock()
+			return row
+		}
 		db.userTrust.Status = args[2].(string)
 		db.userTrust.Score = args[3].(float64)
 		db.userTrust.GraduatedAt = args[4].(*time.Time)
