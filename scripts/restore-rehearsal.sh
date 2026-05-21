@@ -24,6 +24,8 @@ TABLES=(
 
 RESTORE_OK=0
 VALIDATION_FAILED=0
+OWNER_ROLES_CREATED=""
+OWNER_ROLES_SKIPPED=""
 
 log() {
   printf '%s\n' "$*"
@@ -101,6 +103,153 @@ psql_query() {
     -e PGPASSWORD="${PGPASSWORD_REHEARSAL}" \
     "${CONTAINER_NAME}" \
     psql -AtX -v ON_ERROR_STOP=1 -U "${PGUSER_REHEARSAL}" -d "${DB_NAME}" -c "${sql}"
+}
+
+sql_literal() {
+  local value="$1"
+
+  printf "'%s'" "${value//\'/\'\'}"
+}
+
+join_by_comma() {
+  local first=1
+  local item
+
+  for item in "$@"; do
+    if [[ "${first}" == "1" ]]; then
+      first=0
+    else
+      printf ', '
+    fi
+    printf '%s' "${item}"
+  done
+}
+
+extract_plain_sql_owner_roles() {
+  local backup="$1"
+
+  case "${backup}" in
+    *.sql)
+      awk '
+        BEGIN { IGNORECASE = 1 }
+        {
+          line = $0
+          while (match(line, /OWNER[[:space:]]+TO[[:space:]]+("[^"]+"|[^[:space:];]+)/)) {
+            role = substr(line, RSTART, RLENGTH)
+            sub(/^[Oo][Ww][Nn][Ee][Rr][[:space:]]+[Tt][Oo][[:space:]]+/, "", role)
+            print role
+            line = substr(line, RSTART + RLENGTH)
+          }
+          line = $0
+          while (match(line, /SET[[:space:]]+SESSION[[:space:]]+AUTHORIZATION[[:space:]]+("[^"]+"|[^[:space:];]+)/)) {
+            role = substr(line, RSTART, RLENGTH)
+            sub(/^[Ss][Ee][Tt][[:space:]]+[Ss][Ee][Ss][Ss][Ii][Oo][Nn][[:space:]]+[Aa][Uu][Tt][Hh][Oo][Rr][Ii][Zz][Aa][Tt][Ii][Oo][Nn][[:space:]]+/, "", role)
+            print role
+            line = substr(line, RSTART + RLENGTH)
+          }
+        }
+      ' "${backup}"
+      ;;
+    *.sql.gz)
+      gzip -dc "${backup}" | awk '
+        BEGIN { IGNORECASE = 1 }
+        {
+          line = $0
+          while (match(line, /OWNER[[:space:]]+TO[[:space:]]+("[^"]+"|[^[:space:];]+)/)) {
+            role = substr(line, RSTART, RLENGTH)
+            sub(/^[Oo][Ww][Nn][Ee][Rr][[:space:]]+[Tt][Oo][[:space:]]+/, "", role)
+            print role
+            line = substr(line, RSTART + RLENGTH)
+          }
+          line = $0
+          while (match(line, /SET[[:space:]]+SESSION[[:space:]]+AUTHORIZATION[[:space:]]+("[^"]+"|[^[:space:];]+)/)) {
+            role = substr(line, RSTART, RLENGTH)
+            sub(/^[Ss][Ee][Tt][[:space:]]+[Ss][Ee][Ss][Ss][Ii][Oo][Nn][[:space:]]+[Aa][Uu][Tt][Hh][Oo][Rr][Ii][Zz][Aa][Tt][Ii][Oo][Nn][[:space:]]+/, "", role)
+            print role
+            line = substr(line, RSTART + RLENGTH)
+          }
+        }
+      '
+      ;;
+  esac
+}
+
+normalize_owner_role() {
+  local role="$1"
+
+  role="${role%;}"
+  if [[ "${role}" == \"*\" ]]; then
+    role="${role#\"}"
+    role="${role%\"}"
+    role="${role//\"\"/\"}"
+  fi
+
+  printf '%s\n' "${role}"
+}
+
+is_skipped_owner_role() {
+  local role_upper
+
+  role_upper="$(printf '%s' "$1" | tr '[:lower:]' '[:upper:]')"
+  case "${role_upper}" in
+    CURRENT_ROLE|CURRENT_USER|SESSION_USER|PG_DATABASE_OWNER|POSTGRES)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+precreate_plain_sql_owner_roles() {
+  local backup="$1"
+  local raw_role
+  local role
+  local role_lit
+  local created=()
+  local skipped=()
+  local seen=$'\n'
+
+  case "${backup}" in
+    *.sql|*.sql.gz) ;;
+    *) return 0 ;;
+  esac
+
+  while IFS= read -r raw_role; do
+    role="$(normalize_owner_role "${raw_role}")"
+    [[ -n "${role}" ]] || continue
+
+    if [[ "${seen}" == *$'\n'"${role}"$'\n'* ]]; then
+      continue
+    fi
+    seen+="${role}"$'\n'
+
+    if is_skipped_owner_role "${role}"; then
+      skipped+=("${role}")
+      continue
+    fi
+
+    if [[ ! "${role}" =~ ^[[:alnum:]_][[:alnum:]_.$@+.-]{0,127}$ ]]; then
+      skipped+=("${role}")
+      continue
+    fi
+
+    role_lit="$(sql_literal "${role}")"
+    psql_query "DO \$\$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = ${role_lit}) THEN EXECUTE format('CREATE ROLE %I NOLOGIN', ${role_lit}); END IF; END \$\$;"
+    created+=("${role}")
+  done < <(extract_plain_sql_owner_roles "${backup}")
+
+  if ((${#created[@]} > 0)); then
+    OWNER_ROLES_CREATED="$(join_by_comma "${created[@]}")"
+  else
+    OWNER_ROLES_CREATED="none"
+  fi
+
+  if ((${#skipped[@]} > 0)); then
+    OWNER_ROLES_SKIPPED="$(join_by_comma "${skipped[@]}")"
+  else
+    OWNER_ROLES_SKIPPED="none"
+  fi
 }
 
 restore_backup() {
@@ -220,6 +369,12 @@ if ! wait_for_postgres; then
 fi
 
 log "Restoring backup..."
+precreate_plain_sql_owner_roles "${BACKUP_PATH}"
+if [[ "${BACKUP_PATH}" == *.sql || "${BACKUP_PATH}" == *.sql.gz ]]; then
+  log "owner roles:     created=${OWNER_ROLES_CREATED}; skipped=${OWNER_ROLES_SKIPPED}"
+else
+  log "owner roles:     skipped (pg_restore --no-owner --no-acl)"
+fi
 if restore_backup "${BACKUP_PATH}"; then
   RESTORE_OK=1
   log "restore:         OK"
