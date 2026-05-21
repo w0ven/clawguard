@@ -123,19 +123,23 @@ func (s *Service) InvalidateSystemStateCache(ctx context.Context) {
 }
 
 func (s *Service) WriteRuntimeAudit(ctx context.Context, scope string, chatID *int64, action string, before, after any) {
+	s.WriteRuntimeAuditWithAdmin(ctx, scope, chatID, 0, action, before, after)
+}
+
+func (s *Service) WriteRuntimeAuditWithAdmin(ctx context.Context, scope string, chatID *int64, adminID int64, action string, before, after any) {
 	beforeRaw := mustJSONBytes(before)
 	afterRaw := mustJSONBytes(after)
 	diff := action
 	if _, err := s.queries.InsertAuditEntry(ctx, store.InsertAuditEntryParams{
 		Scope:   scope,
 		ChatID:  chatID,
-		AdminID: 0,
+		AdminID: adminID,
 		Action:  action,
 		Before:  beforeRaw,
 		After:   afterRaw,
 		Diff:    &diff,
 	}); err != nil {
-		s.logger.Warn("write runtime audit failed", zap.Error(err), zap.String("scope", scope), zap.String("action", action))
+		s.logger.Warn("write runtime audit failed", zap.Error(err), zap.String("scope", scope), zap.String("action", action), zap.Int64("admin_id", adminID))
 	}
 }
 

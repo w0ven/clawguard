@@ -1715,6 +1715,24 @@ func quotedMessageSource(msg *tele.Message) string {
 }
 
 func (s *Service) applyAIAction(ctx context.Context, msg *tele.Message, policy config.GuardPolicy, trust store.UserTrust, output ai.CheckOutput, action string, isEdited bool) error {
+	auditOutcome := "success"
+	auditError := ""
+	defer func() {
+		if action == "none" {
+			return
+		}
+		s.writeModerationAudit(ctx, "ai", msg.Chat, msg.Sender, "ai_"+action, output.Verdict.Reason, map[string]any{
+			"message_id": msg.ID,
+			"verdict":    output.Verdict.Verdict,
+			"category":   output.Verdict.Category,
+			"confidence": output.Verdict.Confidence,
+			"model":      output.Model,
+			"outcome":    auditOutcome,
+			"error":      auditError,
+			"edited":     isEdited,
+		})
+	}()
+
 	checkedDelta := int32(1)
 	cleanDelta := int32(0)
 	nextStatus := trust.Status
@@ -1736,10 +1754,13 @@ func (s *Service) applyAIAction(ctx context.Context, msg *tele.Message, policy c
 		if actionOK {
 			defer actionRelease()
 			if err := s.banUser(msg.Chat, msg.Sender); err != nil {
+				auditOutcome = "failed"
+				auditError = err.Error()
 				return err
 			}
 		} else {
 			s.logger.Info("skip duplicate ai ban user action", zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID), zap.Int("message_id", msg.ID))
+			auditOutcome = "skipped"
 			return nil
 		}
 		nextStatus = "banned"
@@ -1758,10 +1779,13 @@ func (s *Service) applyAIAction(ctx context.Context, msg *tele.Message, policy c
 		if actionOK {
 			defer actionRelease()
 			if err := s.muteUser(msg.Chat, msg.Sender, 600); err != nil {
+				auditOutcome = "failed"
+				auditError = err.Error()
 				return err
 			}
 		} else {
 			s.logger.Info("skip duplicate ai mute user action", zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID), zap.Int("message_id", msg.ID))
+			auditOutcome = "skipped"
 			return nil
 		}
 		nextStatus = "suspicious"
@@ -1780,10 +1804,13 @@ func (s *Service) applyAIAction(ctx context.Context, msg *tele.Message, policy c
 		if actionOK {
 			defer actionRelease()
 			if _, _, err := s.IncrWarning(ctx, msg.Chat, msg.Sender, "ai_"+output.Verdict.Verdict, policy, true, true); err != nil {
+				auditOutcome = "failed"
+				auditError = err.Error()
 				return err
 			}
 		} else {
 			s.logger.Info("skip duplicate ai warn user action", zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID), zap.Int("message_id", msg.ID))
+			auditOutcome = "skipped"
 			return nil
 		}
 		nextStatus = "suspicious"
@@ -1806,6 +1833,7 @@ func (s *Service) applyAIAction(ctx context.Context, msg *tele.Message, policy c
 			defer actionRelease()
 		} else {
 			s.logger.Info("skip duplicate ai delete user action", zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID), zap.Int("message_id", msg.ID))
+			auditOutcome = "skipped"
 			return nil
 		}
 		nextStatus = "suspicious"
@@ -1872,6 +1900,38 @@ func (s *Service) applyAIAction(ctx context.Context, msg *tele.Message, policy c
 
 	s.resetTrustAfterViolation(ctx, msg, action, stringPtr(output.Verdict.Reason))
 	return nil
+}
+
+func (s *Service) writeModerationAudit(ctx context.Context, source string, chat *tele.Chat, target *tele.User, action string, reason string, extra map[string]any) {
+	if chat == nil || target == nil {
+		return
+	}
+	chatID := chat.ID
+	before := map[string]any{
+		"source": source,
+		"chat": map[string]any{
+			"id":       chat.ID,
+			"title":    chat.Title,
+			"username": chat.Username,
+			"type":     chat.Type,
+		},
+		"target": map[string]any{
+			"user_id":    target.ID,
+			"username":   target.Username,
+			"first_name": target.FirstName,
+			"last_name":  target.LastName,
+			"display":    displayName(target),
+		},
+	}
+	after := map[string]any{
+		"source": source,
+		"action": action,
+		"reason": reason,
+	}
+	for key, value := range extra {
+		after[key] = value
+	}
+	s.WriteRuntimeAudit(ctx, "moderation", &chatID, action, before, after)
 }
 
 // dispatchAIActionFeedback 为 AI 触发的动作发送群内反馈
@@ -2152,10 +2212,24 @@ func (s *Service) IncrWarning(ctx context.Context, chat *tele.Chat, user *tele.U
 }
 
 func (s *Service) escalateWarnings(ctx context.Context, chat *tele.Chat, user *tele.User, policy config.GuardPolicy, userActionLocked bool, sendEscalationFeedback bool) error {
+	auditOutcome := "success"
+	auditError := ""
+	defer func() {
+		action := policy.Warnings.ActionAtMax
+		if action == "" {
+			action = config.DefaultPolicy.Warnings.ActionAtMax
+		}
+		s.writeModerationAudit(ctx, "warning_escalation", chat, user, "warning_"+action, "达到警告上限", map[string]any{
+			"warnings": policy.Warnings.MaxWarns,
+			"outcome":  auditOutcome,
+			"error":    auditError,
+		})
+	}()
 	if !userActionLocked {
 		actionRelease, actionOK := s.acquireUserActionLock(chat.ID, user.ID)
 		if !actionOK {
 			s.logger.Info("skip duplicate warnings escalation user action", zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
+			auditOutcome = "skipped"
 			return nil
 		}
 		defer actionRelease()
@@ -2169,25 +2243,37 @@ func (s *Service) escalateWarnings(ctx context.Context, chat *tele.Chat, user *t
 	switch action {
 	case "mute":
 		if err := s.muteUser(chat, user, 3600); err != nil {
+			auditOutcome = "failed"
+			auditError = err.Error()
 			return fmt.Errorf("mute warned user: %w", err)
 		}
 	case "mute_5m":
 		if err := s.muteUser(chat, user, 300); err != nil {
+			auditOutcome = "failed"
+			auditError = err.Error()
 			return fmt.Errorf("mute warned user: %w", err)
 		}
 	case "mute_1h":
 		if err := s.muteUser(chat, user, 3600); err != nil {
+			auditOutcome = "failed"
+			auditError = err.Error()
 			return fmt.Errorf("mute warned user: %w", err)
 		}
 	case "kick":
 		if err := s.kickUser(chat, user); err != nil {
+			auditOutcome = "failed"
+			auditError = err.Error()
 			return fmt.Errorf("kick warned user: %w", err)
 		}
 	case "ban":
 		if err := s.banUser(chat, user); err != nil {
+			auditOutcome = "failed"
+			auditError = err.Error()
 			return fmt.Errorf("ban warned user: %w", err)
 		}
 	default:
+		auditOutcome = "failed"
+		auditError = fmt.Sprintf("unknown warnings escalate action %q", action)
 		return fmt.Errorf("unknown warnings escalate action %q", action)
 	}
 
