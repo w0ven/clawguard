@@ -45,6 +45,8 @@ type FieldKind =
   | "text"
   | "number"
   | "textarea"
+  | "username-list"
+  | "readonly-number"
   | "select"
   | "template"
   | "model-ref"
@@ -281,6 +283,28 @@ export const fieldDescriptors: FieldDescriptor[] = [
   },
   {
     tab: "filter",
+    path: ["filter", "other_bots_action"],
+    label: "其他 Bot 入群策略",
+    description:
+      "默认 audit：非白名单 Bot 入群后进入 AI 审核；kick/ban 为自动移出/封禁；off 为不处理。",
+    kind: "select",
+    options: [
+      { value: "audit", label: "进入 AI 审核（推荐）" },
+      { value: "kick", label: "自动移出" },
+      { value: "ban", label: "自动封禁" },
+      { value: "off", label: "不处理" },
+    ],
+  },
+  {
+    tab: "filter",
+    path: ["filter", "bot_whitelist"],
+    label: "Bot 白名单",
+    description:
+      "一行一个 Bot 用户名，支持 @foo 或 foo；后端保存时会统一去 @、小写。",
+    kind: "username-list",
+  },
+  {
+    tab: "filter",
     path: ["filter", "usernames", "enabled"],
     label: "用户名黑名单",
     description: "",
@@ -513,16 +537,17 @@ export const fieldDescriptors: FieldDescriptor[] = [
   {
     tab: "ai",
     path: ["ai", "graduate_after_messages"],
-    label: "毕业消息数",
-    description: "干净消息达到后自动转 trusted",
+    label: "毕业 clean 消息数",
+    description: "未毕业用户必须通过 AI 审核的 clean 消息数，默认 5。",
     kind: "number",
   },
   {
     tab: "ai",
     path: ["ai", "graduate_after_days"],
-    label: "毕业天数",
-    description: "入群超过此天数自动转 trusted",
-    kind: "number",
+    label: "毕业天数（已废弃）",
+    description:
+      "兼容旧配置保留；当前毕业只看 AI clean 消息数，不再按天数自动 trusted。",
+    kind: "readonly-number",
   },
   {
     tab: "ai",
@@ -893,6 +918,11 @@ export function GroupConfigEditor({ group, mergedPolicy }: Props) {
     }
     if (field.kind === "textarea") {
       value = parseArrayValue(String(rawValue));
+    }
+    if (field.kind === "username-list") {
+      value = parseArrayValue(String(rawValue)).map((item) =>
+        item.replace(/^@+/, "").trim().toLowerCase(),
+      );
     }
     if (field.kind === "model-ref-list") {
       value = Array.isArray(rawValue)
@@ -2374,13 +2404,30 @@ function FieldControl({
     );
   }
 
-  if (field.kind === "textarea") {
+  if (field.kind === "textarea" || field.kind === "username-list") {
     return (
       <ArrayTextarea
         disabled={inherited}
         value={Array.isArray(value) ? (value as string[]) : []}
         onChange={(s) => onChange(field, s)}
         className="font-mono text-xs"
+      />
+    );
+  }
+
+  if (field.kind === "readonly-number") {
+    const numericValue =
+      typeof value === "number"
+        ? value
+        : value == null || Number.isNaN(Number(value))
+          ? ""
+          : Number(value);
+    return (
+      <Input
+        disabled
+        type="number"
+        value={numericValue}
+        aria-readonly="true"
       />
     );
   }
