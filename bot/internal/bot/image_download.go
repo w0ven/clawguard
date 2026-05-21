@@ -36,12 +36,8 @@ var imageDownloadHTTPClient = &http.Client{
 	},
 }
 
-func (s *Service) loadPhotoForModeration(ctx context.Context, msg *tele.Message) (string, string, error) {
-	if msg == nil || msg.Photo == nil {
-		return "", "", nil
-	}
-
-	media := msg.Photo.MediaFile()
+func (s *Service) loadVisualForModeration(ctx context.Context, msg *tele.Message) (string, string, error) {
+	media := visualMediaFile(msg)
 	if media == nil || strings.TrimSpace(media.FileID) == "" {
 		return "", "", nil
 	}
@@ -60,6 +56,25 @@ func (s *Service) loadPhotoForModeration(ctx context.Context, msg *tele.Message)
 
 	sum := sha256.Sum256(body)
 	return base64.StdEncoding.EncodeToString(body), fmt.Sprintf("%x", sum[:]), nil
+}
+
+func visualMediaFile(msg *tele.Message) *tele.File {
+	if msg == nil {
+		return nil
+	}
+	if msg.Photo != nil {
+		return msg.Photo.MediaFile()
+	}
+	if msg.Sticker == nil {
+		return nil
+	}
+	if !msg.Sticker.Animated && !msg.Sticker.Video {
+		return msg.Sticker.MediaFile()
+	}
+	if msg.Sticker.Thumbnail != nil {
+		return msg.Sticker.Thumbnail.MediaFile()
+	}
+	return nil
 }
 
 func (s *Service) fetchTelegramFilePath(ctx context.Context, fileID string) (string, error) {
