@@ -170,6 +170,7 @@ type UserTrust struct {
 	BannedAt        *time.Time
 	BannedReason    []byte
 	Notes           *string
+	IsBot           bool
 }
 
 type AIDecision struct {

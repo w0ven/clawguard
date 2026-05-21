@@ -1,0 +1,201 @@
+package bot
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/openclaw/clawguard/internal/config"
+	"github.com/openclaw/clawguard/internal/store"
+	"go.uber.org/zap"
+	tele "gopkg.in/telebot.v3"
+)
+
+type otherBotMockDB struct {
+	mu      sync.Mutex
+	now     time.Time
+	policy  config.GuardPolicy
+	trust   *store.UserTrust
+	audits  int
+	noTrust bool
+}
+
+func newOtherBotMockDB(policy config.GuardPolicy) *otherBotMockDB {
+	return &otherBotMockDB{now: time.Date(2026, 5, 21, 8, 0, 0, 0, time.UTC), policy: policy}
+}
+
+func (db *otherBotMockDB) Exec(_ context.Context, query string, args ...any) (pgconn.CommandTag, error) {
+	if strings.Contains(query, "INSERT INTO config_audit") {
+		db.mu.Lock()
+		db.audits++
+		db.mu.Unlock()
+		return pgconn.NewCommandTag("INSERT 1"), nil
+	}
+	return pgconn.CommandTag{}, fmt.Errorf("unexpected Exec: %s", query)
+}
+
+func (db *otherBotMockDB) Query(_ context.Context, query string, args ...any) (pgx.Rows, error) {
+	return nil, fmt.Errorf("unexpected Query: %s", query)
+}
+
+func (db *otherBotMockDB) QueryRow(_ context.Context, query string, args ...any) pgx.Row {
+	switch {
+	case strings.Contains(query, "FROM global_config"):
+		return mockScanRow(int32(1), []byte(`{}`), db.now)
+	case strings.Contains(query, "FROM groups"):
+		raw, _ := json.Marshal(db.policy)
+		return mockScanRow(int64(1), args[0].(int64), "group", "supergroup", int32(0), true, db.now, raw)
+	case strings.Contains(query, "FROM authorized_groups"):
+		return mockScanRow(args[0].(int64), "group", db.now, (*int64)(nil), true, "")
+	case strings.Contains(query, "FROM admins"):
+		return mockErrorRow{err: pgx.ErrNoRows}
+	case strings.Contains(query, "FROM user_trust"):
+		db.mu.Lock()
+		defer db.mu.Unlock()
+		if db.noTrust || db.trust == nil {
+			return mockErrorRow{err: pgx.ErrNoRows}
+		}
+		return scanTrustRow(*db.trust)
+	case strings.Contains(query, "INSERT INTO user_trust"):
+		trust := store.UserTrust{
+			ChatID:          args[0].(int64),
+			UserID:          args[1].(int64),
+			Username:        args[2].(*string),
+			FirstName:       args[3].(*string),
+			LastName:        args[4].(*string),
+			JoinedAt:        args[5].(time.Time),
+			UpdatedAt:       db.now,
+			StatusChangedAt: db.now,
+			Status:          args[6].(string),
+			Score:           args[7].(float64),
+			MessagesChecked: args[8].(int32),
+			MessagesClean:   args[9].(int32),
+			GraduatedAt:     args[10].(*time.Time),
+			BannedAt:        args[11].(*time.Time),
+			BannedReason:    args[12].([]byte),
+			Notes:           args[13].(*string),
+			IsBot:           args[14].(bool),
+		}
+		db.mu.Lock()
+		db.trust = &trust
+		db.noTrust = false
+		db.mu.Unlock()
+		return scanTrustRow(trust)
+	case strings.Contains(query, "SET status = $3"):
+		db.mu.Lock()
+		if db.trust == nil {
+			db.mu.Unlock()
+			return mockErrorRow{err: errors.New("missing trust")}
+		}
+		db.trust.Status = args[2].(string)
+		db.trust.Score = args[3].(float64)
+		db.trust.GraduatedAt = args[4].(*time.Time)
+		db.trust.BannedAt = args[5].(*time.Time)
+		db.trust.BannedReason = args[6].([]byte)
+		db.trust.Notes = args[7].(*string)
+		trust := *db.trust
+		db.mu.Unlock()
+		return scanTrustRow(trust)
+	case strings.Contains(query, "SET is_bot = $3"):
+		db.mu.Lock()
+		if db.trust == nil {
+			db.mu.Unlock()
+			return mockErrorRow{err: errors.New("missing trust")}
+		}
+		db.trust.IsBot = args[2].(bool)
+		trust := *db.trust
+		db.mu.Unlock()
+		return scanTrustRow(trust)
+	default:
+		return mockErrorRow{err: fmt.Errorf("unexpected query: %s", query)}
+	}
+}
+
+func scanTrustRow(trust store.UserTrust) pgx.Row {
+	return mockScanRow(
+		trust.ChatID, trust.UserID, trust.Username, trust.FirstName, trust.LastName,
+		trust.JoinedAt, trust.UpdatedAt, trust.StatusChangedAt, trust.Status, trust.Score,
+		trust.MessagesChecked, trust.MessagesClean, trust.GraduatedAt, trust.BannedAt,
+		trust.BannedReason, trust.Notes, trust.IsBot,
+	)
+}
+
+func TestHandleOtherBotJoinedActions(t *testing.T) {
+	tests := []struct {
+		name        string
+		action      string
+		whitelist   []string
+		wantStatus  string
+		wantMethods []string
+	}{
+		{name: "whitelist", action: "audit", whitelist: []string{"helperbot"}, wantStatus: "trusted"},
+		{name: "audit", action: "audit", wantStatus: "new"},
+		{name: "kick", action: "kick", wantStatus: "banned", wantMethods: []string{"kickChatMember", "unbanChatMember"}},
+		{name: "ban", action: "ban", wantStatus: "banned", wantMethods: []string{"kickChatMember"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			policy := config.DefaultPolicy
+			policy.Filter.OtherBotsAction = tt.action
+			policy.Filter.BotWhitelist = tt.whitelist
+			db := newOtherBotMockDB(policy)
+			botClient, transport := newMockTelegramBot(t, "")
+			svc := &Service{logger: zap.NewNop(), queries: store.New(db), bot: botClient, sender: botClient, sendLimiter: NewSendLimiter()}
+			update := &tele.ChatMemberUpdate{
+				Chat:          &tele.Chat{ID: -1001, Title: "group", Type: tele.ChatSuperGroup},
+				OldChatMember: &tele.ChatMember{User: &tele.User{ID: 77, IsBot: true, Username: "helperbot"}, Role: tele.Left},
+				NewChatMember: &tele.ChatMember{User: &tele.User{ID: 77, IsBot: true, Username: "helperbot"}, Role: tele.Member},
+			}
+			if err := svc.handleOtherBotJoined(update, update.NewChatMember.User); err != nil {
+				t.Fatalf("handleOtherBotJoined returned error: %v", err)
+			}
+			if db.trust == nil || db.trust.Status != tt.wantStatus || !db.trust.IsBot {
+				t.Fatalf("trust = %+v, want status=%s is_bot=true", db.trust, tt.wantStatus)
+			}
+			methods := transport.Methods()
+			for _, want := range tt.wantMethods {
+				if !containsString(methods, want) {
+					t.Fatalf("methods = %v, want %s", methods, want)
+				}
+			}
+		})
+	}
+}
+
+func TestEnsureUserTrustCreatesUnknownBotAsNew(t *testing.T) {
+	policy := config.DefaultPolicy
+	db := newOtherBotMockDB(policy)
+	db.noTrust = true
+	botClient, _ := newMockTelegramBot(t, "")
+	svc := &Service{logger: zap.NewNop(), queries: store.New(db), bot: botClient, sender: botClient, sendLimiter: NewSendLimiter()}
+	msg := &tele.Message{Chat: &tele.Chat{ID: -1001, Title: "group", Type: tele.ChatSuperGroup}, Sender: &tele.User{ID: 77, IsBot: true, Username: "unknownbot"}}
+
+	trust, err := svc.ensureUserTrust(context.Background(), msg)
+	if err != nil {
+		t.Fatalf("ensureUserTrust returned error: %v", err)
+	}
+	if trust.Status != "new" || !trust.IsBot {
+		t.Fatalf("trust = %+v, want new bot", trust)
+	}
+}
+
+func TestMaybeGraduateUserSkipsBots(t *testing.T) {
+	db := newOtherBotMockDB(config.DefaultPolicy)
+	botClient, _ := newMockTelegramBot(t, "")
+	svc := &Service{logger: zap.NewNop(), queries: store.New(db), bot: botClient, sender: botClient, sendLimiter: NewSendLimiter()}
+	trust := store.UserTrust{ChatID: -1001, UserID: 77, Status: "new", Score: 0.9, MessagesClean: 99, IsBot: true}
+
+	if err := svc.maybeGraduateUser(context.Background(), trust, config.DefaultPolicy.AI); err != nil {
+		t.Fatalf("maybeGraduateUser returned error: %v", err)
+	}
+	if db.trust != nil {
+		t.Fatalf("bot trust should not be updated, got %+v", db.trust)
+	}
+}
