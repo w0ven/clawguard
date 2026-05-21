@@ -286,9 +286,12 @@ func (s *Service) applyAIModeration(ctx context.Context, msg *tele.Message, poli
 		return nil
 	}
 
+	nonWhitelistedBot := isOtherBot(msg.Sender, s.bot) && !s.isBotWhitelistedForChat(ctx, msg.Chat.ID, msg.Sender)
 	switch trust.Status {
 	case "trusted":
-		return nil
+		if !nonWhitelistedBot {
+			return nil
+		}
 	case "banned":
 		deleteRelease, deleteOK := s.acquireMessageDeleteLock(msg.Chat.ID, msg.ID)
 		if deleteOK {
@@ -316,6 +319,9 @@ func (s *Service) applyAIModeration(ctx context.Context, msg *tele.Message, poli
 		return nil
 	}
 
+	if msg.Sticker != nil {
+		content.HasImage = true
+	}
 	// 未毕业用户（new/suspicious）发言前 bio 审核（开关打开时才做）
 	// 防止用户入群时 bio 干净、之后偷偷改 bio 加广告
 	if policy.AI.CheckProfileOnMessage {
@@ -328,7 +334,7 @@ func (s *Service) applyAIModeration(ctx context.Context, msg *tele.Message, poli
 		imageCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
 		defer cancel()
 
-		loadedBase64, loadedHash, err := s.loadPhotoForModeration(imageCtx, msg)
+		loadedBase64, loadedHash, err := s.loadVisualForModeration(imageCtx, msg)
 		if err != nil {
 			s.logger.Warn("download image for moderation failed, fallback to text", zap.Error(err), zap.Int64("chat_id", msg.Chat.ID), zap.Int("message_id", msg.ID))
 		} else {
@@ -378,6 +384,7 @@ func (s *Service) applyAIModeration(ctx context.Context, msg *tele.Message, poli
 		ImagesHash:        imagesHash,
 		VideoFileUniqueID: videoFileUniqueID,
 		Policy:            policy.AI,
+		IsUngraduated:     trust.Status != "trusted",
 	})
 	if err != nil {
 		s.logger.Warn("ai moderation failed, allow message", zap.Error(err), zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID))
@@ -567,7 +574,20 @@ func messageHasRestrictedMedia(msg *tele.Message) bool {
 		msg.Audio != nil ||
 		msg.Voice != nil ||
 		msg.VideoNote != nil ||
-		msg.Sticker != nil
+		msg.Sticker != nil ||
+		msg.Contact != nil ||
+		msg.Poll != nil ||
+		msg.Dice != nil ||
+		msg.Location != nil ||
+		msg.Venue != nil ||
+		msg.Game != nil ||
+		msg.Invoice != nil ||
+		msg.Story != nil ||
+		msg.ReplyToStory != nil ||
+		msg.Giveaway != nil ||
+		msg.GiveawayCreated != nil ||
+		msg.GiveawayWinners != nil ||
+		msg.GiveawayCompleted != nil
 }
 
 func messageMediaKind(msg *tele.Message) string {
@@ -591,6 +611,30 @@ func messageMediaKind(msg *tele.Message) string {
 		return "video_note"
 	case msg.Sticker != nil:
 		return "sticker"
+	case msg.Contact != nil:
+		return "contact"
+	case msg.Poll != nil:
+		return "poll"
+	case msg.Dice != nil:
+		return "dice"
+	case msg.Location != nil:
+		return "location"
+	case msg.Venue != nil:
+		return "venue"
+	case msg.Game != nil:
+		return "game"
+	case msg.Invoice != nil:
+		return "invoice"
+	case msg.Story != nil || msg.ReplyToStory != nil:
+		return "story"
+	case msg.Giveaway != nil:
+		return "giveaway"
+	case msg.GiveawayCreated != nil:
+		return "giveaway_created"
+	case msg.GiveawayWinners != nil:
+		return "giveaway_winners"
+	case msg.GiveawayCompleted != nil:
+		return "giveaway_completed"
 	default:
 		return "media"
 	}
@@ -807,10 +851,57 @@ func (s *Service) ensureUserTrust(ctx context.Context, msg *tele.Message) (store
 			s.logger.Info("archived user reactivated", zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID))
 			return reactivated, nil
 		}
+		if isOtherBot(msg.Sender, s.bot) {
+			if !trust.IsBot {
+				updated, updateErr := s.queries.UpdateUserTrustIsBot(ctx, store.UpdateUserTrustIsBotParams{
+					ChatID: msg.Chat.ID,
+					UserID: msg.Sender.ID,
+					IsBot:  true,
+				})
+				if updateErr != nil {
+					return store.UserTrust{}, updateErr
+				}
+				trust = updated
+			}
+			if trust.Status == "trusted" && !s.isBotWhitelistedForChat(ctx, msg.Chat.ID, msg.Sender) {
+				updated, updateErr := s.queries.UpdateUserTrustStatus(ctx, store.UpdateUserTrustStatusParams{
+					ChatID: msg.Chat.ID,
+					UserID: msg.Sender.ID,
+					Status: "new",
+					Score:  0.5,
+					Notes:  stringPtr("bot whitelist revoked"),
+				})
+				if updateErr != nil {
+					return store.UserTrust{}, updateErr
+				}
+				trust = updated
+			}
+		}
 		return trust, nil
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return store.UserTrust{}, err
+	}
+	if isOtherBot(msg.Sender, s.bot) {
+		trust, err := s.queries.UpsertUserTrust(ctx, store.UpsertUserTrustParams{
+			ChatID:          msg.Chat.ID,
+			UserID:          msg.Sender.ID,
+			Username:        userFieldPtr(msg.Sender.Username),
+			FirstName:       userFieldPtr(msg.Sender.FirstName),
+			LastName:        userFieldPtr(msg.Sender.LastName),
+			JoinedAt:        time.Now(),
+			Status:          "new",
+			Score:           0.5,
+			MessagesChecked: 0,
+			MessagesClean:   0,
+			Notes:           stringPtr("unknown bot message"),
+			IsBot:           true,
+		})
+		if err != nil {
+			return store.UserTrust{}, err
+		}
+		s.notifyOwnersOtherBot(ctx, msg.Chat, msg.Sender, "unknown_bot_message", "未知 bot 在群里发言")
+		return trust, nil
 	}
 	// 没有 trust 记录的用户说明是 bot 部署前就在群里的老成员，直接标记 trusted
 	return s.queries.UpsertUserTrust(ctx, store.UpsertUserTrustParams{
@@ -824,7 +915,40 @@ func (s *Service) ensureUserTrust(ctx context.Context, msg *tele.Message) (store
 		Score:           0.5,
 		MessagesChecked: 0,
 		MessagesClean:   0,
+		IsBot:           false,
 	})
+}
+
+func isOtherBot(user *tele.User, bot *tele.Bot) bool {
+	if user == nil || !user.IsBot {
+		return false
+	}
+	return bot == nil || bot.Me == nil || user.ID != bot.Me.ID
+}
+
+func (s *Service) isBotWhitelistedForChat(ctx context.Context, chatID int64, user *tele.User) bool {
+	policy, err := config.LoadPolicy(ctx, s.queries, chatID)
+	if err != nil {
+		s.logger.Warn("load policy for bot whitelist failed", zap.Error(err), zap.Int64("chat_id", chatID))
+		policy = config.DefaultPolicy
+	}
+	return isBotWhitelisted(user, policy.Filter.BotWhitelist)
+}
+
+func isBotWhitelisted(user *tele.User, whitelist []string) bool {
+	if user == nil {
+		return false
+	}
+	username := strings.TrimPrefix(strings.TrimSpace(strings.ToLower(user.Username)), "@")
+	if username == "" {
+		return false
+	}
+	for _, allowed := range whitelist {
+		if username == strings.TrimPrefix(strings.TrimSpace(strings.ToLower(allowed)), "@") {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Service) decideAIAction(policy config.AIPolicy, output ai.CheckOutput) string {
@@ -1411,6 +1535,56 @@ func extractReviewableContent(msg *tele.Message) reviewableContent {
 			parts = append(parts, "Telegram用户="+value)
 		}
 		return reviewableContent{Text: prefix + strings.Join(parts, " "), Kind: "contact", ViaBotHint: viaBotHint}
+	case msg.Poll != nil:
+		parts := []string{"[投票]"}
+		if value := strings.TrimSpace(msg.Poll.Question); value != "" {
+			parts = append(parts, "标题="+value)
+		}
+		for idx, option := range msg.Poll.Options {
+			if value := strings.TrimSpace(option.Text); value != "" {
+				parts = append(parts, fmt.Sprintf("选项%d=%s", idx+1, value))
+			}
+		}
+		return reviewableContent{Text: prefix + strings.Join(parts, " "), Kind: "poll", ViaBotHint: viaBotHint}
+	case msg.Dice != nil:
+		return reviewableContent{Text: prefix + fmt.Sprintf("[骰子] emoji=%s value=%d", msg.Dice.Type, msg.Dice.Value), Kind: "dice", ViaBotHint: viaBotHint}
+	case msg.Location != nil:
+		return reviewableContent{Text: prefix + fmt.Sprintf("[位置] lat=%.6g lon=%.6g", msg.Location.Lat, msg.Location.Lng), Kind: "location", ViaBotHint: viaBotHint}
+	case msg.Venue != nil:
+		parts := []string{"[地点]"}
+		if value := strings.TrimSpace(msg.Venue.Title); value != "" {
+			parts = append(parts, "标题="+value)
+		}
+		if value := strings.TrimSpace(msg.Venue.Address); value != "" {
+			parts = append(parts, "地址="+value)
+		}
+		parts = append(parts, fmt.Sprintf("lat=%.6g lon=%.6g", msg.Venue.Location.Lat, msg.Venue.Location.Lng))
+		return reviewableContent{Text: prefix + strings.Join(parts, " "), Kind: "venue", ViaBotHint: viaBotHint}
+	case msg.Game != nil:
+		parts := []string{"[游戏]"}
+		if value := strings.TrimSpace(msg.Game.Title); value != "" {
+			parts = append(parts, "标题="+value)
+		}
+		if value := strings.TrimSpace(msg.Game.Description); value != "" {
+			parts = append(parts, "描述="+value)
+		}
+		return reviewableContent{Text: prefix + strings.Join(parts, " "), Kind: "game", ViaBotHint: viaBotHint}
+	case msg.Invoice != nil:
+		return reviewableContent{Text: prefix + fmt.Sprintf("[Invoice] 标题=%s 描述=%s 总额=%d 货币=%s", strings.TrimSpace(msg.Invoice.Title), strings.TrimSpace(msg.Invoice.Description), msg.Invoice.Total, strings.TrimSpace(msg.Invoice.Currency)), Kind: "invoice", ViaBotHint: viaBotHint}
+	case msg.Story != nil || msg.ReplyToStory != nil:
+		story := msg.Story
+		if story == nil {
+			story = msg.ReplyToStory
+		}
+		return reviewableContent{Text: prefix + storyReviewText(story), Kind: "story", ViaBotHint: viaBotHint}
+	case msg.Giveaway != nil:
+		return reviewableContent{Text: prefix + giveawayReviewText(msg.Giveaway), Kind: "giveaway", ViaBotHint: viaBotHint}
+	case msg.GiveawayCreated != nil:
+		return reviewableContent{Text: prefix + "[赠品] 描述=created 数量=0 截止=", Kind: "giveaway_created", ViaBotHint: viaBotHint}
+	case msg.GiveawayWinners != nil:
+		return reviewableContent{Text: prefix + giveawayWinnersReviewText(msg.GiveawayWinners), Kind: "giveaway_winners", ViaBotHint: viaBotHint}
+	case msg.GiveawayCompleted != nil:
+		return reviewableContent{Text: prefix + fmt.Sprintf("[赠品] 描述=completed 数量=%d 截止=", msg.GiveawayCompleted.WinnerCount), Kind: "giveaway_completed", ViaBotHint: viaBotHint}
 	case msg.Sticker != nil:
 		parts := []string{"[贴纸]"}
 		if value := strings.TrimSpace(msg.Sticker.Emoji); value != "" {
@@ -1479,6 +1653,45 @@ func videoMetaFromVideoNote(videoNote *tele.VideoNote) videoMeta {
 		return videoMeta{}
 	}
 	return videoMeta{DurationSec: videoNote.Duration, Width: videoNote.Length, Height: videoNote.Length, ByteSize: videoNote.FileSize, Source: "video_note", FileID: videoNote.FileID, FileUniqueID: videoNote.UniqueID}
+}
+
+func storyReviewText(story *tele.Story) string {
+	if story == nil {
+		return "[Story 转发] 来源=unknown/0"
+	}
+	source := "unknown"
+	if story.Poster != nil {
+		source = strings.TrimSpace(story.Poster.Title)
+		if source == "" && strings.TrimSpace(story.Poster.Username) != "" {
+			source = "@" + strings.TrimPrefix(strings.TrimSpace(story.Poster.Username), "@")
+		}
+		if source == "" {
+			source = strconv.FormatInt(story.Poster.ID, 10)
+		}
+	}
+	return fmt.Sprintf("[Story 转发] 来源=%s/%d", source, story.ID)
+}
+
+func giveawayReviewText(giveaway *tele.Giveaway) string {
+	if giveaway == nil {
+		return "[赠品] 描述= 数量=0 截止="
+	}
+	deadline := ""
+	if giveaway.SelectionUnixtime > 0 {
+		deadline = time.Unix(giveaway.SelectionUnixtime, 0).Format(time.RFC3339)
+	}
+	return fmt.Sprintf("[赠品] 描述=%s 数量=%d 截止=%s", strings.TrimSpace(giveaway.PrizeDescription), giveaway.WinnerCount, deadline)
+}
+
+func giveawayWinnersReviewText(winners *tele.GiveawayWinners) string {
+	if winners == nil {
+		return "[赠品] 描述=winners 数量=0 截止="
+	}
+	deadline := ""
+	if winners.SelectionUnixtime > 0 {
+		deadline = time.Unix(winners.SelectionUnixtime, 0).Format(time.RFC3339)
+	}
+	return fmt.Sprintf("[赠品] 描述=%s 数量=%d 截止=%s", strings.TrimSpace(winners.PrizeDescription), winners.WinnerCount, deadline)
 }
 
 func contactTelegramIdentity(contact *tele.Contact) string {
@@ -1728,6 +1941,7 @@ func (s *Service) resetTrustAfterViolation(ctx context.Context, msg *tele.Messag
 			Score:           0.5,
 			MessagesChecked: 0,
 			MessagesClean:   0,
+			IsBot:           isOtherBot(msg.Sender, s.bot),
 		})
 		if err != nil {
 			s.logger.Warn("create user trust before reset failed", zap.Error(err), zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID))
@@ -1813,11 +2027,14 @@ func (s *Service) maybeGraduateUser(ctx context.Context, trust store.UserTrust, 
 	if trust.Status == "trusted" || trust.Status == "banned" {
 		return nil
 	}
+	if trust.IsBot {
+		return nil
+	}
 	if trust.Status == "suspicious" {
 		if trust.MessagesClean < 5 && time.Since(trust.StatusChangedAt) < 30*24*time.Hour {
 			return nil
 		}
-	} else if int(trust.MessagesClean) < policy.GraduateAfterMessages && time.Since(trust.JoinedAt) < time.Duration(policy.GraduateAfterDays)*24*time.Hour {
+	} else if int(trust.MessagesClean) < policy.GraduateAfterMessages {
 		return nil
 	}
 	now := time.Now()
