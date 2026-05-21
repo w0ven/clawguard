@@ -2,6 +2,8 @@ package api
 
 import (
 	"context"
+	"encoding/json"
+	"io"
 	"net/http"
 	"time"
 
@@ -88,8 +90,16 @@ func (s *Server) handleWebhook(c echo.Context) error {
 		return c.NoContent(http.StatusUnauthorized)
 	}
 
+	raw, err := io.ReadAll(c.Request().Body)
+	if err != nil {
+		s.logger.Warn("read webhook update", zap.Error(err))
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid update"})
+	}
+
+	s.logRawTelegramUpdateIfTarget(raw)
+
 	update := tele.Update{}
-	if err := c.Bind(&update); err != nil {
+	if err := json.Unmarshal(raw, &update); err != nil {
 		s.logger.Warn("bind webhook update", zap.Error(err))
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid update"})
 	}

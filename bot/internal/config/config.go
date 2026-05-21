@@ -22,6 +22,7 @@ type Config struct {
 	PublicBaseURL            string  `env:"PUBLIC_BASE_URL,required"`
 	WebBaseURL               string  `env:"WEB_BASE_URL"`
 	DailyReportEnabled       bool    `env:"DAILY_REPORT_ENABLED" envDefault:"true"`
+	LogRawUpdates            bool    `env:"CLAWGUARD_LOG_RAW_UPDATES" envDefault:"false"`
 	SuperAdminIDs            []int64 `env:"SUPER_ADMIN_IDS" envSeparator:","`
 	AdminTelegramIDs         []int64 `env:"ADMIN_TELEGRAM_IDS" envSeparator:","`
 	PostgresHost             string  `env:"POSTGRES_HOST,required"`
