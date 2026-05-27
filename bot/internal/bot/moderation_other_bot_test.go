@@ -334,6 +334,67 @@ func TestHandleSenderChatMessageDeletesBansAndRecords(t *testing.T) {
 	}
 }
 
+func TestHandleSenderChatMessageBansEvenWhenFakeSenderPresent(t *testing.T) {
+	policy := config.DefaultPolicy
+	policy.Filter.BanSenderChats = true
+	db := newOtherBotMockDB(policy)
+	botClient, transport := newMockTelegramBot(t, "")
+	svc := &Service{logger: zap.NewNop(), queries: store.New(db), bot: botClient, sender: botClient, sendLimiter: NewSendLimiter()}
+	msg := &tele.Message{
+		ID:         321,
+		Text:       "channel message",
+		Chat:       &tele.Chat{ID: -1001, Title: "group", Type: tele.ChatSuperGroup},
+		Sender:     &tele.User{ID: 1087968824, IsBot: true, Username: "GroupAnonymousBot"},
+		SenderChat: &tele.Chat{ID: -2002, Title: "Spam Channel", Username: "spam_channel", Type: tele.ChatChannel},
+	}
+
+	handled, err := svc.handleSenderChatMessage(context.Background(), msg, policy)
+	if err != nil {
+		t.Fatalf("handleSenderChatMessage() error = %v", err)
+	}
+	if !handled {
+		t.Fatal("handleSenderChatMessage() handled = false, want true")
+	}
+	methods := transport.Methods()
+	if !containsString(methods, "deleteMessage") || !containsString(methods, "banChatSenderChat") {
+		t.Fatalf("methods = %v, want delete+banChatSenderChat", methods)
+	}
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	if len(db.violations) != 1 {
+		t.Fatalf("violations = %d, want 1", len(db.violations))
+	}
+}
+
+func TestHandleSenderChatMessageSkipsAutomaticForward(t *testing.T) {
+	policy := config.DefaultPolicy
+	policy.Filter.BanSenderChats = true
+	db := newOtherBotMockDB(policy)
+	botClient, transport := newMockTelegramBot(t, "")
+	svc := &Service{logger: zap.NewNop(), queries: store.New(db), bot: botClient, sender: botClient, sendLimiter: NewSendLimiter()}
+	msg := &tele.Message{
+		ID:               999,
+		Text:             "linked channel post",
+		Chat:             &tele.Chat{ID: -1001, Title: "discussion", Type: tele.ChatSuperGroup},
+		SenderChat:       &tele.Chat{ID: -2003, Title: "Linked Channel", Username: "linked", Type: tele.ChatChannel},
+		AutomaticForward: true,
+	}
+
+	handled, err := svc.handleSenderChatMessage(context.Background(), msg, policy)
+	if err != nil {
+		t.Fatalf("handleSenderChatMessage() error = %v", err)
+	}
+	if handled {
+		t.Fatal("automatic_forward should not be handled")
+	}
+	if containsString(transport.Methods(), "banChatSenderChat") {
+		t.Fatalf("methods = %v, want no banChatSenderChat for automatic_forward", transport.Methods())
+	}
+	if len(db.violations) != 0 {
+		t.Fatalf("violations = %+v, want none", db.violations)
+	}
+}
+
 func TestMaybeBanBotInviterAfterViolationBansAndAnnounces(t *testing.T) {
 	policy := config.DefaultPolicy
 	policy.Filter.BanBotInviterOnViolation = true

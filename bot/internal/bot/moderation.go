@@ -203,6 +203,9 @@ func (s *Service) handleIncomingMessageWithOptions(c tele.Context, isEdited bool
 	if msg.Sender == nil {
 		return nil
 	}
+	if isSenderChatPersona(msg) {
+		return nil
+	}
 
 	ctx, cancel := context.WithTimeout(ctx, defaultAIModerationTotalTimeout)
 	defer cancel()
@@ -283,7 +286,19 @@ func (s *Service) handleIncomingMessageWithOptions(c tele.Context, isEdited bool
 }
 
 func (s *Service) handleSenderChatMessage(ctx context.Context, msg *tele.Message, policy config.GuardPolicy) (bool, error) {
-	if msg == nil || msg.Chat == nil || msg.SenderChat == nil || msg.Sender != nil || !policy.Filter.BanSenderChats || msg.SenderChat.Type != tele.ChatChannel {
+	if msg == nil || msg.Chat == nil || msg.SenderChat == nil || !policy.Filter.BanSenderChats {
+		return false, nil
+	}
+	// Telegram 在「以频道身份发言」时仍会塞 fake Sender（GroupAnonymousBot/ChannelBot），
+	// 所以不能再用 Sender==nil 当守卫。这里排除：本群自己的 sender_chat、linked channel
+	// 自动转发、以及非 Channel 类型的 sender_chat（讨论组联动等）。
+	if msg.SenderChat.ID == msg.Chat.ID {
+		return false, nil
+	}
+	if msg.AutomaticForward {
+		return false, nil
+	}
+	if msg.SenderChat.Type != tele.ChatChannel {
 		return false, nil
 	}
 
@@ -322,6 +337,21 @@ func senderChatLabel(chat *tele.Chat) string {
 		return strings.TrimSpace(chat.Title)
 	}
 	return strconv.FormatInt(chat.ID, 10)
+}
+
+// isSenderChatPersona 用于在开关关闭时也跳过频道身份消息的后续 AI/警告流程：这些消息的
+// Sender 是 fake，user_trust/warn 没有意义。
+func isSenderChatPersona(msg *tele.Message) bool {
+	if msg == nil || msg.SenderChat == nil {
+		return false
+	}
+	if msg.Chat != nil && msg.SenderChat.ID == msg.Chat.ID {
+		return false
+	}
+	if msg.AutomaticForward {
+		return false
+	}
+	return msg.SenderChat.Type == tele.ChatChannel
 }
 
 func messageSenderID(msg *tele.Message) int64 {
