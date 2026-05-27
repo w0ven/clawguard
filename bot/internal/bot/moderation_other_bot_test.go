@@ -20,13 +20,14 @@ import (
 )
 
 type otherBotMockDB struct {
-	mu       sync.Mutex
-	now      time.Time
-	policy   config.GuardPolicy
-	trust    *store.UserTrust
-	audits   int
-	auditLog []store.InsertAuditEntryParams
-	noTrust  bool
+	mu         sync.Mutex
+	now        time.Time
+	policy     config.GuardPolicy
+	trust      *store.UserTrust
+	audits     int
+	auditLog   []store.InsertAuditEntryParams
+	violations []store.InsertViolationParams
+	noTrust    bool
 }
 
 func newOtherBotMockDB(policy config.GuardPolicy) *otherBotMockDB {
@@ -158,6 +159,21 @@ func (db *otherBotMockDB) QueryRow(_ context.Context, query string, args ...any)
 		db.mu.Unlock()
 		createdAt := db.now.Add(6 * time.Minute)
 		return mockScanRow(int64(len(db.auditLog)), params.Scope, params.ChatID, params.AdminID, params.Action, params.Before, params.After, params.Diff, createdAt)
+	case strings.Contains(query, "INSERT INTO violations"):
+		params := store.InsertViolationParams{
+			ChatID:      args[0].(int64),
+			UserID:      args[1].(int64),
+			Username:    args[2].(*string),
+			Rule:        args[3].(string),
+			Matched:     args[4].(*string),
+			Action:      args[5].(string),
+			MessageText: args[6].(*string),
+		}
+		db.mu.Lock()
+		db.violations = append(db.violations, params)
+		id := int64(len(db.violations))
+		db.mu.Unlock()
+		return mockScanRow(id, params.ChatID, params.UserID, params.Username, params.Rule, params.Matched, params.Action, params.MessageText, db.now)
 	default:
 		return mockErrorRow{err: fmt.Errorf("unexpected query: %s", query)}
 	}
@@ -238,6 +254,83 @@ func TestEnsureUserTrustCreatesUnknownBotAsNew(t *testing.T) {
 	}
 	if trust.Status != "new" || !trust.IsBot {
 		t.Fatalf("trust = %+v, want new bot", trust)
+	}
+}
+
+func TestHandleSenderChatMessageRespectsDisabledPolicy(t *testing.T) {
+	policy := config.DefaultPolicy
+	policy.Filter.BanSenderChats = false
+	db := newOtherBotMockDB(policy)
+	botClient, transport := newMockTelegramBot(t, "")
+	svc := &Service{logger: zap.NewNop(), queries: store.New(db), bot: botClient, sender: botClient, sendLimiter: NewSendLimiter()}
+	msg := &tele.Message{
+		ID:         123,
+		Text:       "channel message",
+		Chat:       &tele.Chat{ID: -1001, Title: "group", Type: tele.ChatSuperGroup},
+		SenderChat: &tele.Chat{ID: -2002, Title: "Spam Channel", Username: "spam_channel", Type: tele.ChatChannel},
+	}
+
+	handled, err := svc.handleSenderChatMessage(context.Background(), msg, policy)
+	if err != nil {
+		t.Fatalf("handleSenderChatMessage() error = %v", err)
+	}
+	if handled {
+		t.Fatal("handleSenderChatMessage() handled = true, want false")
+	}
+	methods := transport.Methods()
+	if containsString(methods, "deleteMessage") || containsString(methods, "banChatSenderChat") {
+		t.Fatalf("telegram methods = %v, want no sender_chat action", methods)
+	}
+	if len(db.violations) != 0 {
+		t.Fatalf("violations = %+v, want none", db.violations)
+	}
+}
+
+func TestHandleSenderChatMessageDeletesBansAndRecords(t *testing.T) {
+	policy := config.DefaultPolicy
+	policy.Filter.BanSenderChats = true
+	db := newOtherBotMockDB(policy)
+	botClient, transport := newMockTelegramBot(t, "")
+	svc := &Service{logger: zap.NewNop(), queries: store.New(db), bot: botClient, sender: botClient, sendLimiter: NewSendLimiter()}
+	msg := &tele.Message{
+		ID:         123,
+		Text:       "channel message",
+		Chat:       &tele.Chat{ID: -1001, Title: "group", Type: tele.ChatSuperGroup},
+		SenderChat: &tele.Chat{ID: -2002, Title: "Spam Channel", Username: "spam_channel", Type: tele.ChatChannel},
+	}
+
+	handled, err := svc.handleSenderChatMessage(context.Background(), msg, policy)
+	if err != nil {
+		t.Fatalf("handleSenderChatMessage() error = %v", err)
+	}
+	if !handled {
+		t.Fatal("handleSenderChatMessage() handled = false, want true")
+	}
+	methods := transport.Methods()
+	if !containsString(methods, "deleteMessage") {
+		t.Fatalf("methods = %v, want deleteMessage", methods)
+	}
+	if !containsString(methods, "banChatSenderChat") {
+		t.Fatalf("methods = %v, want banChatSenderChat", methods)
+	}
+	bodies := strings.Join(transport.RequestBodies(), "\n")
+	if !strings.Contains(bodies, `"sender_chat_id":"-2002"`) {
+		t.Fatalf("request bodies missing sender_chat_id: %s", bodies)
+	}
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	if len(db.violations) != 1 {
+		t.Fatalf("violations = %d, want 1", len(db.violations))
+	}
+	got := db.violations[0]
+	if got.UserID != -2002 || got.Rule != "filter_sender_chat" || got.Action != "delete_ban" {
+		t.Fatalf("violation = %+v, want sender_chat delete_ban", got)
+	}
+	if got.Username == nil || *got.Username != "spam_channel" {
+		t.Fatalf("violation username = %v, want spam_channel", got.Username)
+	}
+	if got.Matched == nil || *got.Matched != "@spam_channel" {
+		t.Fatalf("violation matched = %v, want @spam_channel", got.Matched)
 	}
 }
 

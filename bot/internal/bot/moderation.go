@@ -167,7 +167,7 @@ func (s *Service) handleEditedMessage(c tele.Context) error {
 func (s *Service) handleIncomingMessageWithOptions(c tele.Context, isEdited bool) error {
 	s.MarkUpdateSeen()
 	msg := c.Message()
-	if msg == nil || msg.Chat == nil || msg.Sender == nil || msg.Private() {
+	if msg == nil || msg.Chat == nil || (msg.Sender == nil && msg.SenderChat == nil) || msg.Private() {
 		return nil
 	}
 
@@ -185,7 +185,7 @@ func (s *Service) handleIncomingMessageWithOptions(c tele.Context, isEdited bool
 		state = store.SystemState{}
 	}
 	if state.Frozen {
-		s.logger.Info("message ignored because system is frozen", zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID), zap.Int("message_id", msg.ID))
+		s.logger.Info("message ignored because system is frozen", zap.Int64("chat_id", msg.Chat.ID), zap.Int64("sender_id", messageSenderID(msg)), zap.Int("message_id", msg.ID))
 		return nil
 	}
 
@@ -194,6 +194,16 @@ func (s *Service) handleIncomingMessageWithOptions(c tele.Context, isEdited bool
 		s.logger.Warn("load guard policy failed for message filter, using defaults", zap.Error(err), zap.Int64("chat_id", msg.Chat.ID))
 		policy = config.DefaultPolicy
 	}
+
+	if handled, err := s.handleSenderChatMessage(ctx, msg, policy); err != nil {
+		return err
+	} else if handled {
+		return nil
+	}
+	if msg.Sender == nil {
+		return nil
+	}
+
 	ctx, cancel := context.WithTimeout(ctx, defaultAIModerationTotalTimeout)
 	defer cancel()
 
@@ -270,6 +280,61 @@ func (s *Service) handleIncomingMessageWithOptions(c tele.Context, isEdited bool
 	}
 
 	return s.applyAIModeration(ctx, msg, policy, isAdmin, content, isEdited)
+}
+
+func (s *Service) handleSenderChatMessage(ctx context.Context, msg *tele.Message, policy config.GuardPolicy) (bool, error) {
+	if msg == nil || msg.Chat == nil || msg.SenderChat == nil || msg.Sender != nil || !policy.Filter.BanSenderChats || msg.SenderChat.Type != tele.ChatChannel {
+		return false, nil
+	}
+
+	if err := s.deleteMessage(msg); err != nil {
+		s.logger.Warn("delete sender_chat message failed", zap.Error(err), zap.Int64("chat_id", msg.Chat.ID), zap.Int64("sender_chat_id", msg.SenderChat.ID), zap.Int("message_id", msg.ID))
+	}
+	if err := s.banSenderChat(msg.Chat, msg.SenderChat); err != nil {
+		s.logger.Warn("ban sender_chat failed", zap.Error(err), zap.Int64("chat_id", msg.Chat.ID), zap.Int64("sender_chat_id", msg.SenderChat.ID))
+	}
+
+	messageText := truncateString(collectMessageContent(msg), 1000)
+	matched := senderChatLabel(msg.SenderChat)
+	if _, err := s.queries.InsertViolation(ctx, store.InsertViolationParams{
+		ChatID:      msg.Chat.ID,
+		UserID:      msg.SenderChat.ID,
+		Username:    stringPtr(strings.TrimPrefix(msg.SenderChat.Username, "@")),
+		Rule:        "filter_sender_chat",
+		Matched:     stringPtr(matched),
+		Action:      "delete_ban",
+		MessageText: stringPtr(messageText),
+	}); err != nil {
+		return true, fmt.Errorf("insert sender_chat violation: %w", err)
+	}
+
+	return true, nil
+}
+
+func senderChatLabel(chat *tele.Chat) string {
+	if chat == nil {
+		return ""
+	}
+	if strings.TrimSpace(chat.Username) != "" {
+		return "@" + strings.TrimPrefix(strings.TrimSpace(chat.Username), "@")
+	}
+	if strings.TrimSpace(chat.Title) != "" {
+		return strings.TrimSpace(chat.Title)
+	}
+	return strconv.FormatInt(chat.ID, 10)
+}
+
+func messageSenderID(msg *tele.Message) int64 {
+	if msg == nil {
+		return 0
+	}
+	if msg.Sender != nil {
+		return msg.Sender.ID
+	}
+	if msg.SenderChat != nil {
+		return msg.SenderChat.ID
+	}
+	return 0
 }
 
 func (s *Service) applyAIModeration(ctx context.Context, msg *tele.Message, policy config.GuardPolicy, isAdmin bool, content reviewableContent, isEdited bool) error {
@@ -2919,7 +2984,7 @@ func (s *Service) deleteMessage(msg *tele.Message) error {
 		return nil
 	}
 	if paused, err := s.actionsPaused(context.Background()); err == nil && paused {
-		s.logger.Info("skip delete because actions are paused", zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID), zap.Int("message_id", msg.ID))
+		s.logger.Info("skip delete because actions are paused", zap.Int64("chat_id", msg.Chat.ID), zap.Int64("sender_id", messageSenderID(msg)), zap.Int("message_id", msg.ID))
 		return nil
 	} else if err != nil {
 		s.logger.Warn("load system state failed before delete", zap.Error(err))
@@ -2988,6 +3053,22 @@ func (s *Service) banUser(chat *tele.Chat, user *tele.User) error {
 	// We can only ban and ask Telegram to revoke the user's recent chat messages.
 	if err := s.bot.Ban(chat, &tele.ChatMember{User: user}, true); err != nil {
 		return normalizeTelegramActionError("ban", err)
+	}
+	return nil
+}
+
+func (s *Service) banSenderChat(chat *tele.Chat, senderChat *tele.Chat) error {
+	if chat == nil || senderChat == nil {
+		return nil
+	}
+	if paused, err := s.actionsPaused(context.Background()); err == nil && paused {
+		s.logger.Info("skip sender_chat ban because actions are paused", zap.Int64("chat_id", chat.ID), zap.Int64("sender_chat_id", senderChat.ID))
+		return nil
+	} else if err != nil {
+		s.logger.Warn("load system state failed before sender_chat ban", zap.Error(err))
+	}
+	if err := s.bot.BanSenderChat(chat, senderChat); err != nil {
+		return normalizeTelegramActionError("ban_sender_chat", err)
 	}
 	return nil
 }

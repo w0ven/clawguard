@@ -112,6 +112,7 @@ type FilterConfig struct {
 	OtherBotsAction          string               `json:"other_bots_action"` // "audit" | "kick" | "ban" | "off"
 	BotWhitelist             []string             `json:"bot_whitelist"`     // username (without @)
 	BanBotInviterOnViolation bool                 `json:"ban_bot_inviter_on_violation"`
+	BanSenderChats           bool                 `json:"ban_sender_chats"`
 }
 
 type FilterKeywordPolicy struct {
@@ -287,6 +288,7 @@ var DefaultPolicy = GuardPolicy{
 		OtherBotsAction:          "audit",
 		BotWhitelist:             []string{},
 		BanBotInviterOnViolation: false,
+		BanSenderChats:           false,
 	},
 	Messages: MessagesPolicy{
 		KeywordReplies: []KeywordReplyRule{},

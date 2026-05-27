@@ -48,6 +48,10 @@ export type GuardPolicy = {
       no_media: boolean;
       max_messages_per_minute: number;
     };
+    other_bots_action: string;
+    bot_whitelist: string[];
+    ban_bot_inviter_on_violation: boolean;
+    ban_sender_chats: boolean;
   };
   messages: {
     keyword_replies: KeywordReplyRule[];
