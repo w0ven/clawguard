@@ -47,3 +47,51 @@ export function parseArrayValue(value: string, splitComma = true) {
     .map((item) => item.trim())
     .filter(Boolean);
 }
+
+export function cleanStaleAIModelRefs(
+  config: Record<string, unknown>,
+  modelOptions: Array<{ value: string }>,
+) {
+  if (modelOptions.length === 0) {
+    return config;
+  }
+  const allowed = new Set(modelOptions.map((option) => option.value));
+  const aiConfig = config.ai;
+  if (!aiConfig || typeof aiConfig !== "object" || Array.isArray(aiConfig)) {
+    return config;
+  }
+
+  const currentAI = aiConfig as Record<string, unknown>;
+  let changed = false;
+  const next = structuredClone(config) as Record<string, unknown>;
+  const nextAI = next.ai as Record<string, unknown>;
+
+  const primary = currentAI.primary_model_ref;
+  if (typeof primary === "string") {
+    const trimmed = primary.trim();
+    if (trimmed !== "" && allowed.has(trimmed) && trimmed !== primary) {
+      nextAI.primary_model_ref = trimmed;
+      changed = true;
+    } else if (trimmed !== "" && !allowed.has(trimmed)) {
+      delete nextAI.primary_model_ref;
+      changed = true;
+    }
+  }
+
+  const fallback = currentAI.fallback_model_refs;
+  if (Array.isArray(fallback)) {
+    const filtered = fallback
+      .filter((item): item is string => typeof item === "string")
+      .map((item) => item.trim())
+      .filter((item) => item !== "" && allowed.has(item));
+    if (
+      filtered.length !== fallback.length ||
+      filtered.some((item, index) => item !== fallback[index])
+    ) {
+      nextAI.fallback_model_refs = filtered;
+      changed = true;
+    }
+  }
+
+  return changed ? next : config;
+}

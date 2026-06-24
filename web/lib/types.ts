@@ -322,6 +322,8 @@ export type AICallDaily = {
 export type AICallPerModel = {
   model: string;
   calls: number;
+  current?: boolean;
+  historical?: boolean;
 };
 
 export type AICallPerScene = {

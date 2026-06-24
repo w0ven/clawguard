@@ -21,6 +21,7 @@ import { Select } from "@/components/ui/select";
 import { Button } from "@/components/ui/button";
 import { apiFetch } from "@/lib/api";
 import {
+  cleanStaleAIModelRefs,
   formatArrayValue,
   getPathValue,
   hasPath,
@@ -75,15 +76,15 @@ export default function GlobalConfigPage() {
         if (!alive) {
           return;
         }
-        setLLMModelOptions(
-          (payload.models ?? []).map((model) => {
-            const value = `${model.provider_key}:${model.model_key}`;
-            return {
-              value,
-              label: `${value} · ${model.label || model.model_key}`,
-            };
-          }),
-        );
+        const options = (payload.models ?? []).map((model) => {
+          const value = `${model.provider_key}:${model.model_key}`;
+          return {
+            value,
+            label: `${value} · ${model.label || model.model_key}`,
+          };
+        });
+        setLLMModelOptions(options);
+        setDraft((current) => cleanStaleAIModelRefs(current, options));
         setLLMOptionsError(null);
       })
       .catch((error) => {
@@ -108,11 +109,12 @@ export default function GlobalConfigPage() {
   async function save() {
     setSaving(true);
     try {
+      const nextDraft = cleanStaleAIModelRefs(draft, llmModelOptions);
       const p = await apiFetch<{ config: Record<string, unknown> }>(
         "/api/admin/global-config",
         {
           method: "PUT",
-          body: JSON.stringify(draft),
+          body: JSON.stringify(nextDraft),
         },
       );
       setDraft(p.config ?? {});

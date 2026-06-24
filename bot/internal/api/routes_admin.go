@@ -1474,6 +1474,10 @@ func (s *Server) handleListAICalls(c echo.Context) error {
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "load ai model calls failed"})
 	}
+	currentModelRefs, err := currentLLMModelRefs(c.Request().Context(), s.botService.Queries())
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "load llm models failed"})
+	}
 	perScene, err := s.botService.Queries().ListAICallsPerSceneLast30Days(c.Request().Context(), scopeChatIDs)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "load ai scene calls failed"})
@@ -1490,13 +1494,7 @@ func (s *Server) handleListAICalls(c echo.Context) error {
 			"calls": item.Calls,
 		})
 	}
-	modelResponse := make([]map[string]any, 0, len(perModel))
-	for _, item := range perModel {
-		modelResponse = append(modelResponse, map[string]any{
-			"model": item.Model,
-			"calls": item.Calls,
-		})
-	}
+	modelResponse := summarizeAICallsByCurrentModels(perModel, currentModelRefs)
 	sceneResponse := make([]map[string]any, 0, len(perScene))
 	for _, item := range perScene {
 		sceneResponse = append(sceneResponse, map[string]any{
@@ -1523,8 +1521,12 @@ func (s *Server) handleListAICalls(c echo.Context) error {
 }
 
 func (s *Server) writeAudit(ctx context.Context, admin store.Admin, scope string, chatID *int64, action string, before, after []byte) error {
+	return writeAuditWithQueries(ctx, s.botService.Queries(), admin, scope, chatID, action, before, after)
+}
+
+func writeAuditWithQueries(ctx context.Context, queries *store.Queries, admin store.Admin, scope string, chatID *int64, action string, before, after []byte) error {
 	diff := simpleJSONDiff(before, after)
-	_, err := s.botService.Queries().InsertAuditEntry(ctx, store.InsertAuditEntryParams{
+	_, err := queries.InsertAuditEntry(ctx, store.InsertAuditEntryParams{
 		Scope:   scope,
 		ChatID:  chatID,
 		AdminID: admin.ID,

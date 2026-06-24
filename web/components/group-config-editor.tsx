@@ -23,6 +23,7 @@ import {
   fetchProfileCheckLogs,
 } from "@/lib/api";
 import {
+  cleanStaleAIModelRefs,
   formatArrayValue,
   getPathValue,
   hasPath,
@@ -782,6 +783,7 @@ export function GroupConfigEditor({ group, mergedPolicy }: Props) {
           return { value, label };
         });
         setLLMModelOptions(options);
+        setDraft((current) => cleanStaleAIModelRefs(current, options));
         setLLMOptionsError(null);
       })
       .catch((error) => {
@@ -978,12 +980,13 @@ export function GroupConfigEditor({ group, mergedPolicy }: Props) {
   async function saveConfig() {
     setSaving(true);
     try {
+      const nextDraft = cleanStaleAIModelRefs(draft, llmModelOptions);
       const p = await apiFetch<{
         group: Group;
         merged_policy: GuardPolicy;
       }>(`/api/admin/groups/${group.chat_id}/config`, {
         method: "PUT",
-        body: JSON.stringify(draft),
+        body: JSON.stringify(nextDraft),
       });
       setInitialConfig(p.group.config ?? {});
       setDraft(p.group.config ?? {});

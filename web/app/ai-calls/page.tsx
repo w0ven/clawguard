@@ -168,7 +168,7 @@ export default function AICallsPage() {
           </p>
         </Card>
         <Card className="p-4">
-          <p className="text-xs text-[var(--text-muted)]">有调用模型</p>
+          <p className="text-xs text-[var(--text-muted)]">模型分组</p>
           <p className="mt-2 text-3xl font-semibold tabular-nums">
             {summary?.per_model.length ?? 0}
           </p>
@@ -253,7 +253,13 @@ export default function AICallsPage() {
                 {summary?.per_model.map((item) => (
                   <TableRow key={item.model}>
                     <TableCell>
-                      <code className="text-xs">{item.model}</code>
+                      {item.historical ? (
+                        <Badge className="border-slate-500/20 bg-slate-500/10 text-slate-700">
+                          {item.model}
+                        </Badge>
+                      ) : (
+                        <code className="text-xs">{item.model}</code>
+                      )}
                     </TableCell>
                     <TableCell className="tabular-nums">{item.calls}</TableCell>
                   </TableRow>

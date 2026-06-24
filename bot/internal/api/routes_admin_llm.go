@@ -458,24 +458,57 @@ func (s *Server) handleUpdateLLMModel(c echo.Context) error {
 }
 
 func (s *Server) handleDeleteLLMModel(c echo.Context) error {
+	admin, _ := currentAdmin(c)
 	providerKey := strings.TrimSpace(c.Param("provider"))
 	modelKey := strings.TrimSpace(c.Param("model"))
 	if providerKey == "" || modelKey == "" {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "provider and model required"})
 	}
 	ctx := c.Request().Context()
-	provider, err := s.botService.Queries().GetProviderByKey(ctx, providerKey)
+	queries := s.botService.Queries()
+	provider, err := queries.GetProviderByKey(ctx, providerKey)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return c.JSON(http.StatusNotFound, map[string]string{"error": "provider not found"})
 		}
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "load provider failed"})
 	}
-	if err := s.botService.Queries().DeleteModel(ctx, provider.ID, modelKey); err != nil {
+	if _, err := queries.GetModelByRef(ctx, providerKey, modelKey); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return c.JSON(http.StatusNotFound, map[string]string{"error": "model not found"})
+		}
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "load model failed"})
+	}
+
+	target := newLLMModelReferenceTarget(providerKey, modelKey)
+	var cleanup llmModelReferenceCleanup
+	if err := queries.Transact(ctx, func(tx *store.Queries) error {
+		if err := tx.DeleteModel(ctx, provider.ID, modelKey); err != nil {
+			return fmt.Errorf("delete model: %w", err)
+		}
+		var cleanupErr error
+		cleanup, cleanupErr = cleanupDeletedLLMModelReferences(ctx, tx, admin, target)
+		return cleanupErr
+	}); err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("delete model: %v", err)})
 	}
+
+	if cleanup.refsRemoved() > 0 {
+		s.logger.Info("llm model delete cleaned config references",
+			zap.String("model_ref", target.Ref),
+			zap.Int("global_configs", cleanup.GlobalConfigs),
+			zap.Int("group_configs", cleanup.GroupConfigs),
+			zap.Int("refs_removed", cleanup.refsRemoved()),
+		)
+	}
+	if cleanup.AuditFailures > 0 {
+		s.logger.Warn("llm model delete cleanup audit failed",
+			zap.String("model_ref", target.Ref),
+			zap.Int("audit_failures", cleanup.AuditFailures),
+		)
+	}
 	s.reloadAIRegistries(ctx)
-	return c.JSON(http.StatusOK, map[string]any{"ok": true})
+	return c.JSON(http.StatusOK, map[string]any{"ok": true, "cleanup": cleanup.response()})
 }
 
 // ---------------- Stats & tests ----------------
