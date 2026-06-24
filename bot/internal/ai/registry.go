@@ -214,7 +214,7 @@ func (r *DBModelRegistry) List(filter ModelFilter) []Model {
 		if filter.RequireJSON && !item.SupportsJSON {
 			continue
 		}
-		if !hasCapabilities(item.CapabilityTags, filter.RequireCaps) {
+		if !modelHasCapabilities(item, filter.RequireCaps) {
 			continue
 		}
 		items = append(items, item)
@@ -287,4 +287,12 @@ func hasCapabilities(have, need []string) bool {
 		}
 	}
 	return true
+}
+
+func modelHasCapabilities(model Model, need []string) bool {
+	have := append([]string(nil), model.CapabilityTags...)
+	if model.SupportsVision {
+		have = append(have, "vision")
+	}
+	return hasCapabilities(have, need)
 }

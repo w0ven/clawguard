@@ -122,6 +122,58 @@ func TestResolverBuildChain(t *testing.T) {
 	}
 }
 
+func TestResolverBuildChainTreatsSupportsVisionAsVisionCapability(t *testing.T) {
+	ref := NewModelRef("p1", "m1")
+	models := fakeModelRegistry{
+		items: map[ModelRef]Model{
+			ref: {
+				ID:             1,
+				ProviderID:     10,
+				ProviderKey:    "p1",
+				ModelKey:       "m1",
+				Enabled:        true,
+				SupportsVision: true,
+				CapabilityTags: []string{"moderation"},
+			},
+		},
+	}
+	resolver := NewResolver(models)
+
+	chain, err := resolver.BuildChain(config.AIPolicy{PrimaryModelRef: string(ref)}, []string{"moderation", "vision"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chain) != 1 || chain[0] != ref {
+		t.Fatalf("BuildChain() = %#v, want [%s]", chain, ref)
+	}
+}
+
+func TestResolverBuildChainFiltersModelWithoutVisionCapability(t *testing.T) {
+	ref := NewModelRef("p1", "m1")
+	models := fakeModelRegistry{
+		items: map[ModelRef]Model{
+			ref: {
+				ID:             1,
+				ProviderID:     10,
+				ProviderKey:    "p1",
+				ModelKey:       "m1",
+				Enabled:        true,
+				SupportsVision: false,
+				CapabilityTags: []string{"moderation"},
+			},
+		},
+	}
+	resolver := NewResolver(models)
+
+	chain, err := resolver.BuildChain(config.AIPolicy{PrimaryModelRef: string(ref)}, []string{"moderation", "vision"})
+	if err == nil {
+		t.Fatalf("BuildChain() err = nil, chain = %#v; want no enabled models", chain)
+	}
+	if len(chain) != 0 {
+		t.Fatalf("BuildChain() chain = %#v, want empty", chain)
+	}
+}
+
 func policyWithRefs() config.AIPolicy {
 	return config.AIPolicy{
 		PrimaryModelRef:        "p1:m1",

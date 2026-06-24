@@ -885,6 +885,13 @@ function ModelForm({
   }, [model, providers]);
 
   async function submit() {
+    const capabilityTags = caps
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (supportsVision && !capabilityTags.includes("vision")) {
+      capabilityTags.push("vision");
+    }
     setSaving(true);
     try {
       await apiFetch(
@@ -899,10 +906,7 @@ function ModelForm({
             label,
             api_format: apiFormat,
             priority,
-            capability_tags: caps
-              .split(",")
-              .map((s) => s.trim())
-              .filter(Boolean),
+            capability_tags: capabilityTags,
             supports_vision: supportsVision,
             supports_json: supportsJSON,
             supports_tools: supportsTools,

@@ -321,10 +321,12 @@ func (s *Server) handleCreateLLMModel(c echo.Context) error {
 	if p.Enabled != nil {
 		enabled = *p.Enabled
 	}
+	supportsVision := boolPtrOr(p.SupportsVision, false)
 	caps := normalizeCapabilityTags(p.CapabilityTags)
 	if len(caps) == 0 {
 		caps = []string{"moderation"}
 	}
+	caps = normalizeModelCapabilityTags(caps, supportsVision)
 	priority := int32(100)
 	if p.Priority != nil {
 		priority = *p.Priority
@@ -345,7 +347,7 @@ func (s *Server) handleCreateLLMModel(c echo.Context) error {
 		Label:                p.Label,
 		ApiFormat:            p.APIFormat,
 		Enabled:              enabled,
-		SupportsVision:       boolPtrOr(p.SupportsVision, false),
+		SupportsVision:       supportsVision,
 		SupportsJson:         boolPtrOr(p.SupportsJSON, true),
 		SupportsTools:        boolPtrOr(p.SupportsTools, false),
 		CapabilityTags:       caps,
@@ -444,6 +446,8 @@ func (s *Server) handleUpdateLLMModel(c echo.Context) error {
 			params.ProbeIntervalSeconds = int32(*p.ProbeIntervalSeconds)
 		}
 	}
+
+	params.CapabilityTags = normalizeModelCapabilityTags(params.CapabilityTags, params.SupportsVision)
 
 	updated, err := s.botService.Queries().UpdateModel(ctx, params)
 	if err != nil {
@@ -704,4 +708,21 @@ func normalizeCapabilityTags(tags []string) []string {
 		out = append(out, t)
 	}
 	return out
+}
+
+func normalizeModelCapabilityTags(tags []string, supportsVision bool) []string {
+	out := normalizeCapabilityTags(tags)
+	if supportsVision && !containsCapabilityTag(out, "vision") {
+		out = append(out, "vision")
+	}
+	return out
+}
+
+func containsCapabilityTag(tags []string, want string) bool {
+	for _, tag := range tags {
+		if tag == want {
+			return true
+		}
+	}
+	return false
 }

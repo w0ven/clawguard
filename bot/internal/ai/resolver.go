@@ -22,10 +22,10 @@ type Resolver struct {
 	models ModelRegistry
 	stats  StatsReader
 
-	mu           sync.RWMutex
-	healthByID   map[int64]bool
-	loadedAt     time.Time
-	cacheTTL     time.Duration
+	mu         sync.RWMutex
+	healthByID map[int64]bool
+	loadedAt   time.Time
+	cacheTTL   time.Duration
 }
 
 func NewResolver(models ModelRegistry) *Resolver {
@@ -127,7 +127,7 @@ func (r *Resolver) BuildChain(policy config.AIPolicy, caps []string) ([]ModelRef
 			continue
 		}
 		model, ok := r.models.Get(ref)
-		if !ok || !model.Enabled || !hasCapabilities(model.CapabilityTags, requiredCaps) {
+		if !ok || !model.Enabled || !modelHasCapabilities(model, requiredCaps) {
 			continue
 		}
 		seen[ref] = struct{}{}
