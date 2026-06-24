@@ -148,6 +148,13 @@ function fmtTime(s: string | null | undefined) {
   });
 }
 
+function asRecord(value: unknown): Record<string, unknown> {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return value as Record<string, unknown>;
+  }
+  return {};
+}
+
 export default function LLMAdminPage() {
   const { pushToast } = useToast();
   const [tab, setTab] = useState<"providers" | "models" | "stats" | "settings">("providers");
@@ -179,7 +186,7 @@ export default function LLMAdminPage() {
       setProviders(p.providers ?? []);
       setModels(m.models ?? []);
       setStats(s.stats ?? []);
-      const ai = ((g.config ?? {}).ai ?? {}) as Record<string, unknown>;
+      const ai = asRecord(asRecord(g.config).ai);
       setSettings({
         auto_degrade: Boolean(ai.auto_degrade ?? true),
         probe_enabled: Boolean(ai.probe_enabled ?? false),
@@ -1150,20 +1157,28 @@ function SettingsPanel({
   async function save() {
     setSaving(true);
     try {
+      const current = await apiFetch<{ config: Record<string, unknown> }>(
+        "/api/admin/global-config",
+      );
+      const currentConfig = asRecord(current.config);
+      const currentAI = asRecord(currentConfig.ai);
+      const nextInterval = Math.max(30, Number(interval) || 120);
       const payload = await apiFetch<{ config: Record<string, unknown> }>(
         "/api/admin/global-config",
         {
           method: "PUT",
           body: JSON.stringify({
+            ...currentConfig,
             ai: {
+              ...currentAI,
               probe_enabled: probeEnabled,
               auto_degrade: autoDegrade,
-              probe_interval_seconds: Math.max(30, Number(interval) || 120),
+              probe_interval_seconds: nextInterval,
             },
           }),
         },
       );
-      const next = ((payload.config ?? {}).ai ?? {}) as Record<string, unknown>;
+      const next = asRecord(asRecord(payload.config).ai);
       setProbeEnabled(Boolean(next.probe_enabled ?? false));
       setAutoDegrade(Boolean(next.auto_degrade ?? true));
       setInterval(Number(next.probe_interval_seconds ?? 120) || 120);

@@ -38,6 +38,8 @@ func stringValue(v *string) string {
 	return *v
 }
 
+var errDangerousGlobalConfigTruncation = errors.New("global config update appears truncated; reload current config and submit the full document")
+
 func (s *Server) registerAdminRoutes() {
 	admin := s.echo.Group("/api/admin", s.requireAdminJWT, s.requireCSRF, s.adminWriteRateLimit())
 	admin.GET("/groups", s.handleListGroups)
@@ -418,6 +420,9 @@ func (s *Server) handlePutGlobalConfig(c echo.Context) error {
 
 	nextConfig, err := normalizeJSONBody(c)
 	if err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+	}
+	if err := rejectDangerousGlobalConfigTruncation(before.Config, nextConfig); err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
 	}
 
@@ -1542,6 +1547,109 @@ func normalizeJSONBody(c echo.Context) ([]byte, error) {
 		return nil, fmt.Errorf("marshal json body")
 	}
 	return raw, nil
+}
+
+func rejectDangerousGlobalConfigTruncation(beforeRaw, nextRaw []byte) error {
+	var before map[string]any
+	if err := json.Unmarshal(beforeRaw, &before); err != nil {
+		return nil
+	}
+	if !hasSubstantialGlobalConfig(before) {
+		return nil
+	}
+
+	var next map[string]any
+	if err := json.Unmarshal(nextRaw, &next); err != nil {
+		return nil
+	}
+	if !isTinyGlobalConfigPayload(next) {
+		return nil
+	}
+	if !globalConfigDropsExistingFields(before, next) {
+		return nil
+	}
+	return errDangerousGlobalConfigTruncation
+}
+
+func hasSubstantialGlobalConfig(config map[string]any) bool {
+	if len(config) == 0 {
+		return false
+	}
+	if len(config) > 1 || countJSONFields(config) >= 8 {
+		return true
+	}
+	ai, ok := objectField(config, "ai")
+	return ok && hasAnyField(ai, "message_rules", "bio_rules")
+}
+
+func isTinyGlobalConfigPayload(config map[string]any) bool {
+	return countJSONFields(config) <= 4
+}
+
+func globalConfigDropsExistingFields(before, next map[string]any) bool {
+	for key := range before {
+		if _, ok := next[key]; !ok {
+			return true
+		}
+	}
+
+	beforeAI, ok := objectField(before, "ai")
+	if !ok {
+		return false
+	}
+	nextAI, ok := objectField(next, "ai")
+	if !ok {
+		return len(beforeAI) > 0
+	}
+	for key := range beforeAI {
+		if _, ok := nextAI[key]; !ok {
+			return true
+		}
+	}
+	return false
+}
+
+func objectField(parent map[string]any, key string) (map[string]any, bool) {
+	if parent == nil {
+		return nil, false
+	}
+	value, ok := parent[key]
+	if !ok {
+		return nil, false
+	}
+	child, ok := value.(map[string]any)
+	if !ok || child == nil {
+		return nil, false
+	}
+	return child, true
+}
+
+func hasAnyField(values map[string]any, keys ...string) bool {
+	for _, key := range keys {
+		if _, ok := values[key]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func countJSONFields(value any) int {
+	switch typed := value.(type) {
+	case map[string]any:
+		total := len(typed)
+		for _, child := range typed {
+			total += countJSONFields(child)
+		}
+		return total
+	case []any:
+		total := 0
+		for _, child := range typed {
+			total += countJSONFields(child)
+		}
+		return total
+	default:
+		return 0
+	}
 }
 
 func sanitizeKeywordReplyRuntimeFields(payload map[string]any) {
