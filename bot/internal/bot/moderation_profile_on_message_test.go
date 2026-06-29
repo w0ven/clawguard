@@ -631,6 +631,7 @@ func (db *moderationProfileMatchMockDB) QueryRow(_ context.Context, query string
 			AdminOverride: args[13].(*string),
 			LatencyMs:     args[14].(int32),
 			Scene:         args[15].(string),
+			Metadata:      args[16].([]byte),
 		}
 		db.mu.Lock()
 		db.aiDecisions = append(db.aiDecisions, params)
@@ -655,6 +656,7 @@ func (db *moderationProfileMatchMockDB) QueryRow(_ context.Context, query string
 			params.AdminOverride,
 			params.LatencyMs,
 			params.Scene,
+			params.Metadata,
 			createdAt,
 		)
 	case strings.Contains(query, "INSERT INTO violations"):

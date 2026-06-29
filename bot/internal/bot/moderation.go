@@ -482,11 +482,15 @@ func (s *Service) applyAIModeration(ctx context.Context, msg *tele.Message, poli
 		IsUngraduated:     trust.Status != "trusted",
 	})
 	if err != nil {
-		s.logger.Warn("ai moderation failed, allow message", zap.Error(err), zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID))
-		if recordErr := s.recordAIDecisionError(ctx, msg, content.Text, err); recordErr != nil {
+		s.logger.Warn("ai moderation failed", zap.Error(err), zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID), zap.String("trust_status", trust.Status))
+		recordCtx, recordCancel := context.WithTimeout(context.Background(), 3*time.Second)
+		if recordErr := s.recordAIDecisionError(recordCtx, msg, content.Text, err); recordErr != nil {
 			s.logger.Warn("record ai decision error failed", zap.Error(recordErr))
 		}
-		return nil
+		recordCancel()
+		fallbackCtx, fallbackCancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer fallbackCancel()
+		return s.applyAIModerationErrorFallback(fallbackCtx, msg, policy, trust, err)
 	}
 	if output.Skipped {
 		return s.maybeGraduateUser(ctx, trust, policy.AI)
@@ -521,6 +525,60 @@ func (s *Service) applyAIModeration(ctx context.Context, msg *tele.Message, poli
 	if err := s.applyAIAction(ctx, msg, policy, trust, output, action, isEdited); err != nil {
 		return err
 	}
+	return nil
+}
+
+func isUngraduatedTrustStatus(status string) bool {
+	switch strings.TrimSpace(strings.ToLower(status)) {
+	case "new", "suspicious":
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Service) applyAIModerationErrorFallback(ctx context.Context, msg *tele.Message, policy config.GuardPolicy, trust store.UserTrust, callErr error) error {
+	if msg == nil || msg.Chat == nil || msg.Sender == nil {
+		return nil
+	}
+	if !isUngraduatedTrustStatus(trust.Status) {
+		s.logger.Warn("ai moderation failed for graduated user, no fallback action", zap.Error(callErr), zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID), zap.String("trust_status", trust.Status))
+		return nil
+	}
+
+	reason := "AI 审核暂时不可用，已删除未毕业用户消息等待管理员复核"
+	auditOutcome := "success"
+	auditError := ""
+	defer func() {
+		s.writeModerationAudit(ctx, "ai", msg.Chat, msg.Sender, "ai_error_delete", reason, map[string]any{
+			"message_id":   msg.ID,
+			"trust_status": trust.Status,
+			"outcome":      auditOutcome,
+			"error":        auditError,
+		})
+	}()
+
+	s.logger.Warn("ai moderation failed for ungraduated user, applying delete fallback", zap.Error(callErr), zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID), zap.String("trust_status", trust.Status))
+	deleteRelease, deleteOK := s.acquireMessageDeleteLock(msg.Chat.ID, msg.ID)
+	if !deleteOK {
+		auditOutcome = "deduped"
+		s.logger.Info("skip duplicate ai error fallback message delete", zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID), zap.Int("message_id", msg.ID))
+		return nil
+	}
+	defer deleteRelease()
+	if err := s.deleteMessage(msg); err != nil {
+		auditOutcome = "failed"
+		auditError = err.Error()
+		return err
+	}
+
+	s.dispatchAIActionFeedback(msg, policy, "delete", ai.CheckOutput{
+		Verdict: ai.Verdict{
+			Verdict:  "error",
+			Category: "system",
+			Reason:   reason,
+		},
+	})
 	return nil
 }
 
