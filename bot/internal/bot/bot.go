@@ -84,32 +84,93 @@ type signedButtonCallbackPayload struct {
 	Signature string
 }
 
-// computeProfileCheckTimeout gives the AI fallback chain enough budget to complete
-// one full pass: per-model timeout * (primary + fallbacks), capped at 25s.
+const (
+	aiModerationMinTotalTimeout    = 5 * time.Second
+	aiModerationMaxTotalTimeout    = 60 * time.Second
+	aiModerationDefaultCallTimeout = 10 * time.Second
+)
+
+// computeAIModerationTimeout gives the AI fallback chain enough budget for
+// every configured retry round. Moderator treats MaxRetries as extra rounds, so
+// total rounds are MaxRetries+1.
+func computeAIModerationTimeout(policy config.AIPolicy) time.Duration {
+	return computeAIReviewTimeout(policy)
+}
+
 func computeProfileCheckTimeout(policy config.GuardPolicy) time.Duration {
-	const (
-		minTimeout = 5 * time.Second
-		maxTimeout = 25 * time.Second
-	)
+	return computeAIReviewTimeout(policy.AI)
+}
 
-	perCall := time.Duration(policy.AI.TimeoutMs) * time.Millisecond
+func computeAIReviewTimeout(policy config.AIPolicy) time.Duration {
+	perCall := time.Duration(policy.TimeoutMs) * time.Millisecond
 	if perCall <= 0 {
-		perCall = 10 * time.Second
+		perCall = aiModerationDefaultCallTimeout
 	}
 
-	fallbackCount := len(policy.AI.FallbackModelRefs)
-	if fallbackCount == 0 {
-		fallbackCount = len(policy.AI.FallbackChain)
+	unitCount := configuredAIModelCount(policy) * aiRetryRoundCount(policy.MaxRetries)
+	units := time.Duration(unitCount)
+	if perCall > aiModerationMaxTotalTimeout/units {
+		return aiModerationMaxTotalTimeout
 	}
+	total := perCall * units
 
-	total := perCall * time.Duration(fallbackCount+1)
-	if total < minTimeout {
-		return minTimeout
+	if total < aiModerationMinTotalTimeout {
+		return aiModerationMinTotalTimeout
 	}
-	if total > maxTimeout {
-		return maxTimeout
+	if total > aiModerationMaxTotalTimeout {
+		return aiModerationMaxTotalTimeout
 	}
 	return total
+}
+
+func configuredAIModelCount(policy config.AIPolicy) int {
+	seen := map[string]struct{}{}
+	add := func(ref string) {
+		ref = normalizeConfiguredAIModelRef(ref)
+		if ref != "" {
+			seen[ref] = struct{}{}
+		}
+	}
+
+	if ref := normalizeConfiguredAIModelRef(policy.PrimaryModelRef); ref != "" {
+		seen[ref] = struct{}{}
+	} else if ref := ai.NewModelRef(policy.PrimaryProvider, policy.PrimaryModel); ref != "" {
+		seen[ref.String()] = struct{}{}
+	} else {
+		seen["__default_primary__"] = struct{}{}
+	}
+	for _, ref := range policy.FallbackModelRefs {
+		add(ref)
+	}
+	for _, ref := range policy.FallbackChain {
+		add(ref)
+	}
+	if len(seen) == 0 {
+		return 1
+	}
+	return len(seen)
+}
+
+func normalizeConfiguredAIModelRef(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if provider, model, ok := ai.ModelRef(raw).Parse(); ok {
+		return ai.NewModelRef(provider, model).String()
+	}
+	parts := strings.SplitN(raw, "/", 2)
+	if len(parts) != 2 {
+		return ""
+	}
+	return ai.NewModelRef(parts[0], parts[1]).String()
+}
+
+func aiRetryRoundCount(maxRetries int) int {
+	if maxRetries < 0 {
+		return 1
+	}
+	return maxRetries + 1
 }
 
 func New(ctx context.Context, cfg config.Config, logger *zap.Logger, queries *store.Queries, rdb redis.Cmdable, providers ai.ProviderRegistry, models ai.ModelRegistry, resolver *ai.Resolver) (*Service, error) {

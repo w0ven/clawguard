@@ -32,8 +32,6 @@ end
 return 0
 `
 
-const defaultAIModerationTotalTimeout = 25 * time.Second
-
 const (
 	userActionLockTTL    = 60 * time.Second
 	messageDeleteLockTTL = 30 * time.Second
@@ -207,7 +205,7 @@ func (s *Service) handleIncomingMessageWithOptions(c tele.Context, isEdited bool
 		return nil
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, defaultAIModerationTotalTimeout)
+	ctx, cancel := context.WithTimeout(ctx, computeAIModerationTimeout(policy.AI))
 	defer cancel()
 
 	isAdmin := false

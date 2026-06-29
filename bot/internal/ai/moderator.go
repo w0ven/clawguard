@@ -391,6 +391,7 @@ func (m *Moderator) checkBatch(ctx context.Context, inputs []CheckInput) ([]Chec
 		m.logger.Warn("ai moderation exhausted all models",
 			zap.Int("model_count", len(modelChain)),
 			zap.Int("max_retries", policy.MaxRetries),
+			zap.Int("retry_rounds", aiRetryRoundCount(policy.MaxRetries)),
 			zap.Error(lastErr))
 	}
 	return nil, lastErr
@@ -512,6 +513,7 @@ func (m *Moderator) checkSingle(ctx context.Context, input CheckInput) (CheckOut
 		m.logger.Warn("ai moderation exhausted all models",
 			zap.Int("model_count", len(modelChain)),
 			zap.Int("max_retries", policy.MaxRetries),
+			zap.Int("retry_rounds", aiRetryRoundCount(policy.MaxRetries)),
 			zap.Error(lastErr))
 	}
 	return CheckOutput{}, lastErr
@@ -548,6 +550,13 @@ func contextDeadlineError(ctx context.Context) error {
 	return context.DeadlineExceeded
 }
 
+func aiRetryRoundCount(maxRetries int) int {
+	if maxRetries < 0 {
+		return 0
+	}
+	return maxRetries + 1
+}
+
 func (m *Moderator) warnAICallFailed(ref ModelRef, model Model, attempt int, timeout time.Duration, err error) {
 	if m.logger == nil {
 		return
@@ -557,6 +566,7 @@ func (m *Moderator) warnAICallFailed(ref ModelRef, model Model, attempt int, tim
 		zap.String("provider", model.ProviderKey),
 		zap.String("model", model.ModelKey),
 		zap.Int("attempt", attempt),
+		zap.Int("round", attempt+1),
 		zap.Int("timeout_ms", int(timeout/time.Millisecond)),
 		zap.Error(err),
 	)
