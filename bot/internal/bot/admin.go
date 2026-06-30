@@ -8,6 +8,7 @@ import (
 	tele "gopkg.in/telebot.v3"
 
 	"github.com/openclaw/clawguard/internal/ai"
+	"github.com/openclaw/clawguard/internal/redact"
 	"github.com/openclaw/clawguard/internal/store"
 )
 
@@ -41,7 +42,7 @@ func (s *Service) SafeUnbanChatUser(_ context.Context, chatID, userID int64) (st
 		return "", nil
 	}
 	if isNoUnbanNeededTelegramError(err) {
-		return "Telegram 没有可解除的封禁：" + err.Error(), nil
+		return "Telegram 没有可解除的封禁：" + redact.ErrorString(err), nil
 	}
 	return "", err
 }

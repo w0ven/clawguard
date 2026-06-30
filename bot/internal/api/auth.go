@@ -19,6 +19,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"go.uber.org/zap"
 
+	"github.com/openclaw/clawguard/internal/redact"
 	"github.com/openclaw/clawguard/internal/store"
 )
 
@@ -107,11 +108,11 @@ func (s *Server) requireOwner(next echo.HandlerFunc) echo.HandlerFunc {
 func (s *Server) handleTelegramLogin(c echo.Context) error {
 	payload, err := parseTelegramLoginPayload(c)
 	if err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": redact.ErrorString(err)})
 	}
 
 	if err := validateTelegramLogin(payload, s.cfg.BotToken); err != nil {
-		return c.JSON(http.StatusUnauthorized, map[string]string{"error": err.Error()})
+		return c.JSON(http.StatusUnauthorized, map[string]string{"error": redact.ErrorString(err)})
 	}
 
 	queries := s.botService.Queries()

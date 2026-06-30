@@ -17,6 +17,7 @@ import (
 	"github.com/openclaw/clawguard/internal/api"
 	"github.com/openclaw/clawguard/internal/bot"
 	"github.com/openclaw/clawguard/internal/config"
+	"github.com/openclaw/clawguard/internal/redact"
 	"github.com/openclaw/clawguard/internal/scheduler"
 	"github.com/openclaw/clawguard/internal/store"
 	"github.com/openclaw/clawguard/internal/worker"
@@ -32,6 +33,7 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+	logger = redact.ZapLogger(logger)
 	defer func() {
 		_ = logger.Sync()
 	}()

@@ -14,6 +14,8 @@ import (
 	"time"
 
 	tele "gopkg.in/telebot.v3"
+
+	"github.com/openclaw/clawguard/internal/redact"
 )
 
 const maxVisionImageBytes = 3 * 1024 * 1024
@@ -81,18 +83,18 @@ func (s *Service) fetchTelegramFilePath(ctx context.Context, fileID string) (str
 	endpoint := fmt.Sprintf("https://api.telegram.org/bot%s/getFile?file_id=%s", s.cfg.BotToken, url.QueryEscape(fileID))
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
-		return "", err
+		return "", redact.Error(err)
 	}
 
 	resp, err := imageDownloadHTTPClient.Do(req)
 	if err != nil {
-		return "", err
+		return "", redact.Error(err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		return "", fmt.Errorf("getFile status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return "", fmt.Errorf("getFile status %d: %s", resp.StatusCode, redact.Text(strings.TrimSpace(string(body))))
 	}
 
 	var payload struct {
@@ -102,7 +104,7 @@ func (s *Service) fetchTelegramFilePath(ctx context.Context, fileID string) (str
 		} `json:"result"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		return "", err
+		return "", redact.Error(err)
 	}
 	if !payload.OK || strings.TrimSpace(payload.Result.FilePath) == "" {
 		return "", fmt.Errorf("telegram getFile returned empty file_path")
@@ -114,18 +116,18 @@ func (s *Service) downloadTelegramFile(ctx context.Context, filePath string) ([]
 	endpoint := fmt.Sprintf("https://api.telegram.org/file/bot%s/%s", s.cfg.BotToken, strings.TrimLeft(filePath, "/"))
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
-		return nil, err
+		return nil, redact.Error(err)
 	}
 
 	resp, err := imageDownloadHTTPClient.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, redact.Error(err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		return nil, fmt.Errorf("file download status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return nil, fmt.Errorf("file download status %d: %s", resp.StatusCode, redact.Text(strings.TrimSpace(string(body))))
 	}
 	return io.ReadAll(io.LimitReader(resp.Body, maxVisionImageBytes+1))
 }

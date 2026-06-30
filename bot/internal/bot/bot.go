@@ -24,6 +24,7 @@ import (
 	"github.com/openclaw/clawguard/internal/ai"
 	"github.com/openclaw/clawguard/internal/casclient"
 	"github.com/openclaw/clawguard/internal/config"
+	"github.com/openclaw/clawguard/internal/redact"
 	"github.com/openclaw/clawguard/internal/store"
 )
 
@@ -174,6 +175,8 @@ func aiRetryRoundCount(maxRetries int) int {
 }
 
 func New(ctx context.Context, cfg config.Config, logger *zap.Logger, queries *store.Queries, rdb redis.Cmdable, providers ai.ProviderRegistry, models ai.ModelRegistry, resolver *ai.Resolver) (*Service, error) {
+	logger = redact.ZapLogger(logger)
+
 	verifyBtn := tele.Btn{Unique: "verify_human"}
 	verifyMathBtn := tele.Btn{Unique: "verify_math"}
 	verifyRandBtn := tele.Btn{Unique: "verify_random"}
@@ -813,7 +816,7 @@ func (s *Service) startVerification(chat *tele.Chat, user *tele.User, joinEventM
 	if err := s.bot.Restrict(chat, &member); err != nil {
 		readable := normalizeTelegramActionError("restrict", err)
 		s.logger.Error("restrict new member", zap.Error(readable), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
-		s.sendBotPermissionWarningToChat(chat, "⚠️ 新人入群验证启动失败："+htmlEscape(readable.Error())+"。请检查 bot 是否拥有封禁/禁言成员权限。")
+		s.sendBotPermissionWarningToChat(chat, "⚠️ 新人入群验证启动失败："+htmlEscape(redact.ErrorString(readable))+"。请检查 bot 是否拥有封禁/禁言成员权限。")
 		return readable
 	}
 	s.logger.Info("verification step completed",
@@ -2040,7 +2043,7 @@ func (s *Service) handleTrustCommand(c tele.Context) error {
 
 	target, err := s.resolveCommandTarget(context.Background(), msg, chat, 1)
 	if err != nil {
-		return c.Send(err.Error(), &tele.SendOptions{ParseMode: tele.ModeHTML})
+		return c.Send(redact.ErrorString(err), &tele.SendOptions{ParseMode: tele.ModeHTML})
 	}
 
 	trust, err := s.queries.GetUserTrust(context.Background(), chat.ID, target.UserID)
@@ -2074,7 +2077,7 @@ func (s *Service) handleWarnCommand(c tele.Context) error {
 
 	target, reason, err := s.resolveWarnTargetAndReason(context.Background(), msg, chat)
 	if err != nil {
-		return c.Send(err.Error(), &tele.SendOptions{ParseMode: tele.ModeHTML})
+		return c.Send(redact.ErrorString(err), &tele.SendOptions{ParseMode: tele.ModeHTML})
 	}
 
 	policy, err := config.LoadPolicy(context.Background(), s.queries, chat.ID)
@@ -2143,18 +2146,18 @@ func (s *Service) handleUnbanCommand(c tele.Context) error {
 
 	target, err := s.resolveCommandTarget(context.Background(), msg, chat, 1)
 	if err != nil {
-		return c.Send(err.Error(), &tele.SendOptions{ParseMode: tele.ModeHTML})
+		return c.Send(redact.ErrorString(err), &tele.SendOptions{ParseMode: tele.ModeHTML})
 	}
 
 	warnings := make([]string, 0, 2)
 	if warning, err := s.SafeUnbanChatUser(context.Background(), chat.ID, target.UserID); err != nil {
-		s.writeCommandModerationAudit(context.Background(), "unban", c.Sender(), chat, &tele.User{ID: target.UserID, Username: target.Username, FirstName: target.Display}, "unban", "manual_unban", target.MessageID, msg.ID, "failed", err.Error())
-		return c.Send("解封失败: "+htmlEscape(err.Error()), &tele.SendOptions{ParseMode: tele.ModeHTML})
+		s.writeCommandModerationAudit(context.Background(), "unban", c.Sender(), chat, &tele.User{ID: target.UserID, Username: target.Username, FirstName: target.Display}, "unban", "manual_unban", target.MessageID, msg.ID, "failed", redact.ErrorString(err))
+		return c.Send("解封失败: "+htmlEscape(redact.ErrorString(err)), &tele.SendOptions{ParseMode: tele.ModeHTML})
 	} else if strings.TrimSpace(warning) != "" {
 		warnings = append(warnings, warning)
 	}
 	if err := s.queries.DeleteBannedUser(context.Background(), target.UserID); err != nil {
-		return c.Send("清理封禁记录失败: "+htmlEscape(err.Error()), &tele.SendOptions{ParseMode: tele.ModeHTML})
+		return c.Send("清理封禁记录失败: "+htmlEscape(redact.ErrorString(err)), &tele.SendOptions{ParseMode: tele.ModeHTML})
 	}
 	if _, err := s.queries.UnbanUserTrust(context.Background(), store.UnbanUserTrustParams{
 		ChatID: chat.ID,
@@ -2205,7 +2208,7 @@ func (s *Service) handleSpamCommand(c tele.Context) error {
 
 	target, err := s.resolveCommandTarget(context.Background(), msg, chat, 1)
 	if err != nil {
-		return c.Send(err.Error(), &tele.SendOptions{ParseMode: tele.ModeHTML})
+		return c.Send(redact.ErrorString(err), &tele.SendOptions{ParseMode: tele.ModeHTML})
 	}
 
 	ctx := context.Background()
@@ -2229,8 +2232,8 @@ func (s *Service) handleSpamCommand(c tele.Context) error {
 	// 3. Ban user. Bots cannot file an official Telegram spam report; revoke_messages
 	// is the available Bot API mechanism for removing the target user's chat history.
 	if err := s.banUser(chat, targetUser); err != nil {
-		s.writeCommandModerationAudit(ctx, "spam", c.Sender(), chat, targetUser, "ban", "spam", target.MessageID, msg.ID, "failed", err.Error())
-		return c.Send("封禁失败: "+htmlEscape(err.Error()), &tele.SendOptions{ParseMode: tele.ModeHTML})
+		s.writeCommandModerationAudit(ctx, "spam", c.Sender(), chat, targetUser, "ban", "spam", target.MessageID, msg.ID, "failed", redact.ErrorString(err))
+		return c.Send("封禁失败: "+htmlEscape(redact.ErrorString(err)), &tele.SendOptions{ParseMode: tele.ModeHTML})
 	}
 
 	// 4. Upsert banned_user record
@@ -2534,7 +2537,7 @@ func (s *Service) MarkAIFailure(err error) {
 		s.lastAIError.Store("")
 		return
 	}
-	s.lastAIError.Store(err.Error())
+	s.lastAIError.Store(redact.ErrorString(err))
 }
 
 func (s *Service) Status() map[string]any {

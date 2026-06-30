@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/labstack/echo/v4"
 
+	"github.com/openclaw/clawguard/internal/redact"
 	"github.com/openclaw/clawguard/internal/store"
 )
 
@@ -74,7 +75,7 @@ func (s *Server) handleCreateScheduledMessage(c echo.Context) error {
 	}
 	params, err := s.parseScheduledMessageRequest(c, chatID, nil)
 	if err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": redact.ErrorString(err)})
 	}
 	created, err := s.botService.Queries().CreateScheduledMessage(c.Request().Context(), store.CreateScheduledMessageParams{
 		ChatID:            params.ChatID,
@@ -115,7 +116,7 @@ func (s *Server) handleUpdateScheduledMessage(c echo.Context) error {
 	}
 	params, err := s.parseScheduledMessageRequest(c, chatID, &id)
 	if err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": redact.ErrorString(err)})
 	}
 	updated, err := s.botService.Queries().UpdateScheduledMessage(c.Request().Context(), store.UpdateScheduledMessageParams{
 		ID:                id,
@@ -170,7 +171,7 @@ func (s *Server) handleRunScheduledMessageNow(c echo.Context) error {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "定时调度器未启动"})
 	}
 	if err := s.scheduler.RunNow(c.Request().Context(), id); err != nil {
-		return c.JSON(http.StatusBadGateway, map[string]string{"error": "立即试发失败: " + err.Error()})
+		return c.JSON(http.StatusBadGateway, map[string]string{"error": "立即试发失败: " + redact.ErrorString(err)})
 	}
 	return c.JSON(http.StatusOK, map[string]string{"status": "ok"})
 }
@@ -371,7 +372,7 @@ func (s *Server) serializeScheduledMessage(msg store.ScheduledMessage) map[strin
 		"status":              msg.Status,
 		"last_run_at":         msg.LastRunAt,
 		"last_message_id":     msg.LastMessageID,
-		"last_error":          msg.LastError,
+		"last_error":          redact.StringPtr(msg.LastError),
 		"last_skip_reason":    msg.LastSkipReason,
 		"created_at":          msg.CreatedAt,
 		"updated_at":          msg.UpdatedAt,
@@ -405,7 +406,7 @@ func serializeScheduledMessageRun(run store.ScheduledMessageRun) map[string]any 
 		"success":              run.Success,
 		"tg_message_id":        run.TgMessageID,
 		"rendered_preview":     run.RenderedPreview,
-		"error":                run.Error,
+		"error":                redact.StringPtr(run.Error),
 		"duration_ms":          run.DurationMs,
 	}
 }

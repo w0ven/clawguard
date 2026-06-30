@@ -14,6 +14,7 @@ import (
 
 	"github.com/openclaw/clawguard/internal/bot"
 	"github.com/openclaw/clawguard/internal/config"
+	"github.com/openclaw/clawguard/internal/redact"
 	"github.com/openclaw/clawguard/internal/scheduler"
 )
 
@@ -34,10 +35,16 @@ type Server struct {
 }
 
 func NewServer(cfg config.Config, logger *zap.Logger, botService *bot.Service, scheduled *scheduler.Scheduler) *Server {
+	logger = redact.ZapLogger(logger)
 	e := echo.New()
 	e.HideBanner = true
 	e.HidePort = true
-	e.Use(middleware.Recover())
+	e.Use(middleware.RecoverWithConfig(middleware.RecoverConfig{
+		LogErrorFunc: func(c echo.Context, err error, stack []byte) error {
+			logger.Error("http panic recovered", zap.Error(redact.Error(err)), zap.ByteString("stack", []byte(redact.Text(string(stack)))))
+			return err
+		},
+	}))
 
 	server := &Server{
 		cfg:        cfg,

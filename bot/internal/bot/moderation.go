@@ -22,6 +22,7 @@ import (
 
 	"github.com/openclaw/clawguard/internal/ai"
 	"github.com/openclaw/clawguard/internal/config"
+	"github.com/openclaw/clawguard/internal/redact"
 	"github.com/openclaw/clawguard/internal/store"
 )
 
@@ -566,7 +567,7 @@ func (s *Service) applyAIModerationErrorFallback(ctx context.Context, msg *tele.
 	defer deleteRelease()
 	if err := s.deleteMessage(msg); err != nil {
 		auditOutcome = "failed"
-		auditError = err.Error()
+		auditError = redact.ErrorString(err)
 		return err
 	}
 
@@ -1327,7 +1328,7 @@ func (s *Service) recordAIDecisionError(ctx context.Context, msg *tele.Message, 
 	}
 	reason := ""
 	if callErr != nil {
-		reason = truncateString(callErr.Error(), 2000)
+		reason = truncateString(redact.ErrorString(callErr), 2000)
 	}
 	_, err := s.queries.InsertAIDecision(ctx, store.InsertAIDecisionParams{
 		ChatID:        msg.Chat.ID,
@@ -2316,7 +2317,7 @@ func (s *Service) applyAIAction(ctx context.Context, msg *tele.Message, policy c
 			defer actionRelease()
 			if err := s.banUser(msg.Chat, msg.Sender); err != nil {
 				auditOutcome = "failed"
-				auditError = err.Error()
+				auditError = redact.ErrorString(err)
 				return err
 			}
 		} else {
@@ -2341,7 +2342,7 @@ func (s *Service) applyAIAction(ctx context.Context, msg *tele.Message, policy c
 			defer actionRelease()
 			if err := s.muteUser(msg.Chat, msg.Sender, 600); err != nil {
 				auditOutcome = "failed"
-				auditError = err.Error()
+				auditError = redact.ErrorString(err)
 				return err
 			}
 		} else {
@@ -2366,7 +2367,7 @@ func (s *Service) applyAIAction(ctx context.Context, msg *tele.Message, policy c
 			defer actionRelease()
 			if _, _, err := s.IncrWarning(ctx, msg.Chat, msg.Sender, "ai_"+output.Verdict.Verdict, policy, true, true); err != nil {
 				auditOutcome = "failed"
-				auditError = err.Error()
+				auditError = redact.ErrorString(err)
 				return err
 			}
 		} else {
@@ -2482,7 +2483,7 @@ func (s *Service) maybeBanBotInviterAfterViolation(ctx context.Context, msg *tel
 	inviter, trust, err := s.botInviterFromTrust(ctx, msg.Chat.ID, msg.Sender.ID)
 	if err != nil {
 		outcome = "failed"
-		auditReason = err.Error()
+		auditReason = redact.ErrorString(err)
 		s.logger.Warn("load bot inviter failed", zap.Error(err), zap.Int64("chat_id", msg.Chat.ID), zap.Int64("bot_user_id", msg.Sender.ID))
 		s.writeBotInviterAudit(ctx, msg, nil, action, outcome, auditReason)
 		return
@@ -2503,7 +2504,7 @@ func (s *Service) maybeBanBotInviterAfterViolation(ctx context.Context, msg *tel
 
 	if err := s.banUser(msg.Chat, inviter); err != nil {
 		outcome = "failed"
-		auditReason = err.Error()
+		auditReason = redact.ErrorString(err)
 		s.logger.Warn("ban bot inviter failed", zap.Error(err), zap.Int64("chat_id", msg.Chat.ID), zap.Int64("bot_user_id", msg.Sender.ID), zap.Int64("inviter_user_id", inviter.ID))
 		s.writeBotInviterAudit(ctx, msg, inviter, action, outcome, auditReason)
 		return
@@ -2956,31 +2957,31 @@ func (s *Service) escalateWarnings(ctx context.Context, chat *tele.Chat, user *t
 	case "mute":
 		if err := s.muteUser(chat, user, 3600); err != nil {
 			auditOutcome = "failed"
-			auditError = err.Error()
+			auditError = redact.ErrorString(err)
 			return fmt.Errorf("mute warned user: %w", err)
 		}
 	case "mute_5m":
 		if err := s.muteUser(chat, user, 300); err != nil {
 			auditOutcome = "failed"
-			auditError = err.Error()
+			auditError = redact.ErrorString(err)
 			return fmt.Errorf("mute warned user: %w", err)
 		}
 	case "mute_1h":
 		if err := s.muteUser(chat, user, 3600); err != nil {
 			auditOutcome = "failed"
-			auditError = err.Error()
+			auditError = redact.ErrorString(err)
 			return fmt.Errorf("mute warned user: %w", err)
 		}
 	case "kick":
 		if err := s.kickUser(chat, user); err != nil {
 			auditOutcome = "failed"
-			auditError = err.Error()
+			auditError = redact.ErrorString(err)
 			return fmt.Errorf("kick warned user: %w", err)
 		}
 	case "ban":
 		if err := s.banUser(chat, user); err != nil {
 			auditOutcome = "failed"
-			auditError = err.Error()
+			auditError = redact.ErrorString(err)
 			return fmt.Errorf("ban warned user: %w", err)
 		}
 	default:
@@ -3163,7 +3164,8 @@ func normalizeTelegramActionError(action string, err error) error {
 	if err == nil {
 		return nil
 	}
-	message := strings.ToLower(err.Error())
+	safeErr := redact.Error(err)
+	message := strings.ToLower(redact.ErrorString(err))
 	var tgErr *tele.Error
 	if errors.As(err, &tgErr) {
 		message = strings.ToLower(tgErr.Description + " " + tgErr.Message)
@@ -3171,12 +3173,12 @@ func normalizeTelegramActionError(action string, err error) error {
 	if strings.Contains(message, "not enough rights") || strings.Contains(message, "administrator rights") || strings.Contains(message, "can't restrict") || strings.Contains(message, "can't remove") || strings.Contains(message, "have no rights") {
 		switch action {
 		case "delete":
-			return fmt.Errorf("bot 缺删除消息权限: %w", err)
+			return fmt.Errorf("bot 缺删除消息权限: %w", safeErr)
 		case "ban", "unban", "restrict":
-			return fmt.Errorf("bot 缺 ban/禁言权限: %w", err)
+			return fmt.Errorf("bot 缺 ban/禁言权限: %w", safeErr)
 		}
 	}
-	return fmt.Errorf("telegram %s failed: %w", action, err)
+	return fmt.Errorf("telegram %s failed: %w", action, safeErr)
 }
 
 func (s *Service) actionsPaused(ctx context.Context) (bool, error) {

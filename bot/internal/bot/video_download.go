@@ -15,6 +15,7 @@ import (
 	"sync"
 
 	"github.com/openclaw/clawguard/internal/config"
+	"github.com/openclaw/clawguard/internal/redact"
 	"go.uber.org/zap"
 	"golang.org/x/sync/semaphore"
 	tele "gopkg.in/telebot.v3"
@@ -220,18 +221,18 @@ func downloadTelegramFileWithCap(ctx context.Context, botToken, filePath string,
 	endpoint := fmt.Sprintf("https://api.telegram.org/file/bot%s/%s", botToken, strings.TrimLeft(filePath, "/"))
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
-		return nil, err
+		return nil, redact.Error(err)
 	}
 
 	resp, err := imageDownloadHTTPClient.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, redact.Error(err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		return nil, fmt.Errorf("file download status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return nil, fmt.Errorf("file download status %d: %s", resp.StatusCode, redact.Text(strings.TrimSpace(string(body))))
 	}
 	return io.ReadAll(io.LimitReader(resp.Body, capBytes))
 }

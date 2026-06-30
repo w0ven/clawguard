@@ -8,6 +8,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/openclaw/clawguard/internal/bot"
+	"github.com/openclaw/clawguard/internal/redact"
 )
 
 func (s *Server) registerVerifyRoutes() {
@@ -40,7 +41,7 @@ func (s *Server) handleVerifyTurnstile(c echo.Context) error {
 		case errors.Is(err, bot.ErrTurnstileTokenNotFound):
 			return c.JSON(http.StatusNotFound, map[string]string{"error": "verification token not found or already used"})
 		case errors.Is(err, bot.ErrTurnstileVerifyFailed):
-			return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return c.JSON(http.StatusBadRequest, map[string]string{"error": redact.ErrorString(err)})
 		case errors.Is(err, bot.ErrTurnstileNotConfigured):
 			return c.JSON(http.StatusServiceUnavailable, map[string]string{"error": "turnstile not configured"})
 		default:

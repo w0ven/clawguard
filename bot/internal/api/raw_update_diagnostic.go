@@ -5,6 +5,8 @@ import (
 	"strings"
 
 	"go.uber.org/zap"
+
+	"github.com/openclaw/clawguard/internal/redact"
 )
 
 const diagnosticRingEmoji = "💍"
@@ -48,7 +50,7 @@ func (s *Server) logRawTelegramUpdateIfTarget(raw []byte) {
 	s.logger.Info(
 		"telegram raw update diagnostic",
 		zap.Any("summary", summary),
-		zap.ByteString("raw_update_json", raw),
+		zap.ByteString("raw_update_json", []byte(redact.Text(string(raw)))),
 	)
 }
 

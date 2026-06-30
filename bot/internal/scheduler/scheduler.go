@@ -14,6 +14,7 @@ import (
 	tele "gopkg.in/telebot.v3"
 
 	"github.com/openclaw/clawguard/internal/messagefmt"
+	"github.com/openclaw/clawguard/internal/redact"
 	"github.com/openclaw/clawguard/internal/store"
 )
 
@@ -46,6 +47,7 @@ func New(logger *zap.Logger, queries *store.Queries, bot *tele.Bot, sendLimiter 
 	WaitChat(context.Context, int64) error
 	WaitGlobal(context.Context) error
 }) *Scheduler {
+	logger = redact.ZapLogger(logger)
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Scheduler{
 		cron:        cron.New(cron.WithLocation(time.UTC), cron.WithSeconds()),
@@ -250,7 +252,7 @@ func (s *Scheduler) run(ctx context.Context, id int64, manual bool) error {
 	}
 
 	if sendErr != nil {
-		errText := sendErr.Error()
+		errText := redact.ErrorString(sendErr)
 		if !manual {
 			if markErr := s.queries.MarkScheduledMessageFailed(ctx, msg.ID, errText); markErr != nil {
 				s.logger.Warn("mark scheduled message failed state failed", zap.Error(markErr), zap.Int64("scheduled_message_id", msg.ID), zap.Int64("chat_id", msg.ChatID))

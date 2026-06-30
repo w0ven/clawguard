@@ -14,6 +14,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/openclaw/clawguard/internal/ai"
+	"github.com/openclaw/clawguard/internal/redact"
 	"github.com/openclaw/clawguard/internal/store"
 )
 
@@ -526,7 +527,7 @@ func (s *Server) handleListLLMStats(c echo.Context) error {
 			"healthy":        st.Healthy,
 			"last_check_at":  st.LastCheckAt,
 			"last_ok_at":     st.LastOkAt,
-			"last_error":     st.LastError,
+			"last_error":     redact.Text(st.LastError),
 			"latency_p50_ms": st.LatencyP50Ms,
 			"latency_p95_ms": st.LatencyP95Ms,
 			"success_1h":     st.Success1h,
@@ -564,12 +565,12 @@ func (s *Server) handleProbeLLMModel(c echo.Context) error {
 			Healthy:     false,
 			LastCheckAt: &checkedAt,
 			LastOkAt:    nil,
-			LastError:   err.Error(),
+			LastError:   redact.ErrorString(err),
 		})
 		return c.JSON(http.StatusOK, map[string]any{
 			"ok":         false,
 			"latency_ms": 0,
-			"error":      err.Error(),
+			"error":      redact.ErrorString(err),
 		})
 	}
 	okAt := checkedAt
@@ -644,11 +645,11 @@ func (s *Server) handleTestLLMModel(c echo.Context) error {
 			Healthy:     false,
 			LastCheckAt: &checkedAt,
 			LastOkAt:    nil,
-			LastError:   err.Error(),
+			LastError:   redact.ErrorString(err),
 		})
 		return c.JSON(http.StatusOK, map[string]any{
 			"ok":    false,
-			"error": err.Error(),
+			"error": redact.ErrorString(err),
 		})
 	}
 	okAt := checkedAt

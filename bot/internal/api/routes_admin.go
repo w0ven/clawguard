@@ -19,6 +19,7 @@ import (
 
 	"github.com/openclaw/clawguard/internal/ai"
 	"github.com/openclaw/clawguard/internal/config"
+	"github.com/openclaw/clawguard/internal/redact"
 	"github.com/openclaw/clawguard/internal/store"
 )
 
@@ -152,7 +153,7 @@ func (s *Server) handlePutGroupConfig(c echo.Context) error {
 
 	nextConfig, err := normalizeJSONBody(c)
 	if err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": redact.ErrorString(err)})
 	}
 
 	updated, err := s.botService.Queries().UpdateGroupConfig(c.Request().Context(), store.UpdateGroupConfigParams{
@@ -420,10 +421,10 @@ func (s *Server) handlePutGlobalConfig(c echo.Context) error {
 
 	nextConfig, err := normalizeJSONBody(c)
 	if err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": redact.ErrorString(err)})
 	}
 	if err := rejectDangerousGlobalConfigTruncation(before.Config, nextConfig); err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": redact.ErrorString(err)})
 	}
 
 	updated, err := queries.UpsertGlobalConfig(c.Request().Context(), store.UpsertGlobalConfigParams{Config: nextConfig})
@@ -455,7 +456,7 @@ func (s *Server) handleListViolations(c echo.Context) error {
 	}
 	since, until, err := parseTimeRange(c)
 	if err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": redact.ErrorString(err)})
 	}
 
 	chatIDs, _ := adminScopeFilter(admin)
@@ -508,11 +509,11 @@ func (s *Server) handleListProfileCheckLogs(c echo.Context) error {
 
 	result, err := parseProfileCheckLogResult(c.QueryParam("result"))
 	if err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": redact.ErrorString(err)})
 	}
 	mode, err := parseProfileCheckLogMode(c.QueryParam("mode"))
 	if err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": redact.ErrorString(err)})
 	}
 
 	page := parsePage(c.QueryParam("page"))
@@ -563,7 +564,7 @@ func (s *Server) handleDeleteOldProfileCheckLogs(c echo.Context) error {
 
 	days, err := parseCleanupDays(c.QueryParam("days"), 30)
 	if err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": redact.ErrorString(err)})
 	}
 
 	deleted, err := s.botService.Queries().DeleteOldProfileCheckLogs(c.Request().Context(), int32(days))
@@ -648,7 +649,7 @@ func (s *Server) handleBan(c echo.Context) error {
 	admin, _ := currentAdmin(c)
 	chatID, userID, err := parseChatAndUser(c)
 	if err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": redact.ErrorString(err)})
 	}
 	if !adminCanAccessChat(admin, chatID) {
 		return c.JSON(http.StatusForbidden, map[string]string{"error": "group out of scope"})
@@ -674,7 +675,7 @@ func (s *Server) handleUnban(c echo.Context) error {
 	admin, _ := currentAdmin(c)
 	chatID, userID, err := parseChatAndUser(c)
 	if err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": redact.ErrorString(err)})
 	}
 	if !adminCanAccessChat(admin, chatID) {
 		return c.JSON(http.StatusForbidden, map[string]string{"error": "group out of scope"})
@@ -776,7 +777,7 @@ func (s *Server) handleHealth(c echo.Context) error {
 		"webhook_seconds_ago":    status["webhook_seconds_ago"],
 		"ai_last_ok_at":          status["ai_last_ok_at"],
 		"ai_last_fail_at":        status["ai_last_fail_at"],
-		"ai_last_error":          status["ai_last_error"],
+		"ai_last_error":          redact.Value(status["ai_last_error"]),
 		"today_calls":            todayCalls,
 		"uptime_seconds":         status["uptime_seconds"],
 	})
@@ -786,7 +787,7 @@ func (s *Server) handleListEvents(c echo.Context) error {
 	admin, _ := currentAdmin(c)
 	eventType, err := parseEventType(c.QueryParam("type"))
 	if err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": redact.ErrorString(err)})
 	}
 	scopeChatIDs, includeGlobal := adminScopeFilter(admin)
 	limit := parseLimit(c.QueryParam("limit"))
@@ -1044,7 +1045,7 @@ func (s *Server) handleAITest(c echo.Context) error {
 		SkipCache: true,
 	})
 	if callErr != nil {
-		return c.JSON(http.StatusBadGateway, map[string]string{"error": callErr.Error()})
+		return c.JSON(http.StatusBadGateway, map[string]string{"error": redact.ErrorString(callErr)})
 	}
 	return c.JSON(http.StatusOK, map[string]any{"result": output})
 }
@@ -1101,7 +1102,7 @@ func (s *Server) handleListAIDecisions(c echo.Context) error {
 	}
 	since, until, err := parseTimeRange(c)
 	if err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": redact.ErrorString(err)})
 	}
 	items, err := s.botService.Queries().ListAIDecisions(c.Request().Context(), store.ListAIDecisionsParams{
 		ChatID:        chatID,
@@ -1448,12 +1449,12 @@ func (s *Server) handleUpdateUserTrust(c echo.Context) error {
 	case nextStatus == "banned":
 		if err := s.botService.BanChatUser(c.Request().Context(), chatID, userID); err != nil {
 			s.logger.Warn("user trust status ban sync failed", zap.Error(err), zap.Int64("chat_id", chatID), zap.Int64("user_id", userID))
-			response["telegram_action_error"] = err.Error()
+			response["telegram_action_error"] = redact.ErrorString(err)
 		}
 	case previous.Status == "banned" && nextStatus != "banned":
 		if err := s.botService.UnbanChatUser(c.Request().Context(), chatID, userID); err != nil {
 			s.logger.Warn("user trust status unban sync failed", zap.Error(err), zap.Int64("chat_id", chatID), zap.Int64("user_id", userID))
-			response["telegram_action_error"] = err.Error()
+			response["telegram_action_error"] = redact.ErrorString(err)
 		}
 	}
 	return c.JSON(http.StatusOK, response)
