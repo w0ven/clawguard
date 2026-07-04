@@ -141,7 +141,6 @@ clawguard/
          │  new   │──┐
          └────┬───┘  │
               │      │ clean_cnt ≥ GraduateAfterMessages
-              │      │ 或 now-joined_at ≥ GraduateAfterDays
               │      ▼
               │  ┌─────────┐   AI/手动重新置回 → suspicious / banned
               │  │ trusted │
@@ -246,7 +245,7 @@ Bio 通过 `getChat` 抓取，`policy.AI.BioCacheTTLMinutes` 控制 Redis 缓存
   │   └─ applyAIAction：执行 + 写 ai_decisions + resetTrustAfterViolation
 ```
 
-毕业条件（`maybeGraduateUser`）：`messages_clean ≥ GraduateAfterMessages` 或入群时长 ≥ `GraduateAfterDays`。
+毕业条件（`maybeGraduateUser`）：普通未毕业用户和 suspicious 用户都要求 `messages_clean ≥ GraduateAfterMessages`；`GraduateAfterDays` 仅为兼容旧配置保留，不参与毕业判定。
 
 ### 5.6 LLM Provider / Model 注册表
 

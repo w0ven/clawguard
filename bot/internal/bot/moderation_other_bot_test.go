@@ -656,3 +656,83 @@ func TestMaybeGraduateUserSkipsBots(t *testing.T) {
 		t.Fatalf("bot trust should not be updated, got %+v", db.trust)
 	}
 }
+
+func TestMaybeGraduateUserSuspiciousUsesGraduateAfterMessages(t *testing.T) {
+	now := time.Now().UTC()
+	tests := []struct {
+		name                  string
+		clean                 int32
+		graduateAfterMessages int
+		statusAge             time.Duration
+		wantStatus            string
+		wantGraduated         bool
+	}{
+		{
+			name:                  "below default threshold after thirty days",
+			clean:                 4,
+			graduateAfterMessages: config.DefaultPolicy.AI.GraduateAfterMessages,
+			statusAge:             31 * 24 * time.Hour,
+			wantStatus:            "suspicious",
+		},
+		{
+			name:                  "meets default threshold",
+			clean:                 5,
+			graduateAfterMessages: config.DefaultPolicy.AI.GraduateAfterMessages,
+			statusAge:             time.Hour,
+			wantStatus:            "trusted",
+			wantGraduated:         true,
+		},
+		{
+			name:                  "below custom threshold after thirty days",
+			clean:                 6,
+			graduateAfterMessages: 7,
+			statusAge:             31 * 24 * time.Hour,
+			wantStatus:            "suspicious",
+		},
+		{
+			name:                  "meets custom threshold",
+			clean:                 7,
+			graduateAfterMessages: 7,
+			statusAge:             time.Hour,
+			wantStatus:            "trusted",
+			wantGraduated:         true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			policy := config.DefaultPolicy
+			policy.AI.GraduateAfterMessages = tt.graduateAfterMessages
+			db := newOtherBotMockDB(policy)
+			trust := store.UserTrust{
+				ChatID:          -1001,
+				UserID:          77,
+				FirstName:       stringPtr("Bob"),
+				JoinedAt:        now.Add(-60 * 24 * time.Hour),
+				UpdatedAt:       now,
+				StatusChangedAt: now.Add(-tt.statusAge),
+				Status:          "suspicious",
+				Score:           0.3,
+				MessagesClean:   tt.clean,
+			}
+			db.trust = &trust
+			botClient, _ := newMockTelegramBot(t, "")
+			svc := &Service{logger: zap.NewNop(), queries: store.New(db), bot: botClient, sender: botClient, sendLimiter: NewSendLimiter()}
+
+			if err := svc.maybeGraduateUser(context.Background(), trust, policy.AI); err != nil {
+				t.Fatalf("maybeGraduateUser returned error: %v", err)
+			}
+
+			db.mu.Lock()
+			got := *db.trust
+			db.mu.Unlock()
+			gotGraduated := got.GraduatedAt != nil
+			if got.Status != tt.wantStatus || gotGraduated != tt.wantGraduated {
+				t.Fatalf("trust = %+v, want status=%s graduated=%v", got, tt.wantStatus, tt.wantGraduated)
+			}
+			if tt.wantGraduated && got.Score < 0.95 {
+				t.Fatalf("score = %v, want at least 0.95 after graduation", got.Score)
+			}
+		})
+	}
+}

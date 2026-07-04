@@ -289,7 +289,7 @@ Tunnel 入口指向宿主机 `127.0.0.1:8090`：
 
 ### 毕业条件
 
-未毕业普通用户必须累计 5 条通过 AI 审核的干净消息后才会升级为 trusted；`graduate_after_days` 仅为兼容旧配置保留，不再参与普通用户毕业判定。suspicious 用户仍需满足 5 条干净消息和 30 天状态观察的双门槛。
+未毕业普通用户和 suspicious 用户都必须累计 `graduate_after_messages` 条通过 AI 审核的干净消息后才会升级为 trusted，默认阈值为 5；`graduate_after_days` 仅为兼容旧配置保留，不再参与毕业判定。
 
 ### 其他 bot 处理
 

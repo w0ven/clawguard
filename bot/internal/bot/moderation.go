@@ -2805,11 +2805,7 @@ func (s *Service) maybeGraduateUser(ctx context.Context, trust store.UserTrust, 
 	if trust.IsBot {
 		return nil
 	}
-	if trust.Status == "suspicious" {
-		if trust.MessagesClean < 5 && time.Since(trust.StatusChangedAt) < 30*24*time.Hour {
-			return nil
-		}
-	} else if int(trust.MessagesClean) < policy.GraduateAfterMessages {
+	if int(trust.MessagesClean) < policy.GraduateAfterMessages {
 		return nil
 	}
 	now := time.Now()
