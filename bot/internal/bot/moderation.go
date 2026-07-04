@@ -701,18 +701,11 @@ func (s *Service) bumpWindowCounter(ctx context.Context, key string, ttl time.Du
 	return countCmd.Val(), nil
 }
 
-func isRestrictedNewUser(trust store.UserTrust, durationHours int) bool {
-	switch trust.Status {
-	case "suspicious":
-		return true
-	case "new":
-		if durationHours <= 0 || trust.JoinedAt.IsZero() {
-			return true
-		}
-		return time.Since(trust.JoinedAt) <= time.Duration(durationHours)*time.Hour
-	default:
-		return false
-	}
+func isRestrictedNewUser(trust store.UserTrust, _ int) bool {
+	// The config key is still new_user for API compatibility, but the
+	// restriction now follows the trust state machine: all ungraduated users
+	// are restricted until they become trusted.
+	return isUngraduatedTrustStatus(trust.Status)
 }
 
 func messageHasRestrictedMedia(msg *tele.Message) bool {
@@ -899,13 +892,13 @@ func humanReason(rawReason, matched string) string {
 		case "filter_rate_limit":
 			return "发言过快"
 		case "filter_newuser_no_links":
-			return "新人不能发链接"
+			return "未毕业用户不能发链接"
 		case "filter_newuser_no_forwards":
-			return "新人不能转发"
+			return "未毕业用户不能转发"
 		case "filter_newuser_no_media":
-			return "新人不能发媒体"
+			return "未毕业用户不能发媒体"
 		case "filter_newuser_rate_limit":
-			return "新人发言过快"
+			return "未毕业用户发言过快"
 		case "profile_match":
 			return "资料命中黑名单 " + matched
 		}
@@ -922,10 +915,10 @@ func humanReason(rawReason, matched string) string {
 	case "filter_rate_limit":
 		return "发言频率限制"
 	case "filter_non_text_message":
-		return "新人不能发此类消息"
+		return "未毕业用户不能发此类消息"
 	case "filter_newuser_no_links", "filter_newuser_no_forwards",
 		"filter_newuser_no_media", "filter_newuser_rate_limit":
-		return "新人限制"
+		return "未毕业用户限制"
 	case "profile_match":
 		return "资料黑名单"
 	case "cas_banned":

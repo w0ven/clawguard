@@ -140,7 +140,9 @@ type FilterUsernamePolicy struct {
 }
 
 type FilterNewUserPolicy struct {
-	Enabled              bool `json:"enabled"`
+	Enabled bool `json:"enabled"`
+	// DurationHours is kept for backward-compatible config shape. Ungraduated
+	// restrictions are based on user_trust.status, not join age.
 	DurationHours        int  `json:"duration_hours"`
 	NoLinks              bool `json:"no_links"`
 	NoForwards           bool `json:"no_forwards"`
@@ -282,6 +284,7 @@ var DefaultPolicy = GuardPolicy{
 			DurationHours:        24,
 			NoLinks:              true,
 			NoForwards:           true,
+			NoMedia:              true,
 			MaxMessagesPerMinute: 5,
 		},
 		NonTextMessages:          "ai_review",

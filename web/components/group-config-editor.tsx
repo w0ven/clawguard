@@ -336,43 +336,44 @@ export const fieldDescriptors: FieldDescriptor[] = [
   {
     tab: "filter",
     path: ["filter", "new_user", "enabled"],
-    label: "新人严管",
-    description: "入群初期限制更严",
+    label: "未毕业用户严管",
+    description: "对尚未毕业或可疑状态用户应用下列子规则；毕业/可信后自动解除。",
     kind: "switch",
   },
   {
     tab: "filter",
     path: ["filter", "new_user", "duration_hours"],
-    label: "新人时长 (小时)",
-    description: "",
+    label: "旧配置时长 (小时)",
+    description:
+      "兼容旧配置保留；严管结束由毕业/可信状态决定，不再按入群小时自动结束。",
     kind: "number",
   },
   {
     tab: "filter",
     path: ["filter", "new_user", "no_links"],
     label: "禁止链接",
-    description: "",
+    description: "未毕业用户发送链接时触发过滤动作",
     kind: "switch",
   },
   {
     tab: "filter",
     path: ["filter", "new_user", "no_forwards"],
     label: "禁止转发",
-    description: "",
+    description: "未毕业用户转发消息时触发过滤动作",
     kind: "switch",
   },
   {
     tab: "filter",
     path: ["filter", "new_user", "no_media"],
     label: "禁止媒体",
-    description: "",
+    description: "未毕业用户发送照片、视频、文件、贴纸等媒体时触发过滤动作",
     kind: "switch",
   },
   {
     tab: "filter",
     path: ["filter", "new_user", "max_messages_per_minute"],
     label: "每分钟消息上限",
-    description: "",
+    description: "0 表示不限制；大于 0 时按未毕业用户单独计数。",
     kind: "number",
   },
 
@@ -673,6 +674,202 @@ const tabs = [
   { value: "audit", label: "审计" },
   { value: "scheduled", label: "定时消息" },
 ];
+
+type ConfigFieldGroupDescriptor = {
+  key: string;
+  tab: string;
+  title: string;
+  parentPath?: string;
+  childPaths: string[];
+  description?: string;
+  childBadges?: Record<string, string>;
+};
+
+const configFieldGroups: ConfigFieldGroupDescriptor[] = [
+  {
+    key: "verify.core",
+    tab: "verify",
+    title: "入群验证",
+    parentPath: "verify.enabled",
+    childPaths: [
+      "verify.method",
+      "verify.timeout_seconds",
+      "verify.fail_action",
+      "verify.delete_join_message",
+    ],
+  },
+  {
+    key: "verify.welcome_message",
+    tab: "verify",
+    title: "欢迎语",
+    parentPath: "verify.welcome_message.enabled",
+    childPaths: [
+      "verify.welcome_message.template",
+      "verify.welcome_message.rules_link",
+      "verify.welcome_message.delete_after_seconds",
+      "verify.welcome_message.parse_mode",
+    ],
+  },
+  {
+    key: "verify.profile",
+    tab: "verify",
+    title: "资料审核",
+    parentPath: "verify.check_profile",
+    childPaths: ["verify.profile_check_mode", "verify.profile_blacklist"],
+  },
+  {
+    key: "filter.keywords",
+    tab: "filter",
+    title: "关键词过滤",
+    parentPath: "filter.keywords.enabled",
+    childPaths: [
+      "filter.keywords.list",
+      "filter.keywords.action",
+      "filter.keywords.case_sensitive",
+    ],
+  },
+  {
+    key: "filter.regex",
+    tab: "filter",
+    title: "正则过滤",
+    parentPath: "filter.regex.enabled",
+    childPaths: ["filter.regex.patterns"],
+  },
+  {
+    key: "filter.links",
+    tab: "filter",
+    title: "链接过滤",
+    parentPath: "filter.links.enabled",
+    childPaths: [
+      "filter.links.whitelist",
+      "filter.links.action",
+      "filter.links.exempt_admins",
+    ],
+  },
+  {
+    key: "filter.bot",
+    tab: "filter",
+    title: "Bot 入群管控",
+    childPaths: [
+      "filter.other_bots_action",
+      "filter.bot_whitelist",
+      "filter.ban_bot_inviter_on_violation",
+    ],
+    description: "非白名单 Bot 入群后的处理方式，以及违规时是否追责邀请人。",
+  },
+  {
+    key: "filter.usernames",
+    tab: "filter",
+    title: "用户名黑名单",
+    parentPath: "filter.usernames.enabled",
+    childPaths: ["filter.usernames.blacklist"],
+  },
+  {
+    key: "filter.new_user",
+    tab: "filter",
+    title: "未毕业用户严管",
+    parentPath: "filter.new_user.enabled",
+    childPaths: [
+      "filter.new_user.duration_hours",
+      "filter.new_user.no_links",
+      "filter.new_user.no_forwards",
+      "filter.new_user.no_media",
+      "filter.new_user.max_messages_per_minute",
+    ],
+    childBadges: {
+      "filter.new_user.duration_hours": "兼容",
+    },
+  },
+  {
+    key: "warnings",
+    tab: "warnings",
+    title: "警告系统",
+    parentPath: "warnings.enabled",
+    childPaths: [
+      "warnings.max_warns",
+      "warnings.action_at_max",
+      "warnings.decay_days",
+    ],
+  },
+  {
+    key: "anti_spam.rate_limit",
+    tab: "anti-spam",
+    title: "速率限制",
+    parentPath: "anti_spam.rate_limit.enabled",
+    childPaths: [
+      "anti_spam.rate_limit.messages_per_10s",
+      "anti_spam.rate_limit.action",
+    ],
+  },
+  {
+    key: "ai.video_review",
+    tab: "ai",
+    title: "视频审核",
+    parentPath: "ai.video_moderation_enabled",
+    childPaths: [
+      "ai.include_video_note",
+      "ai.video_max_bytes",
+      "ai.video_max_duration_sec",
+      "ai.video_frame_count",
+      "ai.video_concurrency",
+    ],
+  },
+  {
+    key: "ai.graduation",
+    tab: "ai",
+    title: "信任毕业",
+    childPaths: ["ai.graduate_after_messages", "ai.graduate_after_days"],
+    description: "用户通过足够 clean 消息后从未毕业状态转为可信。",
+    childBadges: {
+      "ai.graduate_after_days": "废弃",
+    },
+  },
+  {
+    key: "ai.profile_on_message",
+    tab: "ai",
+    title: "发言前简介审核",
+    parentPath: "ai.check_profile_on_message",
+    childPaths: ["ai.profile_on_message_mode", "ai.bio_cache_ttl_minutes"],
+  },
+  {
+    key: "ai.thresholds",
+    tab: "ai",
+    title: "处罚阈值",
+    childPaths: [
+      "ai.thresholds.ban",
+      "ai.thresholds.mute",
+      "ai.thresholds.warn",
+      "ai.thresholds.flag",
+    ],
+    description: "AI 风险分达到阈值时触发对应动作。",
+  },
+];
+
+const configFieldGroupByPath = new Map<string, ConfigFieldGroupDescriptor>();
+
+for (const group of configFieldGroups) {
+  if (group.parentPath) {
+    configFieldGroupByPath.set(group.parentPath, group);
+  }
+  for (const childPath of group.childPaths) {
+    configFieldGroupByPath.set(childPath, group);
+  }
+}
+
+function fieldPathKey(path: string[]) {
+  return path.join(".");
+}
+
+function getConfigFieldGroup(field: FieldDescriptor) {
+  return configFieldGroupByPath.get(fieldPathKey(field.path));
+}
+
+function isConfigFieldGroupTrigger(
+  field: FieldDescriptor,
+  group: ConfigFieldGroupDescriptor,
+) {
+  return fieldPathKey(field.path) === (group.parentPath ?? group.childPaths[0]);
+}
 
 type Props = {
   group: Group;
@@ -977,6 +1174,54 @@ export function GroupConfigEditor({ group, mergedPolicy }: Props) {
     setDraft(next);
   }
 
+  function renderConfigFieldCard(field: FieldDescriptor) {
+    return (
+      <ConfigFieldCard
+        key={fieldPathKey(field.path)}
+        field={field}
+        draft={draft}
+        mergedPolicy={mergedPolicyState}
+        modelOptions={llmModelOptions}
+        modelOptionsError={llmOptionsError}
+        onToggleInherited={toggleInherited}
+        onChange={updateField}
+      />
+    );
+  }
+
+  function renderConfigFieldGroup(group: ConfigFieldGroupDescriptor) {
+    const parentField = group.parentPath
+      ? tabFields.find((field) => fieldPathKey(field.path) === group.parentPath)
+      : undefined;
+    const childFields = group.childPaths
+      .map((childPath) =>
+        tabFields.find((field) => fieldPathKey(field.path) === childPath),
+      )
+      .filter((field): field is FieldDescriptor => Boolean(field));
+
+    if (group.parentPath && !parentField) {
+      return null;
+    }
+    if (!parentField && childFields.length === 0) {
+      return null;
+    }
+
+    return (
+      <ConfigFieldGroup
+        key={group.key}
+        group={group}
+        parentField={parentField}
+        childFields={childFields}
+        draft={draft}
+        mergedPolicy={mergedPolicyState}
+        modelOptions={llmModelOptions}
+        modelOptionsError={llmOptionsError}
+        onToggleInherited={toggleInherited}
+        onChange={updateField}
+      />
+    );
+  }
+
   async function saveConfig() {
     setSaving(true);
     try {
@@ -1093,47 +1338,14 @@ export function GroupConfigEditor({ group, mergedPolicy }: Props) {
         activeTab !== "scheduled" && (
           <div className="space-y-3">
             {tabFields.map((field) => {
-              const inherited = !hasPath(draft, field.path);
-              const value = getEffectiveValue(
-                draft,
-                mergedPolicyState,
-                field.path,
-              );
-              return (
-                <Card key={field.path.join(".")}>
-                  <CardBody>
-                    <div className="flex items-start justify-between gap-4 mb-3">
-                      <div className="min-w-0">
-                        <p className="text-sm font-medium">{field.label}</p>
-                        {field.description && (
-                          <p className="mt-0.5 text-xs text-[var(--text-muted)]">
-                            {field.description}
-                          </p>
-                        )}
-                      </div>
-                      <label className="inline-flex items-center gap-1.5 text-xs text-[var(--text-muted)] whitespace-nowrap cursor-pointer select-none">
-                        <input
-                          type="checkbox"
-                          checked={inherited}
-                          onChange={(e) =>
-                            toggleInherited(field, e.target.checked)
-                          }
-                          className="rounded border-[var(--border)]"
-                        />
-                        继承全局
-                      </label>
-                    </div>
-                    <FieldControl
-                      field={field}
-                      value={value}
-                      inherited={inherited}
-                      modelOptions={llmModelOptions}
-                      modelOptionsError={llmOptionsError}
-                      onChange={updateField}
-                    />
-                  </CardBody>
-                </Card>
-              );
+              const group = getConfigFieldGroup(field);
+              if (!group) {
+                return renderConfigFieldCard(field);
+              }
+              if (!isConfigFieldGroupTrigger(field, group)) {
+                return null;
+              }
+              return renderConfigFieldGroup(group);
             })}
 
             {activeTab === "verify" && (
@@ -1308,6 +1520,251 @@ export function GroupConfigEditor({ group, mergedPolicy }: Props) {
         </div>
       )}
     </div>
+  );
+}
+
+type ConfigFieldChangeHandler = (
+  field: FieldDescriptor,
+  value: string | boolean | string[],
+) => void;
+
+type ConfigFieldCommonProps = {
+  draft: Record<string, unknown>;
+  mergedPolicy: GuardPolicy;
+  modelOptions: LLMModelOption[];
+  modelOptionsError: string | null;
+  onToggleInherited: (field: FieldDescriptor, checked: boolean) => void;
+  onChange: ConfigFieldChangeHandler;
+};
+
+type ConfigFieldCardProps = ConfigFieldCommonProps & {
+  field: FieldDescriptor;
+};
+
+type ConfigFieldGroupProps = ConfigFieldCommonProps & {
+  group: ConfigFieldGroupDescriptor;
+  parentField?: FieldDescriptor;
+  childFields: FieldDescriptor[];
+};
+
+function ConfigFieldCard({
+  field,
+  draft,
+  mergedPolicy,
+  modelOptions,
+  modelOptionsError,
+  onToggleInherited,
+  onChange,
+}: ConfigFieldCardProps) {
+  const inherited = !hasPath(draft, field.path);
+  const value = getEffectiveValue(draft, mergedPolicy, field.path);
+
+  return (
+    <Card>
+      <CardBody>
+        <div className="mb-3 flex items-start justify-between gap-4">
+          <div className="min-w-0">
+            <p className="text-sm font-medium">{field.label}</p>
+            {field.description && (
+              <p className="mt-0.5 text-xs text-[var(--text-muted)]">
+                {field.description}
+              </p>
+            )}
+          </div>
+          <ConfigInheritanceToggle
+            inherited={inherited}
+            onChange={(checked) => onToggleInherited(field, checked)}
+          />
+        </div>
+        <FieldControl
+          field={field}
+          value={value}
+          inherited={inherited}
+          modelOptions={modelOptions}
+          modelOptionsError={modelOptionsError}
+          onChange={onChange}
+        />
+      </CardBody>
+    </Card>
+  );
+}
+
+function ConfigFieldGroup({
+  group,
+  parentField,
+  childFields,
+  draft,
+  mergedPolicy,
+  modelOptions,
+  modelOptionsError,
+  onToggleInherited,
+  onChange,
+}: ConfigFieldGroupProps) {
+  const parentInherited = parentField
+    ? !hasPath(draft, parentField.path)
+    : false;
+  const parentValue = parentField
+    ? getEffectiveValue(draft, mergedPolicy, parentField.path)
+    : undefined;
+  const description = group.description ?? parentField?.description;
+
+  return (
+    <Card className="border-[var(--border-strong)] bg-[var(--surface)]">
+      <CardBody className="space-y-4">
+        <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+          <div className="min-w-0 space-y-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <p className="text-base font-semibold">{group.title}</p>
+              {parentField ? (
+                <Badge tone="info">总开关</Badge>
+              ) : (
+                <Badge>分组</Badge>
+              )}
+            </div>
+            {description && (
+              <p className="text-xs text-[var(--text-muted)]">
+                {description}
+              </p>
+            )}
+          </div>
+
+          {parentField && (
+            <div className="flex items-center gap-3 md:flex-col md:items-end">
+              <ConfigInheritanceToggle
+                inherited={parentInherited}
+                onChange={(checked) => onToggleInherited(parentField, checked)}
+              />
+              <FieldControl
+                field={parentField}
+                value={parentValue}
+                inherited={parentInherited}
+                modelOptions={modelOptions}
+                modelOptionsError={modelOptionsError}
+                onChange={onChange}
+              />
+            </div>
+          )}
+        </div>
+
+        {childFields.length > 0 && (
+          <div className="border-l-2 border-[var(--accent)]/40 pl-4">
+            <div className="rounded-md border border-[var(--border)] bg-[var(--surface-2)]">
+              <div className="divide-y divide-[var(--border)]">
+                {childFields.map((field) => (
+                  <ConfigFieldChildRow
+                    key={fieldPathKey(field.path)}
+                    field={field}
+                    badge={group.childBadges?.[fieldPathKey(field.path)]}
+                    draft={draft}
+                    mergedPolicy={mergedPolicy}
+                    modelOptions={modelOptions}
+                    modelOptionsError={modelOptionsError}
+                    onToggleInherited={onToggleInherited}
+                    onChange={onChange}
+                  />
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+      </CardBody>
+    </Card>
+  );
+}
+
+function ConfigFieldChildRow({
+  field,
+  badge,
+  draft,
+  mergedPolicy,
+  modelOptions,
+  modelOptionsError,
+  onToggleInherited,
+  onChange,
+}: ConfigFieldCommonProps & { field: FieldDescriptor; badge?: string }) {
+  const inherited = !hasPath(draft, field.path);
+  const value = getEffectiveValue(draft, mergedPolicy, field.path);
+  const wideControl = isWideConfigField(field);
+
+  return (
+    <div
+      className={
+        wideControl
+          ? "grid gap-3 px-3 py-3"
+          : "grid gap-3 px-3 py-3 md:grid-cols-[minmax(0,1fr)_minmax(180px,320px)] md:items-center"
+      }
+    >
+      <div className="min-w-0">
+        <div className="flex flex-wrap items-center gap-2">
+          <p className="text-sm font-medium">{field.label}</p>
+          {badge && <Badge>{badge}</Badge>}
+        </div>
+        {field.description && (
+          <p className="mt-0.5 text-xs text-[var(--text-muted)]">
+            {field.description}
+          </p>
+        )}
+        <ConfigInheritanceToggle
+          inherited={inherited}
+          onChange={(checked) => onToggleInherited(field, checked)}
+          className="mt-2"
+        />
+      </div>
+      <div
+        className={
+          wideControl
+            ? "w-full"
+            : "w-full md:max-w-[320px] md:justify-self-end"
+        }
+      >
+        <FieldControl
+          field={field}
+          value={value}
+          inherited={inherited}
+          modelOptions={modelOptions}
+          modelOptionsError={modelOptionsError}
+          onChange={onChange}
+        />
+      </div>
+    </div>
+  );
+}
+
+function ConfigInheritanceToggle({
+  inherited,
+  onChange,
+  className,
+}: {
+  inherited: boolean;
+  onChange: (checked: boolean) => void;
+  className?: string;
+}) {
+  return (
+    <label
+      className={[
+        "inline-flex items-center gap-1.5 whitespace-nowrap text-[11px] text-[var(--text-subtle)] cursor-pointer select-none",
+        className,
+      ]
+        .filter(Boolean)
+        .join(" ")}
+    >
+      <input
+        type="checkbox"
+        checked={inherited}
+        onChange={(event) => onChange(event.target.checked)}
+        className="rounded border-[var(--border)]"
+      />
+      继承全局
+    </label>
+  );
+}
+
+function isWideConfigField(field: FieldDescriptor) {
+  return (
+    field.kind === "textarea" ||
+    field.kind === "template" ||
+    field.kind === "username-list" ||
+    field.kind === "model-ref-list"
   );
 }
 

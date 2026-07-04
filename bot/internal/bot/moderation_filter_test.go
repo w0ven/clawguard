@@ -3,8 +3,10 @@ package bot
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/openclaw/clawguard/internal/config"
+	"github.com/openclaw/clawguard/internal/store"
 	tele "gopkg.in/telebot.v3"
 )
 
@@ -26,6 +28,40 @@ func TestApplyFilterChecksHandledFlag(t *testing.T) {
 	}
 	if handled {
 		t.Fatalf("handled = true, want false when filter does not hit")
+	}
+}
+
+func TestIsRestrictedNewUserUsesTrustStatusNotJoinDuration(t *testing.T) {
+	joinedLongAgo := time.Now().Add(-72 * time.Hour)
+
+	tests := []struct {
+		name  string
+		trust store.UserTrust
+		want  bool
+	}{
+		{
+			name:  "new user stays restricted after legacy duration",
+			trust: store.UserTrust{Status: "new", JoinedAt: joinedLongAgo},
+			want:  true,
+		},
+		{
+			name:  "suspicious user is restricted",
+			trust: store.UserTrust{Status: "suspicious", JoinedAt: joinedLongAgo},
+			want:  true,
+		},
+		{
+			name:  "trusted user is not restricted",
+			trust: store.UserTrust{Status: "trusted", JoinedAt: time.Now()},
+			want:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isRestrictedNewUser(tt.trust, 24); got != tt.want {
+				t.Fatalf("isRestrictedNewUser() = %t, want %t", got, tt.want)
+			}
+		})
 	}
 }
 
