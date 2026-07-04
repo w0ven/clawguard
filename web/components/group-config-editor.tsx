@@ -336,37 +336,31 @@ export const fieldDescriptors: FieldDescriptor[] = [
   {
     tab: "filter",
     path: ["filter", "new_user", "enabled"],
-    label: "未毕业用户严管",
-    description: "对尚未毕业或可疑状态用户应用下列子规则；毕业/可信后自动解除。",
+    label: "未毕业用户发言权限",
+    description:
+      "对 new/suspicious 用户启用发言权限限制；媒体优先用 Telegram 权限限制，链接/转发和漏网媒体删除兜底，均不计警告。",
     kind: "switch",
   },
   {
     tab: "filter",
-    path: ["filter", "new_user", "duration_hours"],
-    label: "旧配置时长 (小时)",
-    description:
-      "兼容旧配置保留；严管结束由毕业/可信状态决定，不再按入群小时自动结束。",
-    kind: "number",
-  },
-  {
-    tab: "filter",
     path: ["filter", "new_user", "no_links"],
-    label: "禁止链接",
-    description: "未毕业用户发送链接时触发过滤动作",
+    label: "链接删除兜底",
+    description: "Telegram 无法按用户单独禁止链接；未毕业用户发链接时删除，不计警告。",
     kind: "switch",
   },
   {
     tab: "filter",
     path: ["filter", "new_user", "no_forwards"],
-    label: "禁止转发",
-    description: "未毕业用户转发消息时触发过滤动作",
+    label: "转发删除兜底",
+    description: "Telegram 无法按用户单独禁止转发；未毕业用户转发时删除，不计警告。",
     kind: "switch",
   },
   {
     tab: "filter",
     path: ["filter", "new_user", "no_media"],
-    label: "禁止媒体",
-    description: "未毕业用户发送照片、视频、文件、贴纸等媒体时触发过滤动作",
+    label: "媒体权限限制",
+    description:
+      "优先 restrict 禁止照片、视频、文件、音频、语音、贴纸、动画、poll 等；漏网媒体删除，不计警告。",
     kind: "switch",
   },
   {
@@ -767,18 +761,16 @@ const configFieldGroups: ConfigFieldGroupDescriptor[] = [
   {
     key: "filter.new_user",
     tab: "filter",
-    title: "未毕业用户严管",
+    title: "未毕业用户发言权限",
     parentPath: "filter.new_user.enabled",
     childPaths: [
-      "filter.new_user.duration_hours",
       "filter.new_user.no_links",
       "filter.new_user.no_forwards",
       "filter.new_user.no_media",
       "filter.new_user.max_messages_per_minute",
     ],
-    childBadges: {
-      "filter.new_user.duration_hours": "兼容",
-    },
+    description:
+      "new/suspicious 用户处于未毕业状态；媒体优先尝试 Telegram 权限限制，链接/转发使用删除兜底，命中均不计警告。",
   },
   {
     key: "warnings",

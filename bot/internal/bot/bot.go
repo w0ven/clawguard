@@ -788,13 +788,9 @@ func (s *Service) startVerification(chat *tele.Chat, user *tele.User, joinEventM
 		zap.String("step", "load_policy"),
 		zap.Duration("elapsed", time.Since(policyStartedAt)),
 	)
-	if !policy.Verify.Enabled {
-		s.logger.Info("verification disabled by policy, skip flow", zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
-		return nil
-	}
 
 	// 去重锁：避免 OnUserJoined 和 OnChatMember 对同一 join 事件双触发。
-	// 必须在任何 Telegram Restrict 前获取，锁命中或 Redis 异常都不得产生副作用。
+	// 必须在任何 Telegram Restrict 或 trust 写入前获取，锁命中或 Redis 异常都不得产生副作用。
 	if s.redis != nil {
 		lockKey := fmt.Sprintf("clawguard:verify:lock:%d:%d", chat.ID, user.ID)
 		set, lockErr := s.redis.SetNX(ctx, lockKey, "1", 10*time.Second).Result()
@@ -806,6 +802,15 @@ func (s *Service) startVerification(chat *tele.Chat, user *tele.User, joinEventM
 			s.logger.Debug("skip duplicate join event", zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
 			return nil
 		}
+	}
+
+	if !policy.Verify.Enabled {
+		trust, trustOK := s.upsertJoinSideEffects(ctx, chat, user)
+		s.logger.Info("verification disabled by policy, skip flow", zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
+		if trustOK {
+			s.applyUngraduatedMediaRestriction(chat, user, policy, trust, "join_without_verification")
+		}
+		return nil
 	}
 
 	member := tele.ChatMember{
@@ -826,6 +831,7 @@ func (s *Service) startVerification(chat *tele.Chat, user *tele.User, joinEventM
 		zap.Duration("elapsed", time.Since(restrictStartedAt)),
 	)
 
+	s.upsertJoinSideEffects(ctx, chat, user)
 	s.startAsyncVerificationChecks(chat, user, policy)
 
 	if policy.Verify.DeleteJoinMessage && joinEventMessage != nil {
@@ -897,7 +903,6 @@ func (s *Service) startAsyncVerificationChecks(chat *tele.Chat, user *tele.User,
 		defer cancel()
 
 		totalStartedAt := time.Now()
-		s.upsertJoinSideEffects(ctx, chat, user)
 
 		if policy.AntiSpam.CASEnabled && s.casClient != nil {
 			casStartedAt := time.Now()
@@ -979,7 +984,7 @@ func (s *Service) startAsyncVerificationChecks(chat *tele.Chat, user *tele.User,
 	}()
 }
 
-func (s *Service) upsertJoinSideEffects(ctx context.Context, chat *tele.Chat, user *tele.User) {
+func (s *Service) upsertJoinSideEffects(ctx context.Context, chat *tele.Chat, user *tele.User) (store.UserTrust, bool) {
 	groupStartedAt := time.Now()
 	if _, err := s.queries.UpsertGroup(ctx, store.UpsertGroupParams{
 		ChatID:      chat.ID,
@@ -997,7 +1002,7 @@ func (s *Service) upsertJoinSideEffects(ctx context.Context, chat *tele.Chat, us
 	)
 
 	trustStartedAt := time.Now()
-	if _, err := s.queries.UpsertUserTrust(ctx, store.UpsertUserTrustParams{
+	trust, trustErr := s.queries.UpsertUserTrust(ctx, store.UpsertUserTrustParams{
 		ChatID:          chat.ID,
 		UserID:          user.ID,
 		Username:        userFieldPtr(user.Username),
@@ -1009,8 +1014,9 @@ func (s *Service) upsertJoinSideEffects(ctx context.Context, chat *tele.Chat, us
 		MessagesChecked: 0,
 		MessagesClean:   0,
 		IsBot:           user.IsBot,
-	}); err != nil {
-		s.logger.Warn("upsert user trust on join failed", zap.Error(err), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
+	})
+	if trustErr != nil {
+		s.logger.Warn("upsert user trust on join failed", zap.Error(trustErr), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
 	}
 	s.logger.Info("verification step completed",
 		zap.Int64("chat_id", chat.ID),
@@ -1018,6 +1024,10 @@ func (s *Service) upsertJoinSideEffects(ctx context.Context, chat *tele.Chat, us
 		zap.String("step", "upsert_user_trust"),
 		zap.Duration("elapsed", time.Since(trustStartedAt)),
 	)
+	if trustErr != nil {
+		return store.UserTrust{}, false
+	}
+	return trust, true
 }
 
 func (s *Service) deleteJoinEventMessageAsync(chat *tele.Chat, user *tele.User, joinEventMessage *tele.Message) {
@@ -1616,22 +1626,23 @@ func (s *Service) completeVerification(ctx context.Context, chat *tele.Chat, use
 		return fmt.Errorf("delete pending verification: %w", err)
 	}
 
-	member := tele.ChatMember{
-		User:   user,
-		Rights: tele.NoRestrictions(),
+	policy, polErr := config.LoadPolicy(ctx, s.queries, chat.ID)
+	if polErr != nil {
+		s.logger.Warn("load guard policy before verification permission sync failed, using defaults", zap.Error(polErr), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
+		policy = config.DefaultPolicy
 	}
-	if err := s.bot.Restrict(chat, &member); err != nil {
+	if err := s.applyVerificationPassPermissions(ctx, chat, user, policy); err != nil {
 		if restoreErr := s.restorePendingVerification(ctx, pending); restoreErr != nil {
 			s.logger.Error("restore pending verification after restrict failure", zap.Error(restoreErr), zap.Int64("chat_id", pending.ChatID), zap.Int64("user_id", pending.UserID))
 		}
-		return fmt.Errorf("unrestrict member: %w", err)
+		return fmt.Errorf("sync verification pass permissions: %w", err)
 	}
 
 	s.deleteVerificationMessage(chat, pending.JoinMessageID)
 	s.sendWelcomeMessage(context.Background(), chat, user)
 
 	// 验证通过反馈（默认关）
-	if policy, polErr := config.LoadPolicy(context.Background(), s.queries, chat.ID); polErr == nil {
+	if polErr == nil {
 		s.sendActionFeedback(chat, nil, policy.Feedback.VerifyPass, map[string]string{
 			"user":         feedbackUserLabel(user, policy.Feedback.VerifyPass.ParseMode),
 			"user_mention": feedbackUserMention(user, policy.Feedback.VerifyPass.ParseMode),

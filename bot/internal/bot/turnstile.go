@@ -143,16 +143,17 @@ func (s *Service) VerifyTurnstileToken(ctx context.Context, token, cfResponse, r
 		FirstName: derefString(pending.FirstName),
 	}
 
-	member := tele.ChatMember{
-		User:   user,
-		Rights: tele.NoRestrictions(),
+	policy, polErr := config.LoadPolicy(ctx, s.queries, chat.ID)
+	if polErr != nil {
+		s.logger.Warn("load guard policy before turnstile permission sync failed, using defaults", zap.Error(polErr), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
+		policy = config.DefaultPolicy
 	}
-	if err := s.bot.Restrict(chat, &member); err != nil {
+	if err := s.applyVerificationPassPermissions(ctx, chat, user, policy); err != nil {
 		restoreErr := s.restorePendingVerification(ctx, pending)
 		if restoreErr != nil {
 			s.logger.Error("restore turnstile pending after restrict failure", zap.Error(restoreErr), zap.Int64("chat_id", pending.ChatID), zap.Int64("user_id", pending.UserID))
 		}
-		return fmt.Errorf("unrestrict member: %w", err)
+		return fmt.Errorf("sync verification pass permissions: %w", err)
 	}
 
 	s.deleteVerificationMessage(chat, pending.JoinMessageID)

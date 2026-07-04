@@ -65,6 +65,69 @@ func TestIsRestrictedNewUserUsesTrustStatusNotJoinDuration(t *testing.T) {
 	}
 }
 
+func TestCheckNewUserFilterFallbacksUseDeleteAction(t *testing.T) {
+	svc := &Service{}
+	trust := store.UserTrust{Status: "new"}
+	policy := config.FilterNewUserPolicy{
+		Enabled:    true,
+		NoLinks:    true,
+		NoForwards: true,
+		NoMedia:    true,
+	}
+
+	tests := []struct {
+		name string
+		msg  *tele.Message
+		want string
+	}{
+		{
+			name: "link",
+			msg: &tele.Message{
+				Text:   "see https://example.com",
+				Chat:   &tele.Chat{ID: -100},
+				Sender: &tele.User{ID: 42},
+			},
+			want: "filter_newuser_no_links",
+		},
+		{
+			name: "forward",
+			msg: &tele.Message{
+				Chat:               &tele.Chat{ID: -100},
+				Sender:             &tele.User{ID: 42},
+				OriginalSenderName: "source",
+			},
+			want: "filter_newuser_no_forwards",
+		},
+		{
+			name: "media",
+			msg: &tele.Message{
+				Chat:   &tele.Chat{ID: -100},
+				Sender: &tele.User{ID: 42},
+				Photo:  &tele.Photo{},
+			},
+			want: "filter_newuser_no_media",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := svc.checkNewUserFilter(context.Background(), tt.msg, trust, policy)
+			if err != nil {
+				t.Fatalf("checkNewUserFilter returned error: %v", err)
+			}
+			if !result.Hit {
+				t.Fatalf("Hit = false, want true")
+			}
+			if result.Reason != tt.want {
+				t.Fatalf("Reason = %q, want %q", result.Reason, tt.want)
+			}
+			if result.Action != "delete" {
+				t.Fatalf("Action = %q, want delete", result.Action)
+			}
+		})
+	}
+}
+
 func TestCheckMessageRegexHit(t *testing.T) {
 	msg := &tele.Message{
 		Text:   "buy cheap crypto now",

@@ -1457,6 +1457,12 @@ func (s *Server) handleUpdateUserTrust(c echo.Context) error {
 			response["telegram_action_error"] = redact.ErrorString(err)
 		}
 	}
+	if previous.Status != "trusted" && updated.Status == "trusted" {
+		if err := s.botService.RestoreTrustedChatPermissions(c.Request().Context(), updated); err != nil {
+			s.logger.Warn("user trust status trusted permission restore failed", zap.Error(err), zap.Int64("chat_id", chatID), zap.Int64("user_id", userID))
+			response["telegram_permission_error"] = redact.ErrorString(err)
+		}
+	}
 	return c.JSON(http.StatusOK, response)
 }
 

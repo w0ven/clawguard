@@ -636,6 +636,7 @@ func (s *Service) checkNewUserFilter(ctx context.Context, msg *tele.Message, tru
 				Hit:         true,
 				Reason:      "filter_newuser_no_links",
 				MatchedRule: links[0],
+				Action:      "delete",
 			}, nil
 		}
 	}
@@ -644,6 +645,7 @@ func (s *Service) checkNewUserFilter(ctx context.Context, msg *tele.Message, tru
 			Hit:         true,
 			Reason:      "filter_newuser_no_forwards",
 			MatchedRule: extractForwardSource(msg),
+			Action:      "delete",
 		}, nil
 	}
 	if policy.NoMedia && messageHasRestrictedMedia(msg) {
@@ -651,6 +653,7 @@ func (s *Service) checkNewUserFilter(ctx context.Context, msg *tele.Message, tru
 			Hit:         true,
 			Reason:      "filter_newuser_no_media",
 			MatchedRule: messageMediaKind(msg),
+			Action:      "delete",
 		}, nil
 	}
 	if policy.MaxMessagesPerMinute > 0 {
@@ -663,6 +666,7 @@ func (s *Service) checkNewUserFilter(ctx context.Context, msg *tele.Message, tru
 				Hit:         true,
 				Reason:      "filter_newuser_rate_limit",
 				MatchedRule: strconv.FormatInt(count, 10),
+				Action:      "delete",
 			}, nil
 		}
 	}
@@ -2441,6 +2445,11 @@ func (s *Service) applyAIAction(ctx context.Context, msg *tele.Message, policy c
 		if err != nil {
 			return err
 		}
+		if updated.Status == "trusted" {
+			s.restoreTrustedUserPermissions(updated, "ai_status_update")
+		} else if isUngraduatedTrustStatus(updated.Status) {
+			s.applyUngraduatedMediaRestriction(msg.Chat, msg.Sender, policy, updated, "ai_status_update")
+		}
 	}
 
 	if action == "none" {
@@ -2804,7 +2813,7 @@ func (s *Service) maybeGraduateUser(ctx context.Context, trust store.UserTrust, 
 		return nil
 	}
 	now := time.Now()
-	_, err := s.queries.UpdateUserTrustStatus(ctx, store.UpdateUserTrustStatusParams{
+	updated, err := s.queries.UpdateUserTrustStatus(ctx, store.UpdateUserTrustStatusParams{
 		ChatID:      trust.ChatID,
 		UserID:      trust.UserID,
 		Status:      "trusted",
@@ -2813,6 +2822,7 @@ func (s *Service) maybeGraduateUser(ctx context.Context, trust store.UserTrust, 
 		Notes:       stringPtr("graduated by ai trust policy"),
 	})
 	if err == nil {
+		s.restoreTrustedUserPermissions(updated, "ai_graduation")
 		if pol, e := config.LoadPolicy(ctx, s.queries, trust.ChatID); e == nil {
 			chat := &tele.Chat{ID: trust.ChatID}
 			user := userFromTrust(trust)
