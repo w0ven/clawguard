@@ -615,6 +615,7 @@ func (s *Service) checkStatefulFilter(ctx context.Context, msg *tele.Message, po
 	if result, err := s.checkNewUserFilter(ctx, msg, trust, policy.Filter.NewUser); err != nil {
 		return FilterResult{}, err
 	} else if result.Hit {
+		s.applyUngraduatedPermissionRestriction(msg.Chat, msg.Sender, policy, trust, result.Reason)
 		return result, nil
 	}
 	if result, err := s.checkRateLimitFilter(ctx, msg, policy.AntiSpam.RateLimit); err != nil {

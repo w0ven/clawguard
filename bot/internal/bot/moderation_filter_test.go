@@ -7,6 +7,7 @@ import (
 
 	"github.com/openclaw/clawguard/internal/config"
 	"github.com/openclaw/clawguard/internal/store"
+	"go.uber.org/zap"
 	tele "gopkg.in/telebot.v3"
 )
 
@@ -125,6 +126,42 @@ func TestCheckNewUserFilterFallbacksUseDeleteAction(t *testing.T) {
 				t.Fatalf("Action = %q, want delete", result.Action)
 			}
 		})
+	}
+}
+
+func TestApplyFilterChecksSyncsUngraduatedPermissionsOnNewUserMediaHit(t *testing.T) {
+	chatID := int64(-100123)
+	userID := int64(7945990865)
+	db := newModerationProfileMatchMockDB(chatID, userID)
+	botClient, transport := newMockTelegramBot(t, "")
+	svc := &Service{logger: zap.NewNop(), queries: store.New(db), bot: botClient}
+
+	policy := config.DefaultPolicy
+	policy.Filter.NewUser.Enabled = true
+	policy.Filter.NewUser.NoMedia = true
+	policy.Filter.NewUser.NoInvites = true
+
+	msg := &tele.Message{
+		ID:     1001,
+		Chat:   &tele.Chat{ID: chatID, Type: tele.ChatSuperGroup, Title: "test-group"},
+		Sender: &tele.User{ID: userID, Username: "legacy_new"},
+		Photo:  &tele.Photo{},
+	}
+
+	handled, err := svc.applyFilterChecks(context.Background(), msg, policy, false)
+	if err != nil {
+		t.Fatalf("applyFilterChecks returned error: %v", err)
+	}
+	if !handled {
+		t.Fatal("handled = false, want true")
+	}
+
+	methods := transport.Methods()
+	if got := countString(methods, "restrictChatMember"); got != 1 {
+		t.Fatalf("restrictChatMember calls = %d, want 1; methods=%v", got, methods)
+	}
+	if got := countString(methods, "deleteMessage"); got != 1 {
+		t.Fatalf("deleteMessage calls = %d, want 1; methods=%v", got, methods)
 	}
 }
 
