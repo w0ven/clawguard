@@ -2448,7 +2448,7 @@ func (s *Service) applyAIAction(ctx context.Context, msg *tele.Message, policy c
 		if updated.Status == "trusted" {
 			s.restoreTrustedUserPermissions(updated, "ai_status_update")
 		} else if isUngraduatedTrustStatus(updated.Status) {
-			s.applyUngraduatedMediaRestriction(msg.Chat, msg.Sender, policy, updated, "ai_status_update")
+			s.applyUngraduatedPermissionRestriction(msg.Chat, msg.Sender, policy, updated, "ai_status_update")
 		}
 	}
 

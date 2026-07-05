@@ -68,6 +68,22 @@ func (db *otherBotMockDB) QueryRow(_ context.Context, query string, args ...any)
 			return mockErrorRow{err: pgx.ErrNoRows}
 		}
 		return scanTrustRow(*db.trust)
+	case strings.Contains(query, "AND status = 'archived'"):
+		db.mu.Lock()
+		defer db.mu.Unlock()
+		if db.trust == nil || db.trust.Status != "archived" {
+			return mockErrorRow{err: pgx.ErrNoRows}
+		}
+		notes := ""
+		if db.trust.Notes != nil {
+			notes = *db.trust.Notes
+		}
+		notes += " [reactivated mock]"
+		db.trust.Status = "new"
+		db.trust.StatusChangedAt = db.now
+		db.trust.UpdatedAt = db.now
+		db.trust.Notes = &notes
+		return scanTrustRow(*db.trust)
 	case strings.Contains(query, "INSERT INTO user_trust"):
 		trust := store.UserTrust{
 			ChatID:          args[0].(int64),
@@ -237,6 +253,183 @@ func TestHandleOtherBotJoinedActions(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestHandleUngraduatedInviteChatMemberKicksBotInvitedByNewUser(t *testing.T) {
+	policy := config.DefaultPolicy
+	policy.Filter.NewUser.NoInvites = true
+	db := newOtherBotMockDB(policy)
+	db.trust = &store.UserTrust{
+		ChatID:          -1001,
+		UserID:          66,
+		FirstName:       stringPtr("Alice"),
+		JoinedAt:        db.now,
+		UpdatedAt:       db.now,
+		StatusChangedAt: db.now,
+		Status:          "new",
+		Score:           0.5,
+	}
+	botClient, transport := newMockTelegramBot(t, "")
+	svc := &Service{logger: zap.NewNop(), queries: store.New(db), bot: botClient, sender: botClient, sendLimiter: NewSendLimiter()}
+	update := &tele.ChatMemberUpdate{
+		Chat:          &tele.Chat{ID: -1001, Title: "group", Type: tele.ChatSuperGroup},
+		Sender:        &tele.User{ID: 66, FirstName: "Alice"},
+		OldChatMember: &tele.ChatMember{User: &tele.User{ID: 77, IsBot: true, Username: "badbot"}, Role: tele.Left},
+		NewChatMember: &tele.ChatMember{User: &tele.User{ID: 77, IsBot: true, Username: "badbot"}, Role: tele.Member},
+	}
+
+	if !svc.handleUngraduatedInviteChatMember(context.Background(), update, update.NewChatMember.User, policy) {
+		t.Fatal("handleUngraduatedInviteChatMember() = false, want true")
+	}
+	methods := transport.Methods()
+	if got := countString(methods, "kickChatMember"); got != 1 {
+		t.Fatalf("kickChatMember calls = %d, want 1; methods=%v", got, methods)
+	}
+	if got := countString(methods, "unbanChatMember"); got != 1 {
+		t.Fatalf("unbanChatMember calls = %d, want 1; methods=%v", got, methods)
+	}
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	if db.trust == nil || db.trust.UserID != 77 || db.trust.Status != "banned" || !db.trust.IsBot {
+		t.Fatalf("bot trust = %+v, want invited bot banned", db.trust)
+	}
+	if len(db.violations) != 1 {
+		t.Fatalf("violations = %d, want 1", len(db.violations))
+	}
+	got := db.violations[0]
+	if got.UserID != 66 || got.Rule != ungraduatedInviteRule || got.Action != "kick" {
+		t.Fatalf("violation = %+v, want inviter no_invites kick", got)
+	}
+}
+
+func TestHandleUngraduatedInviteChatMemberSkipsWhenDisabledOrTrusted(t *testing.T) {
+	tests := []struct {
+		name          string
+		noInvites     bool
+		inviterStatus string
+	}{
+		{name: "disabled", noInvites: false, inviterStatus: "new"},
+		{name: "trusted", noInvites: true, inviterStatus: "trusted"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			policy := config.DefaultPolicy
+			policy.Filter.NewUser.NoInvites = tt.noInvites
+			db := newOtherBotMockDB(policy)
+			db.trust = &store.UserTrust{
+				ChatID:          -1001,
+				UserID:          66,
+				JoinedAt:        db.now,
+				UpdatedAt:       db.now,
+				StatusChangedAt: db.now,
+				Status:          tt.inviterStatus,
+				Score:           0.9,
+			}
+			botClient, transport := newMockTelegramBot(t, "")
+			svc := &Service{logger: zap.NewNop(), queries: store.New(db), bot: botClient, sender: botClient, sendLimiter: NewSendLimiter()}
+			update := &tele.ChatMemberUpdate{
+				Chat:          &tele.Chat{ID: -1001, Title: "group", Type: tele.ChatSuperGroup},
+				Sender:        &tele.User{ID: 66, FirstName: "Alice"},
+				OldChatMember: &tele.ChatMember{User: &tele.User{ID: 77, IsBot: true, Username: "goodbot"}, Role: tele.Left},
+				NewChatMember: &tele.ChatMember{User: &tele.User{ID: 77, IsBot: true, Username: "goodbot"}, Role: tele.Member},
+			}
+
+			if svc.handleUngraduatedInviteChatMember(context.Background(), update, update.NewChatMember.User, policy) {
+				t.Fatal("handleUngraduatedInviteChatMember() = true, want false")
+			}
+			methods := transport.Methods()
+			if containsString(methods, "kickChatMember") || containsString(methods, "deleteMessage") {
+				t.Fatalf("methods = %v, want no invite restriction actions", methods)
+			}
+			if len(db.violations) != 0 {
+				t.Fatalf("violations = %+v, want none", db.violations)
+			}
+		})
+	}
+}
+
+func TestHandleUngraduatedInviteServiceMessageDeletesAndKicks(t *testing.T) {
+	policy := config.DefaultPolicy
+	policy.Filter.NewUser.NoInvites = true
+	db := newOtherBotMockDB(policy)
+	db.trust = &store.UserTrust{
+		ChatID:          -1001,
+		UserID:          66,
+		FirstName:       stringPtr("Alice"),
+		JoinedAt:        db.now,
+		UpdatedAt:       db.now,
+		StatusChangedAt: db.now,
+		Status:          "suspicious",
+		Score:           0.2,
+	}
+	botClient, transport := newMockTelegramBot(t, "")
+	svc := &Service{logger: zap.NewNop(), queries: store.New(db), bot: botClient, sender: botClient, sendLimiter: NewSendLimiter()}
+	msg := &tele.Message{
+		ID:          123,
+		Chat:        &tele.Chat{ID: -1001, Title: "group", Type: tele.ChatSuperGroup},
+		Sender:      &tele.User{ID: 66, FirstName: "Alice"},
+		UsersJoined: []tele.User{{ID: 77, IsBot: true, Username: "badbot"}},
+	}
+
+	if !svc.handleUngraduatedInviteServiceMessage(context.Background(), msg, policy) {
+		t.Fatal("handleUngraduatedInviteServiceMessage() = false, want true")
+	}
+	methods := transport.Methods()
+	if !containsString(methods, "deleteMessage") {
+		t.Fatalf("methods = %v, want deleteMessage", methods)
+	}
+	if got := countString(methods, "kickChatMember"); got != 1 {
+		t.Fatalf("kickChatMember calls = %d, want 1; methods=%v", got, methods)
+	}
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	if len(db.violations) != 1 {
+		t.Fatalf("violations = %d, want 1", len(db.violations))
+	}
+	got := db.violations[0]
+	if got.UserID != 66 || got.Rule != ungraduatedInviteRule || got.Action != "delete_kick" {
+		t.Fatalf("violation = %+v, want inviter no_invites delete_kick", got)
+	}
+}
+
+func TestHandleUngraduatedInviteReactivatesArchivedInviter(t *testing.T) {
+	policy := config.DefaultPolicy
+	policy.Filter.NewUser.NoInvites = true
+	db := newOtherBotMockDB(policy)
+	db.trust = &store.UserTrust{
+		ChatID:          -1001,
+		UserID:          66,
+		FirstName:       stringPtr("Alice"),
+		JoinedAt:        db.now.Add(-48 * time.Hour),
+		UpdatedAt:       db.now,
+		StatusChangedAt: db.now,
+		Status:          "archived",
+		Score:           0.5,
+		Notes:           stringPtr("left earlier"),
+	}
+	botClient, transport := newMockTelegramBot(t, "")
+	svc := &Service{logger: zap.NewNop(), queries: store.New(db), bot: botClient, sender: botClient, sendLimiter: NewSendLimiter()}
+	update := &tele.ChatMemberUpdate{
+		Chat:          &tele.Chat{ID: -1001, Title: "group", Type: tele.ChatSuperGroup},
+		Sender:        &tele.User{ID: 66, FirstName: "Alice"},
+		OldChatMember: &tele.ChatMember{User: &tele.User{ID: 88, FirstName: "Bob"}, Role: tele.Left},
+		NewChatMember: &tele.ChatMember{User: &tele.User{ID: 88, FirstName: "Bob"}, Role: tele.Member},
+	}
+
+	if !svc.handleUngraduatedInviteChatMember(context.Background(), update, update.NewChatMember.User, policy) {
+		t.Fatal("handleUngraduatedInviteChatMember() = false, want true")
+	}
+	if got := countString(transport.Methods(), "kickChatMember"); got != 1 {
+		t.Fatalf("kickChatMember calls = %d, want 1; methods=%v", got, transport.Methods())
+	}
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	if db.trust == nil || db.trust.UserID != 66 || db.trust.Status != "new" {
+		t.Fatalf("inviter trust = %+v, want archived reactivated to new", db.trust)
+	}
+	if len(db.violations) != 1 || db.violations[0].UserID != 66 {
+		t.Fatalf("violations = %+v, want inviter violation", db.violations)
 	}
 }
 

@@ -15,42 +15,60 @@ func newUserMediaRestrictionEnabled(policy config.GuardPolicy) bool {
 	return policy.Filter.NewUser.Enabled && policy.Filter.NewUser.NoMedia
 }
 
-func ungraduatedMediaRestrictedRights() tele.Rights {
+func ungraduatedPermissionRestrictionEnabled(policy config.GuardPolicy) bool {
+	return newUserMediaRestrictionEnabled(policy) || ungraduatedInviteRestrictionEnabled(policy)
+}
+
+func normalMemberRights() tele.Rights {
 	rights := tele.NoRestrictions()
-	rights.CanSendMedia = false
-	rights.CanSendAudios = false
-	rights.CanSendDocuments = false
-	rights.CanSendPhotos = false
-	rights.CanSendVideos = false
-	rights.CanSendVideoNotes = false
-	rights.CanSendVoiceNotes = false
-	rights.CanSendPolls = false
-	rights.CanSendOther = false
-	rights.CanAddPreviews = false
+	// tele.NoRestrictions() restores message permissions, but telebot.v3 leaves
+	// CanInviteUsers=false. ClawGuard needs an explicit normal-member rights
+	// baseline so no_invites can be a reversible per-user switch.
+	rights.CanInviteUsers = true
 	return rights
 }
 
-func (s *Service) applyUngraduatedMediaRestriction(chat *tele.Chat, user *tele.User, policy config.GuardPolicy, trust store.UserTrust, reason string) {
-	if !newUserMediaRestrictionEnabled(policy) || !isUngraduatedTrustStatus(trust.Status) {
+func ungraduatedRestrictedRights(policy config.GuardPolicy) tele.Rights {
+	rights := normalMemberRights()
+	if newUserMediaRestrictionEnabled(policy) {
+		rights.CanSendMedia = false
+		rights.CanSendAudios = false
+		rights.CanSendDocuments = false
+		rights.CanSendPhotos = false
+		rights.CanSendVideos = false
+		rights.CanSendVideoNotes = false
+		rights.CanSendVoiceNotes = false
+		rights.CanSendPolls = false
+		rights.CanSendOther = false
+		rights.CanAddPreviews = false
+	}
+	if ungraduatedInviteRestrictionEnabled(policy) {
+		rights.CanInviteUsers = false
+	}
+	return rights
+}
+
+func (s *Service) applyUngraduatedPermissionRestriction(chat *tele.Chat, user *tele.User, policy config.GuardPolicy, trust store.UserTrust, reason string) {
+	if !ungraduatedPermissionRestrictionEnabled(policy) || !isUngraduatedTrustStatus(trust.Status) {
 		return
 	}
-	if err := s.restrictUngraduatedMedia(chat, user, reason); err != nil {
-		s.logTelegramPermissionWarning("restrict ungraduated media permissions failed", err, chat, user, reason)
+	if err := s.restrictUngraduatedPermissions(chat, user, policy, reason); err != nil {
+		s.logTelegramPermissionWarning("restrict ungraduated permissions failed", err, chat, user, reason)
 	}
 }
 
-func (s *Service) restrictUngraduatedMedia(chat *tele.Chat, user *tele.User, reason string) error {
+func (s *Service) restrictUngraduatedPermissions(chat *tele.Chat, user *tele.User, policy config.GuardPolicy, reason string) error {
 	if s == nil || s.bot == nil || chat == nil || user == nil {
 		return nil
 	}
 	member := tele.ChatMember{
 		User:   user,
-		Rights: ungraduatedMediaRestrictedRights(),
+		Rights: ungraduatedRestrictedRights(policy),
 	}
 	if err := s.bot.Restrict(chat, &member); err != nil {
 		return err
 	}
-	s.logTelegramPermissionInfo("restricted ungraduated media permissions", chat, user, reason)
+	s.logTelegramPermissionInfo("restricted ungraduated permissions", chat, user, reason)
 	return nil
 }
 
@@ -58,15 +76,15 @@ func (s *Service) applyVerificationPassPermissions(ctx context.Context, chat *te
 	if s == nil || chat == nil || user == nil {
 		return nil
 	}
-	if newUserMediaRestrictionEnabled(policy) && s.queries != nil {
+	if ungraduatedPermissionRestrictionEnabled(policy) && s.queries != nil {
 		trust, err := s.queries.GetUserTrust(ctx, chat.ID, user.ID)
 		if err != nil {
 			s.logTelegramPermissionWarning("load user trust before verification permission sync failed", err, chat, user, "verification_pass")
 		} else if isUngraduatedTrustStatus(trust.Status) {
-			if err := s.restrictUngraduatedMedia(chat, user, "verification_pass"); err == nil {
+			if err := s.restrictUngraduatedPermissions(chat, user, policy, "verification_pass"); err == nil {
 				return nil
 			} else {
-				s.logTelegramPermissionWarning("restrict media after verification pass failed, falling back to normal permissions", err, chat, user, "verification_pass")
+				s.logTelegramPermissionWarning("restrict permissions after verification pass failed, falling back to normal permissions", err, chat, user, "verification_pass")
 			}
 		}
 	}
@@ -95,7 +113,7 @@ func (s *Service) restoreUserMessagePermissions(chat *tele.Chat, user *tele.User
 	}
 	member := tele.ChatMember{
 		User:   user,
-		Rights: tele.NoRestrictions(),
+		Rights: normalMemberRights(),
 	}
 	if err := s.bot.Restrict(chat, &member); err != nil {
 		return err

@@ -46,6 +46,7 @@ export type GuardPolicy = {
       no_links: boolean;
       no_forwards: boolean;
       no_media: boolean;
+      no_invites: boolean;
       max_messages_per_minute: number;
     };
     other_bots_action: string;

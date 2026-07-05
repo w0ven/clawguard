@@ -295,6 +295,8 @@ Tunnel 入口指向宿主机 `127.0.0.1:8090`：
 
 其他 bot 入群默认按 `filter.other_bots_action = "audit"` 建立 `is_bot=true` 的 trust 记录并进入 AI 审核。可通过 `filter.bot_whitelist` 配置不带 `@` 的 username 白名单；白名单 bot 会直接 trusted，非白名单 bot 可配置为 `audit`、`kick`、`ban` 或 `off`。
 
+`filter.new_user.no_invites` 默认 `false`。开启后，ClawGuard 会在验证通过但仍未毕业、验证关闭入群、AI 状态回写为 new/suspicious 等权限同步点通过 Telegram member permissions 对成员设置 `CanInviteUsers=false`；若 `filter.new_user.no_media` 同时开启，同一次限制会同时禁止媒体和邀请。用户毕业或变为 trusted 时会恢复正常成员权限，并显式重新允许 `CanInviteUsers=true`。系统保留 `new_chat_members` / `chat_member` 事件后处理兜底：删除可见的入群服务消息、移除被拉入成员，并按 `filter_newuser_no_invites` 记录邀请人的违规。
+
 ---
 
 ## ⚙️ 环境变量

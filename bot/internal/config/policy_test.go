@@ -58,3 +58,9 @@ func TestApplyAIDefaults_VideoFields(t *testing.T) {
 		t.Fatalf("expected include video note %t, got %t", DefaultPolicy.AI.IncludeVideoNote, policy.IncludeVideoNote)
 	}
 }
+
+func TestDefaultPolicyNewUserNoInvitesDisabled(t *testing.T) {
+	if DefaultPolicy.Filter.NewUser.NoInvites {
+		t.Fatal("expected filter.new_user.no_invites to default to false")
+	}
+}

@@ -336,9 +336,9 @@ export const fieldDescriptors: FieldDescriptor[] = [
   {
     tab: "filter",
     path: ["filter", "new_user", "enabled"],
-    label: "未毕业用户发言权限",
+    label: "未毕业用户限制",
     description:
-      "对 new/suspicious 用户启用发言权限限制；媒体优先用 Telegram 权限限制，链接/转发和漏网媒体删除兜底，均不计警告。",
+      "对 new/suspicious 用户启用发言和邀请限制；媒体与邀请优先用 Telegram 权限限制，消息/事件后处理作为兜底，均不计警告。",
     kind: "switch",
   },
   {
@@ -361,6 +361,14 @@ export const fieldDescriptors: FieldDescriptor[] = [
     label: "媒体权限限制",
     description:
       "优先 restrict 禁止照片、视频、文件、音频、语音、贴纸、动画、poll 等；漏网媒体删除，不计警告。",
+    kind: "switch",
+  },
+  {
+    tab: "filter",
+    path: ["filter", "new_user", "no_invites"],
+    label: "禁止邀请成员",
+    description:
+      "优先通过 Telegram member permissions 禁止 new/suspicious 用户邀请成员；若事件漏网，仍删除入群服务消息并移除被邀请成员。",
     kind: "switch",
   },
   {
@@ -761,16 +769,17 @@ const configFieldGroups: ConfigFieldGroupDescriptor[] = [
   {
     key: "filter.new_user",
     tab: "filter",
-    title: "未毕业用户发言权限",
+    title: "未毕业用户限制",
     parentPath: "filter.new_user.enabled",
     childPaths: [
       "filter.new_user.no_links",
       "filter.new_user.no_forwards",
       "filter.new_user.no_media",
+      "filter.new_user.no_invites",
       "filter.new_user.max_messages_per_minute",
     ],
     description:
-      "new/suspicious 用户处于未毕业状态；媒体优先尝试 Telegram 权限限制，链接/转发使用删除兜底，命中均不计警告。",
+      "new/suspicious 用户处于未毕业状态；媒体优先尝试 Telegram 权限限制，链接/转发/邀请使用事件后处理兜底，命中均不计警告。",
   },
   {
     key: "warnings",

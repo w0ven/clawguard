@@ -535,6 +535,20 @@ func (s *Service) handleChatMemberUpdate(c tele.Context) error {
 		return nil
 	}
 
+	ctx := context.Background()
+	policy := config.DefaultPolicy
+	if s.queries != nil {
+		loaded, err := config.LoadPolicy(ctx, s.queries, update.Chat.ID)
+		if err != nil {
+			s.logger.Warn("load policy for ungraduated invite restriction failed", zap.Error(err), zap.Int64("chat_id", update.Chat.ID), zap.Int64("user_id", member.User.ID))
+		} else {
+			policy = loaded
+		}
+	}
+	if s.handleUngraduatedInviteChatMember(ctx, update, member.User, policy) {
+		return nil
+	}
+
 	if member.User.IsBot {
 		return s.handleOtherBotJoined(update, member.User)
 	}
@@ -789,6 +803,10 @@ func (s *Service) startVerification(chat *tele.Chat, user *tele.User, joinEventM
 		zap.Duration("elapsed", time.Since(policyStartedAt)),
 	)
 
+	if s.handleUngraduatedInviteServiceMessage(ctx, joinEventMessage, policy) {
+		return nil
+	}
+
 	// 去重锁：避免 OnUserJoined 和 OnChatMember 对同一 join 事件双触发。
 	// 必须在任何 Telegram Restrict 或 trust 写入前获取，锁命中或 Redis 异常都不得产生副作用。
 	if s.redis != nil {
@@ -808,7 +826,7 @@ func (s *Service) startVerification(chat *tele.Chat, user *tele.User, joinEventM
 		trust, trustOK := s.upsertJoinSideEffects(ctx, chat, user)
 		s.logger.Info("verification disabled by policy, skip flow", zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
 		if trustOK {
-			s.applyUngraduatedMediaRestriction(chat, user, policy, trust, "join_without_verification")
+			s.applyUngraduatedPermissionRestriction(chat, user, policy, trust, "join_without_verification")
 		}
 		return nil
 	}

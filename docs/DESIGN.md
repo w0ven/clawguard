@@ -175,6 +175,7 @@ Bug 修复后（见 git 历史），AI 复核队列同时收录三类判决：
 
 ```
 new_chat_members 事件
+  ├─ 若 filter.new_user.no_invites=true 且邀请人为 new/suspicious → 事件兜底删除服务消息 + 移除被邀请成员
   ├─ bot restrictChatMember（剥夺所有权限）
   ├─ upsert user_trust(status='new', score=0.5)
   ├─ 查 banned_users / CAS → 命中则直接 ban + 不发验证
@@ -184,11 +185,13 @@ new_chat_members 事件
   │   └─ turnstile→ 发 https://{PUBLIC_BASE_URL}/verify/{jwt} 链接
   ├─ 写 pending_verifications（含 expires_at）
   └─ 异步并行：
-      ├─ 用户通过 → unrestrict + 删验证消息 + 删 pending + 欢迎语
+      ├─ 用户通过 → 按 trust 同步未毕业权限（no_media/no_invites）或 NoRestrictions + 删验证消息 + 删 pending + 欢迎语
       └─ 到期 → 按 FailAction（kick/ban）处理
 ```
 
 Turnstile 路径细节：JWT 带 `chat_id + user_id + exp`，Web 前端渲染 Turnstile widget，提交时后端校验 `turnstile-response` + JWT。
+
+未毕业权限同步：验证通过但仍为 `new/suspicious`、验证关闭时直接入群、AI 状态回写为 `new/suspicious` 时，ClawGuard 会按 `filter.new_user.no_media` / `filter.new_user.no_invites` 组合调用 Telegram member permissions；`no_invites` 会设置 `CanInviteUsers=false`。用户毕业或被标记为 `trusted` 时恢复正常成员权限，并显式重新允许 `CanInviteUsers=true`。`no_invites` 仍保留 `new_chat_members` / `chat_member` 事件后处理，防止权限同步延迟或状态漏网。
 
 ### 5.2 Bio（简介）审核
 
@@ -209,7 +212,7 @@ Bio 通过 `getChat` 抓取，`policy.AI.BioCacheTTLMinutes` 控制 Redis 缓存
   ├─ 正则命中（FilterRegex）          → action
   ├─ 链接（FilterLinks，带白名单）    → action（ExemptAdmins 可放行管理员）
   ├─ 用户名黑名单（FilterUsernames）  → action
-  ├─ 新人期（FilterNewUser，24h 内）  → no_links / no_forwards / no_media / max_msg_per_minute
+  ├─ 未毕业限制（FilterNewUser）     → no_links / no_forwards / no_media / no_invites（权限限制 + 事件兜底）/ max_msg_per_minute
   ├─ 速率（AntiSpamRateLimit）        → mute_5m 等
   └─ 未命中 → 进下一层（AI）
 ```

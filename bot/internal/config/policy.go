@@ -147,6 +147,7 @@ type FilterNewUserPolicy struct {
 	NoLinks              bool `json:"no_links"`
 	NoForwards           bool `json:"no_forwards"`
 	NoMedia              bool `json:"no_media"`
+	NoInvites            bool `json:"no_invites"`
 	MaxMessagesPerMinute int  `json:"max_messages_per_minute"`
 }
 
@@ -285,6 +286,7 @@ var DefaultPolicy = GuardPolicy{
 			NoLinks:              true,
 			NoForwards:           true,
 			NoMedia:              true,
+			NoInvites:            false,
 			MaxMessagesPerMinute: 5,
 		},
 		NonTextMessages:          "ai_review",
