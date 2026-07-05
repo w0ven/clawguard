@@ -133,6 +133,7 @@ func TestApplyFilterChecksSyncsUngraduatedPermissionsOnNewUserMediaHit(t *testin
 	chatID := int64(-100123)
 	userID := int64(7945990865)
 	db := newModerationProfileMatchMockDB(chatID, userID)
+	db.userTrust.Status = "suspicious"
 	botClient, transport := newMockTelegramBot(t, "")
 	svc := &Service{logger: zap.NewNop(), queries: store.New(db), bot: botClient}
 
@@ -162,6 +163,43 @@ func TestApplyFilterChecksSyncsUngraduatedPermissionsOnNewUserMediaHit(t *testin
 	}
 	if got := countString(methods, "deleteMessage"); got != 1 {
 		t.Fatalf("deleteMessage calls = %d, want 1; methods=%v", got, methods)
+	}
+}
+
+func TestApplyFilterChecksSkipsUngraduatedFiltersForAdmin(t *testing.T) {
+	chatID := int64(-100123)
+	userID := int64(5105038894)
+	db := newModerationProfileMatchMockDB(chatID, userID)
+	db.userTrust.Status = "suspicious"
+	botClient, transport := newMockTelegramBot(t, "")
+	svc := &Service{logger: zap.NewNop(), queries: store.New(db), bot: botClient}
+
+	policy := config.DefaultPolicy
+	policy.Filter.NewUser.Enabled = true
+	policy.Filter.NewUser.NoMedia = true
+	policy.Filter.NewUser.NoInvites = true
+
+	msg := &tele.Message{
+		ID:     1001,
+		Chat:   &tele.Chat{ID: chatID, Type: tele.ChatSuperGroup, Title: "test-group"},
+		Sender: &tele.User{ID: userID, Username: "admin_user"},
+		Photo:  &tele.Photo{},
+	}
+
+	handled, err := svc.applyFilterChecks(context.Background(), msg, policy, true)
+	if err != nil {
+		t.Fatalf("applyFilterChecks returned error: %v", err)
+	}
+	if handled {
+		t.Fatal("handled = true, want false for admin ungraduated media")
+	}
+
+	methods := transport.Methods()
+	if got := countString(methods, "restrictChatMember"); got != 0 {
+		t.Fatalf("restrictChatMember calls = %d, want 0; methods=%v", got, methods)
+	}
+	if got := countString(methods, "deleteMessage"); got != 0 {
+		t.Fatalf("deleteMessage calls = %d, want 0; methods=%v", got, methods)
 	}
 }
 

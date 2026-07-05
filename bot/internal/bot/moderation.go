@@ -585,7 +585,7 @@ func (s *Service) applyFilterChecks(ctx context.Context, msg *tele.Message, poli
 	result := checkMessage(ctx, msg, policy.Filter, isAdmin)
 	if !result.Hit {
 		var err error
-		result, err = s.checkStatefulFilter(ctx, msg, policy)
+		result, err = s.checkStatefulFilter(ctx, msg, policy, isAdmin)
 		if err != nil {
 			return false, err
 		}
@@ -599,7 +599,7 @@ func (s *Service) applyFilterChecks(ctx context.Context, msg *tele.Message, poli
 	return true, nil
 }
 
-func (s *Service) checkStatefulFilter(ctx context.Context, msg *tele.Message, policy config.GuardPolicy) (FilterResult, error) {
+func (s *Service) checkStatefulFilter(ctx context.Context, msg *tele.Message, policy config.GuardPolicy, isAdmin bool) (FilterResult, error) {
 	if msg == nil || msg.Chat == nil || msg.Sender == nil {
 		return FilterResult{}, nil
 	}
@@ -607,16 +607,18 @@ func (s *Service) checkStatefulFilter(ctx context.Context, msg *tele.Message, po
 		return FilterResult{}, nil
 	}
 
-	trust, err := s.ensureUserTrust(ctx, msg)
-	if err != nil {
-		return FilterResult{}, fmt.Errorf("load user trust for filter: %w", err)
-	}
+	if !isAdmin {
+		trust, err := s.ensureUserTrust(ctx, msg)
+		if err != nil {
+			return FilterResult{}, fmt.Errorf("load user trust for filter: %w", err)
+		}
 
-	if result, err := s.checkNewUserFilter(ctx, msg, trust, policy.Filter.NewUser); err != nil {
-		return FilterResult{}, err
-	} else if result.Hit {
-		s.applyUngraduatedPermissionRestriction(msg.Chat, msg.Sender, policy, trust, result.Reason)
-		return result, nil
+		if result, err := s.checkNewUserFilter(ctx, msg, trust, policy.Filter.NewUser); err != nil {
+			return FilterResult{}, err
+		} else if result.Hit {
+			s.applyUngraduatedPermissionRestriction(msg.Chat, msg.Sender, policy, trust, result.Reason)
+			return result, nil
+		}
 	}
 	if result, err := s.checkRateLimitFilter(ctx, msg, policy.AntiSpam.RateLimit); err != nil {
 		return FilterResult{}, err
