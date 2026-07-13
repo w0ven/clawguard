@@ -29,6 +29,21 @@ ORDER BY title ASC, chat_id ASC;
 
 -- name: UpdateGroupConfig :one
 UPDATE groups
-SET config = $2
+SET config = CASE
+    WHEN jsonb_typeof(config) = 'object' AND config ? 'join_protection'
+        THEN jsonb_set($2::jsonb, '{join_protection}', config->'join_protection', true)
+    ELSE $2::jsonb
+END
+WHERE chat_id = $1
+RETURNING id, chat_id, title, type, member_count, enabled, joined_at, config;
+
+-- name: UpdateGroupJoinProtection :one
+UPDATE groups
+SET config = jsonb_set(
+    CASE WHEN jsonb_typeof(config) = 'object' THEN config ELSE '{}'::jsonb END,
+    '{join_protection}',
+    $2::jsonb,
+    true
+)
 WHERE chat_id = $1
 RETURNING id, chat_id, title, type, member_count, enabled, joined_at, config;

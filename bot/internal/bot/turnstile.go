@@ -135,7 +135,6 @@ func (s *Service) VerifyTurnstileToken(ctx context.Context, token, cfResponse, r
 		}
 		return fmt.Errorf("consume turnstile token: %w", err)
 	}
-
 	chat := &tele.Chat{ID: pending.ChatID}
 	user := &tele.User{
 		ID:        pending.UserID,
@@ -155,6 +154,8 @@ func (s *Service) VerifyTurnstileToken(ctx context.Context, token, cfResponse, r
 		}
 		return fmt.Errorf("sync verification pass permissions: %w", err)
 	}
+	s.ensureRuntimeGuards()
+	s.joinProtector.ReleasePending(pending.ChatID)
 
 	s.deleteVerificationMessage(chat, pending.JoinMessageID)
 	s.sendWelcomeMessage(ctx, chat, user)

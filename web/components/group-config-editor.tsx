@@ -39,6 +39,7 @@ import type {
 } from "@/lib/types";
 import { useToast } from "@/components/providers";
 import { ScheduledMessagesEditor } from "@/components/scheduled-messages-editor";
+import { JoinProtectionEditor } from "@/components/join-protection-editor";
 import { Save, ChevronDown, ChevronRight } from "lucide-react";
 
 type FieldKind =
@@ -666,6 +667,7 @@ export const fieldDescriptors: FieldDescriptor[] = [
 const tabs = [
   { value: "basic", label: "基础" },
   { value: "verify", label: "验证" },
+  { value: "join-protection", label: "入群防护" },
   { value: "filter", label: "过滤" },
   { value: "replies", label: "关键词回复" },
   { value: "warnings", label: "警告" },
@@ -1282,7 +1284,7 @@ export function GroupConfigEditor({ group, mergedPolicy }: Props) {
 
   return (
     <div className="space-y-5 pb-20">
-      <Tabs tabs={tabs} value={activeTab} onValueChange={setActiveTab} />
+      <Tabs tabs={tabs} value={activeTab} onValueChange={setActiveTab} className="max-w-full flex-wrap" />
 
       {activeTab === "basic" && (
         <div className="grid gap-4 md:grid-cols-2">
@@ -1336,7 +1338,8 @@ export function GroupConfigEditor({ group, mergedPolicy }: Props) {
 
       {activeTab !== "basic" &&
         activeTab !== "audit" &&
-        activeTab !== "scheduled" && (
+        activeTab !== "scheduled" &&
+        activeTab !== "join-protection" && (
           <div className="space-y-3">
             {tabFields.map((field) => {
               const group = getConfigFieldGroup(field);
@@ -1444,6 +1447,8 @@ export function GroupConfigEditor({ group, mergedPolicy }: Props) {
 
       {activeTab === "scheduled" && <ScheduledMessagesEditor group={group} />}
 
+      {activeTab === "join-protection" && <JoinProtectionEditor chatId={group.chat_id} />}
+
       {activeTab === "audit" && (
         <Card>
           <CardHeader>
@@ -1506,7 +1511,7 @@ export function GroupConfigEditor({ group, mergedPolicy }: Props) {
       )}
 
       {/* sticky save */}
-      {activeTab !== "scheduled" && (
+      {activeTab !== "scheduled" && activeTab !== "join-protection" && (
         <div className="fixed bottom-6 right-6 z-20">
           <Button
             onClick={saveConfig}

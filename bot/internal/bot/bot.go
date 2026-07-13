@@ -55,6 +55,9 @@ type Service struct {
 	bioCheckInFlight   sync.Map
 	userActionLocks    sync.Map
 	messageDeleteLocks sync.Map
+	runtimeGuardsOnce  sync.Once
+	joinProtector      *joinProtector
+	cleanupBreaker     *telegramCleanupBreaker
 }
 
 type buttonPayload struct {
@@ -212,6 +215,8 @@ func New(ctx context.Context, cfg config.Config, logger *zap.Logger, queries *st
 		verifyBtn:       verifyBtn,
 		verifyMathBtn:   verifyMathBtn,
 		verifyRandBtn:   verifyRandBtn,
+		joinProtector:   newJoinProtector(),
+		cleanupBreaker:  newTelegramCleanupBreaker(),
 		startedAt:       time.Now().UTC(),
 	}
 
@@ -822,7 +827,7 @@ func (s *Service) startVerification(chat *tele.Chat, user *tele.User, joinEventM
 		}
 	}
 
-	if !policy.Verify.Enabled {
+	if !policy.Verify.Enabled && !policy.JoinProtection.Enabled {
 		trust, trustOK := s.upsertJoinSideEffects(ctx, chat, user)
 		s.logger.Info("verification disabled by policy, skip flow", zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
 		if trustOK {
@@ -849,8 +854,45 @@ func (s *Service) startVerification(chat *tele.Chat, user *tele.User, joinEventM
 		zap.Duration("elapsed", time.Since(restrictStartedAt)),
 	)
 
+	s.ensureRuntimeGuards()
+	databasePending, countErr := s.queries.CountActivePendingVerificationsByChat(ctx, chat.ID)
+	if countErr != nil {
+		s.logger.Warn("count active pending verifications failed, enter protection fail-safe", zap.Error(countErr), zap.Int64("chat_id", chat.ID))
+		databasePending = int64(policy.JoinProtection.MaxPendingVerifications)
+	}
+	decision := s.joinProtector.ObserveJoin(chat.ID, policy.JoinProtection, int(databasePending), time.Now())
+	if decision.Protect {
+		s.upsertJoinSideEffects(ctx, chat, user)
+		if policy.Verify.DeleteJoinMessage && joinEventMessage != nil {
+			go s.deleteJoinEventMessageAsync(chat, user, joinEventMessage)
+		}
+		if err := s.handleJoinProtectionBan(ctx, chat, user, policy.JoinProtection); err != nil {
+			s.logger.Error("handle join protection temporary ban failed; member remains restricted and cleanup remains fail-closed", zap.Error(err), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
+		}
+		if decision.Notify {
+			s.notifyJoinProtectionAdmins(ctx, chat, decision, time.Now())
+		}
+		if decision.Entered {
+			expectedUntil := decision.ProtectionUntil
+			s.runDelayed(time.Until(expectedUntil), func() {
+				if summary, ok := s.joinProtector.FinishProtection(chat.ID, expectedUntil, time.Now()); ok {
+					s.notifyJoinProtectionRecovery(context.Background(), chat, summary)
+				}
+			})
+		}
+		return nil
+	}
+
+	if !policy.Verify.Enabled {
+		s.upsertJoinSideEffects(ctx, chat, user)
+		if err := s.applyVerificationPassPermissions(ctx, chat, user, policy); err != nil {
+			s.logger.Error("restore permissions for join without verification failed", zap.Error(err), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
+		}
+		s.joinProtector.ReleasePending(chat.ID)
+		return nil
+	}
+
 	s.upsertJoinSideEffects(ctx, chat, user)
-	s.startAsyncVerificationChecks(chat, user, policy)
 
 	if policy.Verify.DeleteJoinMessage && joinEventMessage != nil {
 		go s.deleteJoinEventMessageAsync(chat, user, joinEventMessage)
@@ -858,9 +900,11 @@ func (s *Service) startVerification(chat *tele.Chat, user *tele.User, joinEventM
 
 	verifyStartedAt := time.Now()
 	if err := s.startVerificationPrompt(ctx, chat, user, policy); err != nil {
-		s.rollbackVerificationRestriction(chat, user, "prompt_failed")
+		s.joinProtector.ReleasePending(chat.ID)
+		s.handleVerificationPromptFailure(ctx, chat, user, policy, err)
 		return err
 	}
+	s.startAsyncVerificationChecks(chat, user, policy)
 	s.logger.Info("verification step completed",
 		zap.Int64("chat_id", chat.ID),
 		zap.Int64("user_id", user.ID),
@@ -897,18 +941,6 @@ func (s *Service) startVerificationPrompt(ctx context.Context, chat *tele.Chat, 
 		)
 		return s.startButtonVerification(ctx, chat, user, policy)
 	}
-}
-
-func (s *Service) rollbackVerificationRestriction(chat *tele.Chat, user *tele.User, reason string) {
-	member := tele.ChatMember{
-		User:   user,
-		Rights: tele.NoRestrictions(),
-	}
-	if err := s.bot.Restrict(chat, &member); err != nil {
-		s.logger.Error("rollback verification restriction failed", zap.Error(err), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID), zap.String("reason", reason))
-		return
-	}
-	s.logger.Warn("verification restriction rolled back", zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID), zap.String("reason", reason))
 }
 
 func int64Ptr(v int64) *int64 {
@@ -1103,10 +1135,15 @@ func (s *Service) handleAsyncVerificationMatch(ctx context.Context, match asyncV
 			s.deleteVerificationMessage(chat, messageID)
 		},
 		deletePendingVerification: func(ctx context.Context, chatID, userID int64) error {
-			return s.queries.DeletePendingVerification(ctx, store.DeletePendingVerificationParams{
+			deleted, err := s.queries.DeletePendingVerification(ctx, store.DeletePendingVerificationParams{
 				ChatID: chatID,
 				UserID: userID,
 			})
+			if err == nil && deleted > 0 {
+				s.ensureRuntimeGuards()
+				s.joinProtector.ReleasePending(chatID)
+			}
+			return err
 		},
 		insertViolation: func(ctx context.Context, params store.InsertViolationParams) error {
 			_, err := s.queries.InsertViolation(ctx, params)
@@ -1379,14 +1416,19 @@ func (s *Service) cleanupVerificationStateOnLeave(ctx context.Context, chat *tel
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		s.logger.Warn("load pending verification on leave failed", zap.Error(err), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
 	}
-	if err == nil {
+	pendingLoaded := err == nil
+	if pendingLoaded {
 		s.deleteVerificationMessage(chat, pending.JoinMessageID)
 	}
-	if err := s.queries.DeletePendingVerification(ctx, store.DeletePendingVerificationParams{
+	deleted, deleteErr := s.queries.DeletePendingVerification(ctx, store.DeletePendingVerificationParams{
 		ChatID: chat.ID,
 		UserID: user.ID,
-	}); err != nil {
-		s.logger.Warn("delete pending verification on leave failed", zap.Error(err), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
+	})
+	if deleteErr != nil {
+		s.logger.Warn("delete pending verification on leave failed", zap.Error(deleteErr), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
+	} else if deleted > 0 && (!pendingLoaded || pendingReservesJoinProtectionSlot(pending.Method)) {
+		s.ensureRuntimeGuards()
+		s.joinProtector.ReleasePending(chat.ID)
 	}
 	if s.redis != nil {
 		lockKey := fmt.Sprintf("clawguard:verify:lock:%d:%d", chat.ID, user.ID)
@@ -1637,13 +1679,16 @@ func (s *Service) handleVerifyRandom(c tele.Context) error {
 }
 
 func (s *Service) completeVerification(ctx context.Context, chat *tele.Chat, user *tele.User, pending store.PendingVerification) error {
-	if err := s.queries.DeletePendingVerification(ctx, store.DeletePendingVerificationParams{
+	deleted, err := s.queries.DeletePendingVerification(ctx, store.DeletePendingVerificationParams{
 		ChatID: chat.ID,
 		UserID: user.ID,
-	}); err != nil {
+	})
+	if err != nil {
 		return fmt.Errorf("delete pending verification: %w", err)
 	}
-
+	if deleted == 0 {
+		return pgx.ErrNoRows
+	}
 	policy, polErr := config.LoadPolicy(ctx, s.queries, chat.ID)
 	if polErr != nil {
 		s.logger.Warn("load guard policy before verification permission sync failed, using defaults", zap.Error(polErr), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
@@ -1655,6 +1700,8 @@ func (s *Service) completeVerification(ctx context.Context, chat *tele.Chat, use
 		}
 		return fmt.Errorf("sync verification pass permissions: %w", err)
 	}
+	s.ensureRuntimeGuards()
+	s.joinProtector.ReleasePending(chat.ID)
 
 	s.deleteVerificationMessage(chat, pending.JoinMessageID)
 	s.sendWelcomeMessage(context.Background(), chat, user)
@@ -1684,36 +1731,60 @@ func (s *Service) HandleVerificationExpiry(ctx context.Context, pending store.Pe
 		Username:  derefString(pending.Username),
 		FirstName: derefString(pending.FirstName),
 	}
+	s.ensureRuntimeGuards()
+	allowed, _ := s.cleanupBreaker.Allow(pending.ChatID, time.Now())
+	if !allowed {
+		return nil
+	}
 
 	action, err := s.applyVerificationFailAction(chat, user, policy.Verify.FailAction)
 	if err != nil {
-		return err
+		if isTerminalTelegramCleanupError(err) {
+			action = "already_absent"
+		} else {
+			s.openTelegramCleanupCooldown(ctx, chat, policy.JoinProtection, err)
+			return nil
+		}
 	}
+	s.cleanupBreaker.Success(pending.ChatID)
 
 	s.deleteVerificationMessage(chat, pending.JoinMessageID)
 
-	if err := s.queries.DeletePendingVerification(ctx, store.DeletePendingVerificationParams{
+	deleted, err := s.queries.DeletePendingVerification(ctx, store.DeletePendingVerificationParams{
 		ChatID: pending.ChatID,
 		UserID: pending.UserID,
-	}); err != nil {
+	})
+	if err != nil {
 		return fmt.Errorf("delete expired pending verification: %w", err)
 	}
+	if deleted == 0 {
+		return nil
+	}
+	if pendingReservesJoinProtectionSlot(pending.Method) {
+		s.joinProtector.ReleasePending(pending.ChatID)
+	}
 
+	rule := "verify_timeout"
+	if pending.Method == "join_protection_cleanup" {
+		rule = "join_protection_temporary_ban_failed_cleanup"
+	}
 	if _, err := s.queries.InsertViolation(ctx, store.InsertViolationParams{
 		ChatID:   pending.ChatID,
 		UserID:   pending.UserID,
 		Username: pending.Username,
-		Rule:     "verify_timeout",
+		Rule:     rule,
 		Action:   action,
 	}); err != nil {
 		return fmt.Errorf("insert verification timeout violation: %w", err)
 	}
 
-	s.sendActionFeedback(chat, nil, policy.Feedback.VerifyFail, map[string]string{
-		"user":         feedbackUserLabel(user, policy.Feedback.VerifyFail.ParseMode),
-		"user_mention": feedbackUserMention(user, policy.Feedback.VerifyFail.ParseMode),
-		"reason":       "验证超时",
-	})
+	if pending.Method != "join_protection_cleanup" {
+		s.sendActionFeedback(chat, nil, policy.Feedback.VerifyFail, map[string]string{
+			"user":         feedbackUserLabel(user, policy.Feedback.VerifyFail.ParseMode),
+			"user_mention": feedbackUserMention(user, policy.Feedback.VerifyFail.ParseMode),
+			"reason":       "验证超时",
+		})
+	}
 
 	s.logger.Info(
 		"expired verification handled",
@@ -1734,12 +1805,18 @@ func (s *Service) failVerificationImmediately(ctx context.Context, chat *tele.Ch
 
 	s.deleteVerificationMessage(chat, pending.JoinMessageID)
 
-	if err := s.queries.DeletePendingVerification(ctx, store.DeletePendingVerificationParams{
+	deleted, err := s.queries.DeletePendingVerification(ctx, store.DeletePendingVerificationParams{
 		ChatID: pending.ChatID,
 		UserID: pending.UserID,
-	}); err != nil {
+	})
+	if err != nil {
 		return fmt.Errorf("delete failed pending verification: %w", err)
 	}
+	if deleted == 0 {
+		return nil
+	}
+	s.ensureRuntimeGuards()
+	s.joinProtector.ReleasePending(pending.ChatID)
 
 	if _, err := s.queries.InsertViolation(ctx, store.InsertViolationParams{
 		ChatID:   pending.ChatID,

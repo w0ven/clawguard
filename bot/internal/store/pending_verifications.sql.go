@@ -38,7 +38,7 @@ FROM pending_verifications
 WHERE chat_id = $1 AND user_id = $2 AND expires_at > NOW()
 `
 
-const deletePendingVerification = `-- name: DeletePendingVerification :exec
+const deletePendingVerification = `-- name: DeletePendingVerification :execrows
 DELETE FROM pending_verifications
 WHERE chat_id = $1 AND user_id = $2
 `
@@ -67,6 +67,12 @@ const listAllPending = `-- name: ListAllPending :many
 SELECT id, chat_id, user_id, username, first_name, method, payload, join_message_id, expires_at, created_at
 FROM pending_verifications
 ORDER BY created_at DESC
+`
+
+const countActivePendingVerificationsByChat = `-- name: CountActivePendingVerificationsByChat :one
+SELECT COUNT(*)
+FROM pending_verifications
+WHERE chat_id = $1 AND expires_at > NOW()
 `
 
 type UpsertPendingVerificationParams struct {
@@ -135,9 +141,19 @@ func (q *Queries) GetActivePendingVerification(ctx context.Context, arg GetPendi
 	return scanPendingVerification(row)
 }
 
-func (q *Queries) DeletePendingVerification(ctx context.Context, arg DeletePendingVerificationParams) error {
-	_, err := q.db.Exec(ctx, deletePendingVerification, arg.ChatID, arg.UserID)
-	return err
+func (q *Queries) CountActivePendingVerificationsByChat(ctx context.Context, chatID int64) (int64, error) {
+	row := q.db.QueryRow(ctx, countActivePendingVerificationsByChat, chatID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
+func (q *Queries) DeletePendingVerification(ctx context.Context, arg DeletePendingVerificationParams) (int64, error) {
+	result, err := q.db.Exec(ctx, deletePendingVerification, arg.ChatID, arg.UserID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 func (q *Queries) GetPendingVerificationByToken(ctx context.Context, token string) (PendingVerification, error) {

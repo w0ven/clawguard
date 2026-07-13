@@ -39,7 +39,23 @@ ORDER BY title ASC, chat_id ASC
 
 const updateGroupConfig = `-- name: UpdateGroupConfig :one
 UPDATE groups
-SET config = $2
+SET config = CASE
+    WHEN jsonb_typeof(config) = 'object' AND config ? 'join_protection'
+        THEN jsonb_set($2::jsonb, '{join_protection}', config->'join_protection', true)
+    ELSE $2::jsonb
+END
+WHERE chat_id = $1
+RETURNING id, chat_id, title, type, member_count, enabled, joined_at, config
+`
+
+const updateGroupJoinProtection = `-- name: UpdateGroupJoinProtection :one
+UPDATE groups
+SET config = jsonb_set(
+    CASE WHEN jsonb_typeof(config) = 'object' THEN config ELSE '{}'::jsonb END,
+    '{join_protection}',
+    $2::jsonb,
+    true
+)
 WHERE chat_id = $1
 RETURNING id, chat_id, title, type, member_count, enabled, joined_at, config
 `
@@ -86,6 +102,11 @@ func (q *Queries) GetGroupByChatID(ctx context.Context, chatID int64) (Group, er
 type UpdateGroupConfigParams struct {
 	ChatID int64
 	Config []byte
+}
+
+type UpdateGroupJoinProtectionParams struct {
+	ChatID         int64
+	JoinProtection []byte
 }
 
 func (q *Queries) ListGroups(ctx context.Context) ([]Group, error) {
@@ -150,6 +171,22 @@ func (q *Queries) ListGroupsScoped(ctx context.Context, chatIds []int64) ([]Grou
 
 func (q *Queries) UpdateGroupConfig(ctx context.Context, arg UpdateGroupConfigParams) (Group, error) {
 	row := q.db.QueryRow(ctx, updateGroupConfig, arg.ChatID, arg.Config)
+	var i Group
+	err := row.Scan(
+		&i.ID,
+		&i.ChatID,
+		&i.Title,
+		&i.Type,
+		&i.MemberCount,
+		&i.Enabled,
+		&i.JoinedAt,
+		&i.Config,
+	)
+	return i, err
+}
+
+func (q *Queries) UpdateGroupJoinProtection(ctx context.Context, arg UpdateGroupJoinProtectionParams) (Group, error) {
+	row := q.db.QueryRow(ctx, updateGroupJoinProtection, arg.ChatID, arg.JoinProtection)
 	var i Group
 	err := row.Scan(
 		&i.ID,
