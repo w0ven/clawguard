@@ -55,6 +55,7 @@ func NewServer(cfg config.Config, logger *zap.Logger, botService *bot.Service, s
 	}
 
 	e.GET("/healthz", server.healthz)
+	e.GET("/readyz", server.readyz)
 	e.POST("/webhook/:secret", server.handleWebhook)
 	server.registerAuthRoutes()
 	server.registerPublicRoutes()
@@ -86,6 +87,38 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 func (s *Server) healthz(c echo.Context) error {
 	return c.JSON(http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (s *Server) readyz(c echo.Context) error {
+	if s.botService == nil || s.botService.Queries() == nil || s.botService.Redis() == nil {
+		return c.JSON(http.StatusServiceUnavailable, map[string]string{"status": "not_ready"})
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request().Context(), 2*time.Second)
+	defer cancel()
+
+	postgresReady := true
+	if _, err := s.botService.Queries().GetSystemState(ctx); err != nil {
+		postgresReady = false
+		s.logger.Debug("readiness postgres check failed", zap.Error(err))
+	}
+	redisReady := true
+	if err := s.botService.Redis().Ping(ctx).Err(); err != nil {
+		redisReady = false
+		s.logger.Debug("readiness redis check failed", zap.Error(err))
+	}
+	if !postgresReady || !redisReady {
+		return c.JSON(http.StatusServiceUnavailable, map[string]any{
+			"status":   "not_ready",
+			"postgres": postgresReady,
+			"redis":    redisReady,
+		})
+	}
+	return c.JSON(http.StatusOK, map[string]any{
+		"status":   "ready",
+		"postgres": true,
+		"redis":    true,
+	})
 }
 
 func (s *Server) handleWebhook(c echo.Context) error {

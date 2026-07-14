@@ -8,6 +8,17 @@
         -Server
     }
 
+    @runtime_health path /healthz /readyz
+    handle @runtime_health {
+        reverse_proxy bot:8080 {
+            lb_try_duration 5s
+            transport http {
+                dial_timeout 5s
+                response_header_timeout 5s
+            }
+        }
+    }
+
     handle /webhook/* {
         reverse_proxy bot:8080 {
             lb_try_duration 5s

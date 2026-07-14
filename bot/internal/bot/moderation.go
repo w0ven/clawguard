@@ -3119,13 +3119,20 @@ func (s *Service) kickUser(chat *tele.Chat, user *tele.User) error {
 		s.logger.Warn("load system state failed before kick", zap.Error(err))
 	}
 	member := &tele.ChatMember{User: user}
-	if err := s.bot.Ban(chat, member); err != nil {
-		return normalizeTelegramActionError("ban", err)
-	}
-	if err := s.bot.Unban(chat, user); err != nil {
-		return normalizeTelegramActionError("unban", err)
-	}
-	return nil
+	return runVerificationKick(
+		func() error {
+			if err := s.bot.Ban(chat, member); err != nil {
+				return normalizeTelegramActionError("ban", err)
+			}
+			return nil
+		},
+		func() error {
+			if err := s.bot.Unban(chat, user); err != nil {
+				return normalizeTelegramActionError("unban", err)
+			}
+			return nil
+		},
+	)
 }
 
 func (s *Service) banUser(chat *tele.Chat, user *tele.User) error {
@@ -3571,12 +3578,16 @@ func (s *Service) acquireActionDedupeLock(key string, ttl time.Duration, local *
 			if !ok {
 				return func() {}, false
 			}
-			return func() {}, true
+			return acquireLocalDedupeLock(key, ttl, local)
 		}
 		logFields := append([]zap.Field{zap.Error(err), zap.String("key", key)}, fields...)
 		s.logger.Warn("acquire "+label+" lock via redis failed", logFields...)
 	}
 
+	return acquireLocalDedupeLock(key, ttl, local)
+}
+
+func acquireLocalDedupeLock(key string, ttl time.Duration, local *sync.Map) (func(), bool) {
 	timer := time.AfterFunc(ttl, func() {
 		local.Delete(key)
 	})

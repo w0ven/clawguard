@@ -98,7 +98,7 @@ func (s *Service) startTurnstileVerification(ctx context.Context, chat *tele.Cha
 		return err
 	}
 
-	if err := s.storePendingVerification(ctx, chat.ID, user, "turnstile", payload, sent.ID, policy.Verify.TimeoutSeconds); err != nil {
+	if err := s.storePendingVerification(ctx, chat.ID, user, "turnstile", payload, sent.ID, policy.Verify.TimeoutSeconds, policy.Verify.FailAction); err != nil {
 		s.deleteVerificationMessage(chat, int64Ptr(int64(sent.ID)))
 		return err
 	}

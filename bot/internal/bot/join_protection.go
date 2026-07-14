@@ -35,6 +35,7 @@ type joinProtectionGroupState struct {
 	mu               sync.Mutex
 	joins            []time.Time
 	protectionUntil  time.Time
+	currentTrigger   string
 	lastNotification time.Time
 	intercepted      int
 	estimatedPending int
@@ -68,6 +69,7 @@ func (p *joinProtector) ObserveJoin(chatID int64, policy config.JoinProtectionPo
 	}
 	if !state.protectionUntil.IsZero() && !now.Before(state.protectionUntil) {
 		state.protectionUntil = time.Time{}
+		state.currentTrigger = ""
 		state.lastNotification = time.Time{}
 		state.intercepted = 0
 		state.joins = nil
@@ -76,7 +78,10 @@ func (p *joinProtector) ObserveJoin(chatID int64, policy config.JoinProtectionPo
 	decision := joinProtectionDecision{}
 	if now.Before(state.protectionUntil) {
 		decision.Protect = true
-		decision.Trigger = "active"
+		decision.Trigger = state.currentTrigger
+		if decision.Trigger == "" {
+			decision.Trigger = "active"
+		}
 	} else {
 		windowStart := now.Add(-time.Duration(policy.JoinWindowSeconds) * time.Second)
 		firstCurrent := 0
@@ -102,6 +107,7 @@ func (p *joinProtector) ObserveJoin(chatID int64, policy config.JoinProtectionPo
 	if decision.Protect {
 		if decision.Entered {
 			state.protectionUntil = now.Add(time.Duration(policy.ProtectionDurationSeconds) * time.Second)
+			state.currentTrigger = decision.Trigger
 			state.intercepted = 0
 			state.joins = nil
 		}
@@ -117,6 +123,79 @@ func (p *joinProtector) ObserveJoin(chatID int64, policy config.JoinProtectionPo
 
 	state.estimatedPending++
 	return decision
+}
+
+type joinProtectionMemorySnapshot struct {
+	Joins            []time.Time
+	ProtectionUntil  time.Time
+	CurrentTrigger   string
+	LastNotification time.Time
+	Intercepted      int
+}
+
+func (p *joinProtector) Snapshot(chatID int64, policy config.JoinProtectionPolicy, now time.Time) (joinProtectionMemorySnapshot, bool) {
+	value, ok := p.groups.Load(chatID)
+	if !ok {
+		return joinProtectionMemorySnapshot{}, false
+	}
+	state := value.(*joinProtectionGroupState)
+	state.mu.Lock()
+	defer state.mu.Unlock()
+
+	if !state.protectionUntil.IsZero() && !now.Before(state.protectionUntil) {
+		state.protectionUntil = time.Time{}
+		state.currentTrigger = ""
+		state.lastNotification = time.Time{}
+		state.intercepted = 0
+	}
+	windowStart := now.Add(-time.Duration(policy.JoinWindowSeconds) * time.Second)
+	firstCurrent := 0
+	for firstCurrent < len(state.joins) && state.joins[firstCurrent].Before(windowStart) {
+		firstCurrent++
+	}
+	if firstCurrent > 0 {
+		state.joins = append([]time.Time(nil), state.joins[firstCurrent:]...)
+	}
+	snapshot := joinProtectionMemorySnapshot{
+		Joins:            append([]time.Time(nil), state.joins...),
+		ProtectionUntil:  state.protectionUntil,
+		CurrentTrigger:   state.currentTrigger,
+		LastNotification: state.lastNotification,
+		Intercepted:      state.intercepted,
+	}
+	return snapshot, !snapshot.ProtectionUntil.IsZero() || len(snapshot.Joins) > 0
+}
+
+func (p *joinProtector) MirrorRedisObservation(chatID int64, observation joinProtectionRedisObservation, databasePending *int, now time.Time) {
+	state := p.group(chatID)
+	state.mu.Lock()
+	defer state.mu.Unlock()
+
+	decision := observation.Decision
+	if decision.Protect {
+		state.protectionUntil = decision.ProtectionUntil
+		if decision.Trigger != "" && decision.Trigger != "active" {
+			state.currentTrigger = decision.Trigger
+		}
+		state.intercepted = decision.Intercepted
+		state.joins = nil
+		if decision.Notify {
+			state.lastNotification = now
+		}
+		return
+	}
+
+	state.protectionUntil = time.Time{}
+	state.currentTrigger = ""
+	state.intercepted = 0
+	state.lastNotification = time.Time{}
+	state.joins = make([]time.Time, observation.JoinCount)
+	for i := range state.joins {
+		state.joins[i] = now
+	}
+	if databasePending != nil {
+		state.estimatedPending = *databasePending
+	}
 }
 
 func pendingReservesJoinProtectionSlot(method string) bool {
@@ -154,6 +233,7 @@ func (p *joinProtector) FinishProtection(chatID int64, expectedUntil, now time.T
 	}
 	summary := joinProtectionSummary{ProtectionUntil: state.protectionUntil, Intercepted: state.intercepted}
 	state.protectionUntil = time.Time{}
+	state.currentTrigger = ""
 	state.lastNotification = time.Time{}
 	state.intercepted = 0
 	state.joins = nil
@@ -177,6 +257,7 @@ func (p *joinProtector) Status(chatID int64, now time.Time) JoinProtectionRuntim
 	status.RecentJoins = len(state.joins)
 	if !state.protectionUntil.IsZero() && now.Before(state.protectionUntil) {
 		status.State = "protecting"
+		status.Trigger = state.currentTrigger
 		until := state.protectionUntil
 		status.ProtectionUntil = &until
 	}
@@ -338,11 +419,7 @@ func isTerminalTelegramCleanupError(err error) bool {
 	if err == nil {
 		return false
 	}
-	message := strings.ToLower(err.Error())
-	var telegramError *tele.Error
-	if errors.As(err, &telegramError) && telegramError != nil {
-		message += " " + strings.ToLower(telegramError.Description+" "+telegramError.Message)
-	}
+	message := telegramCleanupErrorText(err)
 	for _, marker := range []string{
 		"user not found",
 		"participant_id_invalid",
@@ -361,6 +438,23 @@ func isTerminalTelegramCleanupError(err error) bool {
 		}
 	}
 	return false
+}
+
+func isAlreadyBannedTelegramError(err error) bool {
+	message := telegramCleanupErrorText(err)
+	return strings.Contains(message, "already banned") || strings.Contains(message, "already kicked")
+}
+
+func telegramCleanupErrorText(err error) string {
+	if err == nil {
+		return ""
+	}
+	message := strings.ToLower(err.Error())
+	var telegramError *tele.Error
+	if errors.As(err, &telegramError) && telegramError != nil {
+		message += " " + strings.ToLower(telegramError.Description+" "+telegramError.Message)
+	}
+	return message
 }
 
 func formatJoinProtectionTrigger(trigger string) string {
@@ -399,18 +493,33 @@ func (s *Service) evaluateJoinProtection(ctx context.Context, chat *tele.Chat, p
 		return joinProtectionDecision{}
 	}
 
+	s.ensureRuntimeGuards()
 	if s.redis != nil {
+		if snapshot, ok := s.joinProtector.Snapshot(chat.ID, policy, now); ok {
+			if now.Before(snapshot.ProtectionUntil) {
+				if err := restoreJoinProtectionRedis(ctx, s.redis, chat.ID, snapshot, now); err != nil {
+					s.logger.Warn("restore active join protection redis shadow failed", zap.Error(err), zap.Int64("chat_id", chat.ID))
+				}
+			} else if len(snapshot.Joins) > 0 {
+				if err := restoreJoinProtectionWindowRedis(ctx, s.redis, chat.ID, snapshot.Joins, policy, now); err != nil {
+					s.logger.Warn("restore join protection window redis shadow failed", zap.Error(err), zap.Int64("chat_id", chat.ID))
+				}
+			}
+		}
+
 		observation, err := observeJoinProtectionRedis(ctx, s.redis, chat.ID, policy, nil, now)
 		if err == nil {
 			if observation.Recovered != nil {
 				s.notifyJoinProtectionRecovery(ctx, chat, *observation.Recovered)
 			}
 			if !observation.NeedsData {
+				s.joinProtector.MirrorRedisObservation(chat.ID, observation, nil, now)
 				return observation.Decision
 			}
 			databasePending := s.countPendingForJoinProtection(ctx, chat.ID, policy)
 			observation, err = observeJoinProtectionRedis(ctx, s.redis, chat.ID, policy, &databasePending, now)
 			if err == nil {
+				s.joinProtector.MirrorRedisObservation(chat.ID, observation, &databasePending, now)
 				return observation.Decision
 			}
 		}
@@ -422,7 +531,6 @@ func (s *Service) evaluateJoinProtection(ctx context.Context, chat *tele.Chat, p
 		)
 	}
 
-	s.ensureRuntimeGuards()
 	databasePending := s.countPendingForJoinProtection(ctx, chat.ID, policy)
 	return s.joinProtector.ObserveJoin(chat.ID, policy, databasePending, now)
 }
@@ -687,6 +795,13 @@ func (s *Service) ProcessJoinProtectionCleanupFallbacks(ctx context.Context, lim
 	if s.redis == nil {
 		return nil
 	}
+	state, err := s.GetSystemState(ctx)
+	if err != nil {
+		return fmt.Errorf("load system state before join protection cleanup: %w", err)
+	}
+	if state.ActionsPaused {
+		return nil
+	}
 	for index := int64(0); index < limit; index++ {
 		task, ok, err := claimDueJoinProtectionCleanupRedis(ctx, s.redis, time.Now(), time.Minute)
 		if err != nil {
@@ -694,6 +809,16 @@ func (s *Service) ProcessJoinProtectionCleanupFallbacks(ctx context.Context, lim
 		}
 		if !ok {
 			break
+		}
+		state, stateErr := s.GetSystemState(ctx)
+		if stateErr != nil || state.ActionsPaused {
+			if err := rescheduleJoinProtectionCleanupRedis(ctx, s.redis, task.Member, time.Now().Add(time.Minute)); err != nil {
+				s.logger.Error("reschedule join protection cleanup while actions paused", zap.Error(err), zap.Int64("chat_id", task.ChatID), zap.Int64("user_id", task.UserID))
+			}
+			if stateErr != nil {
+				return fmt.Errorf("reload system state before join protection cleanup: %w", stateErr)
+			}
+			return nil
 		}
 		allowed, cooldownUntil := s.allowTelegramCleanup(ctx, task.ChatID, time.Now())
 		if !allowed {
@@ -708,15 +833,20 @@ func (s *Service) ProcessJoinProtectionCleanupFallbacks(ctx context.Context, lim
 			chat.Title = group.Title
 		}
 		user := &tele.User{ID: task.UserID, Username: task.Username, FirstName: task.FirstName}
-		action := "temporary_ban"
-		banErr := s.temporaryBanJoinFloodUser(chat, user, task.TemporaryBanSeconds)
-		if banErr != nil && !isTerminalTelegramCleanupError(banErr) {
+		action := task.Action
+		var actionErr error
+		if task.Action == "temporary_ban" {
+			actionErr = s.temporaryBanJoinFloodUser(chat, user, task.TemporaryBanSeconds)
+		} else {
+			action, actionErr = s.applyVerificationFailAction(chat, user, task.Action)
+		}
+		if actionErr != nil && !isTerminalTelegramCleanupError(actionErr) {
 			_ = s.restrictJoinFloodUserFallback(chat, user)
 			cleanupPolicy := config.DefaultJoinProtectionPolicy
-			if loadedPolicy, policyErr := config.LoadPolicy(ctx, s.queries, task.ChatID); policyErr == nil {
+			if loadedPolicy, policyErr := s.LoadGuardPolicy(ctx, task.ChatID); policyErr == nil {
 				cleanupPolicy = loadedPolicy.JoinProtection
 			}
-			s.openTelegramCleanupCooldown(ctx, chat, cleanupPolicy, banErr)
+			s.openTelegramCleanupCooldown(ctx, chat, cleanupPolicy, actionErr)
 			_, retryAt := s.allowTelegramCleanup(ctx, task.ChatID, time.Now())
 			if retryAt.IsZero() {
 				retryAt = time.Now().Add(5 * time.Minute)
@@ -726,7 +856,7 @@ func (s *Service) ProcessJoinProtectionCleanupFallbacks(ctx context.Context, lim
 			}
 			continue
 		}
-		if banErr != nil {
+		if actionErr != nil {
 			action = "already_absent"
 		}
 		s.markTelegramCleanupSuccess(ctx, task.ChatID)
@@ -734,11 +864,15 @@ func (s *Service) ProcessJoinProtectionCleanupFallbacks(ctx context.Context, lim
 			s.logger.Error("remove completed redis join protection cleanup", zap.Error(err), zap.Int64("chat_id", task.ChatID), zap.Int64("user_id", task.UserID))
 			continue
 		}
+		rule := strings.TrimSpace(task.Rule)
+		if rule == "" {
+			rule = "join_protection_redis_fallback_cleanup"
+		}
 		if _, err := s.queries.InsertViolation(ctx, store.InsertViolationParams{
 			ChatID:   task.ChatID,
 			UserID:   task.UserID,
 			Username: stringPtr(task.Username),
-			Rule:     "join_protection_redis_fallback_cleanup",
+			Rule:     rule,
 			Matched:  stringPtr(task.Reason),
 			Action:   action,
 		}); err != nil {
@@ -820,11 +954,11 @@ func (s *Service) handleJoinProtectionCleanupExpiry(
 	policy config.GuardPolicy,
 	chat *tele.Chat,
 	user *tele.User,
-) error {
+) (VerificationExpiryResult, error) {
 	payload := decodeJoinProtectionCleanupPayload(pending.Payload, policy.JoinProtection.TemporaryBanSeconds)
-	allowed, _ := s.allowTelegramCleanup(ctx, pending.ChatID, time.Now())
+	allowed, retryAt := s.allowTelegramCleanup(ctx, pending.ChatID, time.Now())
 	if !allowed {
-		return nil
+		return verificationExpiryRetry(retryAt, "telegram cleanup cooldown"), nil
 	}
 
 	action := "temporary_ban"
@@ -832,21 +966,18 @@ func (s *Service) handleJoinProtectionCleanupExpiry(
 		if isTerminalTelegramCleanupError(err) {
 			action = "already_absent"
 		} else {
-			s.openTelegramCleanupCooldown(ctx, chat, policy.JoinProtection, err)
-			return nil
+			retryAt = s.openTelegramCleanupCooldown(ctx, chat, policy.JoinProtection, err)
+			return verificationExpiryRetry(retryAt, redact.ErrorString(err)), nil
 		}
 	}
 	s.markTelegramCleanupSuccess(ctx, pending.ChatID)
 
-	deleted, err := s.queries.DeletePendingVerification(ctx, store.DeletePendingVerificationParams{
-		ChatID: pending.ChatID,
-		UserID: pending.UserID,
-	})
+	deleted, err := s.deleteProcessedPendingVerification(ctx, pending)
 	if err != nil {
-		return fmt.Errorf("delete completed join protection cleanup: %w", err)
+		return VerificationExpiryResult{}, fmt.Errorf("delete completed join protection cleanup: %w", err)
 	}
 	if deleted == 0 {
-		return nil
+		return VerificationExpiryResult{}, nil
 	}
 
 	if _, err := s.queries.InsertViolation(ctx, store.InsertViolationParams{
@@ -857,7 +988,7 @@ func (s *Service) handleJoinProtectionCleanupExpiry(
 		Matched:  stringPtr(payload.Reason),
 		Action:   action,
 	}); err != nil {
-		return fmt.Errorf("record join protection cleanup result: %w", err)
+		s.logger.Warn("record join protection cleanup result failed after cleanup", zap.Error(err), zap.Int64("chat_id", pending.ChatID), zap.Int64("user_id", pending.UserID))
 	}
 
 	s.logger.Info(
@@ -868,16 +999,22 @@ func (s *Service) handleJoinProtectionCleanupExpiry(
 		zap.String("action", action),
 		zap.Int("temporary_ban_seconds", payload.TemporaryBanSeconds),
 	)
-	return nil
+	return VerificationExpiryResult{}, nil
 }
 
-func (s *Service) handleVerificationPromptFailure(ctx context.Context, chat *tele.Chat, user *tele.User, policy config.GuardPolicy, promptErr error) {
+func (s *Service) handleVerificationPromptFailure(ctx context.Context, chat *tele.Chat, user *tele.User, policy config.GuardPolicy, promptErr error) error {
 	if chat == nil || user == nil {
-		return
+		return nil
 	}
 	payload, _ := json.Marshal(map[string]string{"reason": "verification_prompt_failed"})
+	payload, snapshotErr := withVerificationFailActionSnapshot(payload, policy.Verify.FailAction)
+	if snapshotErr != nil {
+		s.logger.Error("snapshot prompt failure action failed", zap.Error(snapshotErr), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
+		return snapshotErr
+	}
+	cleanupPersisted := false
 	persistCleanup := func() error {
-		_, err := s.queries.UpsertPendingVerification(ctx, store.UpsertPendingVerificationParams{
+		_, databaseErr := s.queries.UpsertPendingVerification(ctx, store.UpsertPendingVerificationParams{
 			ChatID:    chat.ID,
 			UserID:    user.ID,
 			Username:  stringPtr(user.Username),
@@ -886,14 +1023,64 @@ func (s *Service) handleVerificationPromptFailure(ctx context.Context, chat *tel
 			Payload:   payload,
 			ExpiresAt: time.Now().Add(-time.Second),
 		})
-		return err
+		if databaseErr == nil {
+			cleanupPersisted = true
+			return nil
+		}
+
+		queueErr := errors.New("redis unavailable")
+		if s.redis != nil {
+			queueErr = enqueueJoinProtectionCleanupRedis(ctx, s.redis, joinProtectionDeferredCleanup{
+				ChatID:    chat.ID,
+				UserID:    user.ID,
+				Username:  user.Username,
+				FirstName: user.FirstName,
+				Reason:    redact.ErrorString(promptErr),
+				Action:    normalizeVerificationFailAction(policy.Verify.FailAction),
+				Rule:      "verification_prompt_failed_redis_cleanup",
+			}, time.Now())
+		}
+		if queueErr != nil {
+			s.logger.Error(
+				"verification prompt cleanup could not be persisted",
+				zap.String("event", "verification_prompt_cleanup_persistence_failed"),
+				zap.Error(errors.Join(databaseErr, queueErr)),
+				zap.Int64("chat_id", chat.ID),
+				zap.Int64("user_id", user.ID),
+			)
+			s.notifyAdminsForChat(
+				ctx,
+				chat,
+				"<b>验证清理任务未能持久化</b>\nTelegram、PostgreSQL 与 Redis 清理链路同时失败，请人工检查最近入群成员。",
+				"verification prompt cleanup persistence failure",
+			)
+			return errors.Join(databaseErr, queueErr)
+		}
+		s.logger.Warn(
+			"verification prompt cleanup queued in redis after database failure",
+			zap.String("event", "verification_prompt_cleanup_queued_redis"),
+			zap.Error(databaseErr),
+			zap.Int64("chat_id", chat.ID),
+			zap.Int64("user_id", user.ID),
+		)
+		cleanupPersisted = true
+		return nil
 	}
 	s.ensureRuntimeGuards()
+	state, stateErr := s.GetSystemState(ctx)
+	if stateErr != nil || state.ActionsPaused {
+		if err := persistCleanup(); err != nil {
+			s.logger.Error("persist prompt failure while telegram actions are unavailable failed", zap.Error(err), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
+			return err
+		}
+		return nil
+	}
 	if allowed, _ := s.allowTelegramCleanup(ctx, chat.ID, time.Now()); !allowed {
 		if err := persistCleanup(); err != nil {
 			s.logger.Error("persist prompt failure during telegram cooldown failed; member remains restricted", zap.Error(err), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
+			return err
 		}
-		return
+		return nil
 	}
 	action, cleanupErr := runPromptFailureCleanup(promptFailureCleanupOps{
 		applyAction: func() (string, error) {
@@ -913,13 +1100,17 @@ func (s *Service) handleVerificationPromptFailure(ctx context.Context, chat *tel
 		}); err != nil {
 			s.logger.Warn("record verification prompt failure cleanup failed", zap.Error(err), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
 		}
-		return
+		return nil
 	}
 
 	s.openTelegramCleanupCooldown(ctx, chat, policy.JoinProtection, cleanupErr)
+	if cleanupPersisted {
+		return nil
+	}
+	return cleanupErr
 }
 
-func (s *Service) openTelegramCleanupCooldown(ctx context.Context, chat *tele.Chat, policy config.JoinProtectionPolicy, err error) {
+func (s *Service) openTelegramCleanupCooldown(ctx context.Context, chat *tele.Chat, policy config.JoinProtectionPolicy, err error) time.Time {
 	s.ensureRuntimeGuards()
 	chatID := int64(0)
 	if chat != nil {
@@ -927,8 +1118,9 @@ func (s *Service) openTelegramCleanupCooldown(ctx context.Context, chat *tele.Ch
 	}
 	until, notify := s.markTelegramCleanupFailure(ctx, chatID, time.Duration(policy.TelegramFailureCooldownSeconds)*time.Second, err, time.Now())
 	if !notify {
-		return
+		return until
 	}
 	message := fmt.Sprintf("⚠️ <b>Telegram 清理暂时失败</b>\n该群已暂停重复清理请求，%s 后自动重试。期间相关账号保持受限。", htmlEscape(formatRemaining(until, time.Now())))
 	s.notifyAdminsForChat(ctx, chat, message, "telegram cleanup cooldown")
+	return until
 }

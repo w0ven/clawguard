@@ -122,7 +122,7 @@ func (s *Server) handleGetGroup(c echo.Context) error {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "load group failed"})
 	}
 
-	policy, err := config.LoadPolicy(c.Request().Context(), s.botService.Queries(), chatID)
+	policy, err := s.botService.LoadGuardPolicy(c.Request().Context(), chatID)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "load policy failed"})
 	}
@@ -177,7 +177,7 @@ func (s *Server) handlePutGroupConfig(c echo.Context) error {
 		s.logger.Warn("write group config audit failed")
 	}
 
-	policy, err := config.LoadPolicy(c.Request().Context(), s.botService.Queries(), chatID)
+	policy, err := s.botService.RefreshGuardPolicySnapshot(c.Request().Context(), chatID)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "load merged policy failed"})
 	}
@@ -204,7 +204,7 @@ func (s *Server) handleGetJoinProtection(c echo.Context) error {
 		}
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "load group failed"})
 	}
-	policy, err := config.LoadPolicy(c.Request().Context(), s.botService.Queries(), chatID)
+	policy, err := s.botService.LoadGuardPolicy(c.Request().Context(), chatID)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "load join protection failed"})
 	}
@@ -260,6 +260,9 @@ func (s *Server) handlePutJoinProtection(c echo.Context) error {
 	}
 	if err := s.writeAudit(c.Request().Context(), admin, "group", &chatID, "update_join_protection", group.Config, updated.Config); err != nil {
 		s.logger.Warn("write join protection audit failed", zap.Error(err))
+	}
+	if _, err := s.botService.RefreshGuardPolicySnapshot(c.Request().Context(), chatID); err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "refresh join protection policy failed"})
 	}
 	return c.JSON(http.StatusOK, map[string]any{
 		"join_protection": next,
@@ -332,7 +335,7 @@ func (s *Server) handleCreateAuthorizedGroup(c echo.Context) error {
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "save authorized group failed"})
 	}
-	s.botService.InvalidateAuthorizedGroupCache(c.Request().Context(), payload.ChatID)
+	s.botService.SetAuthorizedGroupCache(c.Request().Context(), payload.ChatID, created.Enabled)
 
 	beforeRaw := json.RawMessage(nil)
 	if hadBefore {
@@ -397,7 +400,7 @@ func (s *Server) handleUpdateAuthorizedGroup(c echo.Context) error {
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "update authorized group failed"})
 	}
-	s.botService.InvalidateAuthorizedGroupCache(c.Request().Context(), chatID)
+	s.botService.SetAuthorizedGroupCache(c.Request().Context(), chatID, updated.Enabled)
 
 	if auditErr := s.writeAudit(c.Request().Context(), admin, "authorized_group", &chatID, "update_authorized_group", mustRawJSON(serializeAuthorizedGroup(before)), mustRawJSON(serializeAuthorizedGroup(updated))); auditErr != nil {
 		s.logger.Warn("write authorized group audit failed", zap.Error(auditErr))
@@ -425,7 +428,7 @@ func (s *Server) handleDeleteAuthorizedGroup(c echo.Context) error {
 	if err := s.botService.Queries().DeleteAuthorizedGroup(c.Request().Context(), chatID); err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "delete authorized group failed"})
 	}
-	s.botService.InvalidateAuthorizedGroupCache(c.Request().Context(), chatID)
+	s.botService.SetAuthorizedGroupCache(c.Request().Context(), chatID, false)
 	if auditErr := s.writeAudit(c.Request().Context(), admin, "authorized_group", &chatID, "delete_authorized_group", mustRawJSON(serializeAuthorizedGroup(before)), []byte("null")); auditErr != nil {
 		s.logger.Warn("write authorized group audit failed", zap.Error(auditErr))
 	}
@@ -522,6 +525,9 @@ func (s *Server) handlePutGlobalConfig(c echo.Context) error {
 
 	if err := s.writeAudit(c.Request().Context(), admin, "global", nil, "update_global_config", before.Config, nextConfig); err != nil {
 		s.logger.Warn("write global config audit failed")
+	}
+	if err := s.botService.RefreshAllGuardPolicySnapshots(c.Request().Context()); err != nil {
+		s.logger.Warn("refresh guard policy snapshots after global config update failed", zap.Error(err))
 	}
 
 	return c.JSON(http.StatusOK, map[string]any{

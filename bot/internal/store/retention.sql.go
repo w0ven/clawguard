@@ -13,11 +13,6 @@ WHERE created_at < NOW() - make_interval(days => $1::int)
   AND admin_override IS NULL
 `
 
-const deleteExpiredPendingVerifications = `-- name: DeleteExpiredPendingVerifications :execrows
-DELETE FROM pending_verifications
-WHERE expires_at < NOW() - make_interval(hours => $1::int)
-`
-
 const deleteOldConfigAudit = `-- name: DeleteOldConfigAudit :execrows
 DELETE FROM config_audit
 WHERE created_at < NOW() - make_interval(days => $1::int)
@@ -50,14 +45,6 @@ func (q *Queries) DeleteOldViolations(ctx context.Context, days int32) (int64, e
 
 func (q *Queries) DeleteOldAIDecisions(ctx context.Context, days int32) (int64, error) {
 	result, err := q.db.Exec(ctx, deleteOldAIDecisions, days)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected(), nil
-}
-
-func (q *Queries) DeleteExpiredPendingVerifications(ctx context.Context, hours int32) (int64, error) {
-	result, err := q.db.Exec(ctx, deleteExpiredPendingVerifications, hours)
 	if err != nil {
 		return 0, err
 	}
