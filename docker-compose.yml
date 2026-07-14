@@ -21,11 +21,39 @@ services:
     restart: unless-stopped
     env_file:
       - .env
-    command: ["sh", "-c", "redis-server --requirepass \"$${REDIS_PASSWORD}\" --appendonly yes --appendfsync everysec"]
+    command:
+      - sh
+      - -ec
+      - |
+        if [ -f /data/appendonlydir/appendonly.aof.manifest ]; then
+          exec redis-server --requirepass "$${REDIS_PASSWORD}" --appendonly yes --appendfsync everysec
+        fi
+
+        redis-server --requirepass "$${REDIS_PASSWORD}" --appendonly no &
+        redis_pid=$$!
+        trap 'kill -TERM "$${redis_pid}" 2>/dev/null || true; wait "$${redis_pid}" || true' TERM INT EXIT
+
+        until REDISCLI_AUTH="$${REDIS_PASSWORD}" redis-cli ping >/dev/null 2>&1; do
+          kill -0 "$${redis_pid}"
+          sleep 0.1
+        done
+        REDISCLI_AUTH="$${REDIS_PASSWORD}" redis-cli CONFIG SET appendonly yes >/dev/null
+
+        until [ -f /data/appendonlydir/appendonly.aof.manifest ] &&
+          persistence="$$(REDISCLI_AUTH="$${REDIS_PASSWORD}" redis-cli INFO persistence)" &&
+          printf '%s\n' "$${persistence}" | grep -q 'aof_rewrite_in_progress:0' &&
+          printf '%s\n' "$${persistence}" | grep -q 'aof_rewrite_scheduled:0' &&
+          printf '%s\n' "$${persistence}" | grep -q 'aof_last_bgrewrite_status:ok'; do
+          kill -0 "$${redis_pid}"
+          sleep 0.1
+        done
+
+        trap - EXIT
+        wait "$${redis_pid}"
     volumes:
       - redisdata:/data
     healthcheck:
-      test: ["CMD-SHELL", "redis-cli -a \"$${REDIS_PASSWORD}\" ping"]
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$${REDIS_PASSWORD}\" redis-cli ping && REDISCLI_AUTH=\"$${REDIS_PASSWORD}\" redis-cli INFO persistence | grep -q 'aof_enabled:1'"]
       interval: 10s
       timeout: 5s
       retries: 5
