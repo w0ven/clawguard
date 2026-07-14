@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/openclaw/clawguard/internal/config"
+	"github.com/openclaw/clawguard/internal/store"
 	"go.uber.org/zap"
 	tele "gopkg.in/telebot.v3"
 )
@@ -125,15 +127,65 @@ func TestTemporaryJoinProtectionSkipsUnsafeNearExpiryDeadline(t *testing.T) {
 	}
 }
 
-func TestJoinProtectionActionSelectionProtectsPriorMembers(t *testing.T) {
-	if got := joinProtectionActionForTrustLookup(nil); got != joinProtectionActionTemporaryRestrict {
-		t.Fatalf("existing member action = %q", got)
+func TestJoinProtectionSubjectSelectionExemptsTrustedMembers(t *testing.T) {
+	trusted := joinProtectionSubjectForTrustLookup(store.UserTrust{Status: "trusted"}, nil)
+	if !trusted.Trusted || trusted.Candidate || trusted.Action != "" {
+		t.Fatalf("trusted member subject = %+v, want trusted bypass", trusted)
 	}
-	if got := joinProtectionActionForTrustLookup(errors.New("database unavailable")); got != joinProtectionActionTemporaryRestrict {
-		t.Fatalf("lookup failure action = %q", got)
+
+	untrusted := joinProtectionSubjectForTrustLookup(store.UserTrust{Status: "new"}, nil)
+	if !untrusted.Candidate || untrusted.Trusted || untrusted.Action != joinProtectionActionTemporaryRestrict {
+		t.Fatalf("untrusted prior member subject = %+v, want non-destructive candidate", untrusted)
 	}
-	if got := joinProtectionActionForTrustLookup(pgx.ErrNoRows); got != joinProtectionActionTemporaryBan {
-		t.Fatalf("first-time member action = %q", got)
+
+	firstTime := joinProtectionSubjectForTrustLookup(store.UserTrust{}, pgx.ErrNoRows)
+	if !firstTime.Candidate || firstTime.Trusted || firstTime.Action != joinProtectionActionTemporaryBan {
+		t.Fatalf("first-time member subject = %+v, want temporary-ban candidate", firstTime)
+	}
+
+	lookupFailure := joinProtectionSubjectForTrustLookup(store.UserTrust{}, errors.New("database unavailable"))
+	if lookupFailure.Candidate || lookupFailure.Trusted || lookupFailure.Action != "" {
+		t.Fatalf("lookup failure subject = %+v, want flood-action bypass", lookupFailure)
+	}
+}
+
+func TestTrustedMemberBypassesEnabledJoinProtection(t *testing.T) {
+	policy := config.DefaultPolicy
+	policy.JoinProtection.Enabled = true
+	policy.Verify.Enabled = true
+	db := newOtherBotMockDB(policy)
+	db.trust = &store.UserTrust{
+		ChatID:          -1001,
+		UserID:          77,
+		JoinedAt:        db.now.Add(-30 * 24 * time.Hour),
+		UpdatedAt:       db.now,
+		StatusChangedAt: db.now,
+		Status:          "trusted",
+		Score:           1,
+	}
+	botClient, transport := newMockTelegramBot(t, "")
+	svc := &Service{logger: zap.NewNop(), queries: store.New(db), bot: botClient, sender: botClient, sendLimiter: NewSendLimiter()}
+	before := len(transport.Methods())
+
+	err := svc.startVerification(
+		&tele.Chat{ID: -1001, Title: "group", Type: tele.ChatSuperGroup},
+		&tele.User{ID: 77, FirstName: "trusted member"},
+		nil,
+		"trusted-generation",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := len(transport.Methods()); got != before {
+		t.Fatalf("telegram calls = %d after trusted bypass, want %d", got, before)
+	}
+	if db.trust == nil || db.trust.Status != "trusted" {
+		t.Fatalf("trusted status changed after bypass: %+v", db.trust)
+	}
+	if svc.joinProtector != nil {
+		if status := svc.joinProtector.Status(-1001, time.Now()); status.RecentJoins != 0 || status.State != "normal" {
+			t.Fatalf("trusted member affected join protection state: %+v", status)
+		}
 	}
 }
 

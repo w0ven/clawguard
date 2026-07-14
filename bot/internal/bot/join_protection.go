@@ -37,6 +37,12 @@ type joinProtectionSummary struct {
 	Intercepted     int
 }
 
+type joinProtectionSubject struct {
+	Candidate bool
+	Trusted   bool
+	Action    string
+}
+
 type joinProtectionGroupState struct {
 	mu               sync.Mutex
 	joins            []time.Time
@@ -735,23 +741,29 @@ func (s *Service) restrictJoinFloodUserFallback(chat *tele.Chat, user *tele.User
 	return nil
 }
 
-func (s *Service) joinProtectionActionForUser(ctx context.Context, chatID, userID int64) string {
+func (s *Service) joinProtectionSubjectForUser(ctx context.Context, chatID, userID int64) joinProtectionSubject {
 	if s == nil || s.queries == nil {
-		return joinProtectionActionTemporaryRestrict
+		return joinProtectionSubject{}
 	}
-	_, err := s.queries.GetUserTrust(ctx, chatID, userID)
-	action := joinProtectionActionForTrustLookup(err)
+	trust, err := s.queries.GetUserTrust(ctx, chatID, userID)
+	subject := joinProtectionSubjectForTrustLookup(trust, err)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) && s.logger != nil {
-		s.logger.Warn("load prior membership before join protection action failed; using non-destructive restriction", zap.Error(err), zap.Int64("chat_id", chatID), zap.Int64("user_id", userID))
+		s.logger.Warn("load trust before join protection failed; skip flood action for member", zap.Error(err), zap.Int64("chat_id", chatID), zap.Int64("user_id", userID))
 	}
-	return action
+	return subject
 }
 
-func joinProtectionActionForTrustLookup(err error) string {
+func joinProtectionSubjectForTrustLookup(trust store.UserTrust, err error) joinProtectionSubject {
 	if errors.Is(err, pgx.ErrNoRows) {
-		return joinProtectionActionTemporaryBan
+		return joinProtectionSubject{Candidate: true, Action: joinProtectionActionTemporaryBan}
 	}
-	return joinProtectionActionTemporaryRestrict
+	if err != nil {
+		return joinProtectionSubject{}
+	}
+	if strings.EqualFold(strings.TrimSpace(trust.Status), "trusted") {
+		return joinProtectionSubject{Trusted: true}
+	}
+	return joinProtectionSubject{Candidate: true, Action: joinProtectionActionTemporaryRestrict}
 }
 
 func (s *Service) applyJoinProtectionTemporaryAction(chat *tele.Chat, user *tele.User, action string, actionUntil time.Time) error {
@@ -987,7 +999,7 @@ func (s *Service) ProcessJoinProtectionCleanupFallbacks(ctx context.Context, lim
 
 func (s *Service) notifyJoinProtectionAdmins(ctx context.Context, chat *tele.Chat, decision joinProtectionDecision, now time.Time) {
 	message := fmt.Sprintf(
-		"🛡️ <b>入群防护已触发</b>\n原因：%s\n已拦截：%d 人\n预计剩余：%s\n\n防护期间不发送验证图、不调用 CAS/Bio/AI，也不会逐人刷屏；首次出现的成员会被临时移出，已记录的老成员只会被临时禁言。",
+		"🛡️ <b>入群防护已触发</b>\n原因：%s\n已拦截：%d 人\n预计剩余：%s\n\n防护期间不发送验证图、不调用 CAS/Bio/AI，也不会逐人刷屏；可信成员会直接放行且不计入洪泛，首次出现的未信任账号会被临时移出，曾出现但尚未取得信任的账号只会被临时禁言。",
 		htmlEscape(formatJoinProtectionTrigger(decision.Trigger)),
 		decision.Intercepted,
 		htmlEscape(formatRemaining(decision.ProtectionUntil, now)),

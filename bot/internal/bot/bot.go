@@ -893,7 +893,19 @@ func (s *Service) startVerification(chat *tele.Chat, user *tele.User, joinEventM
 		s.logger.Warn("persist membership session failed", zap.Error(err), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID), zap.String("generation", membershipGeneration))
 	}
 
-	decision := s.evaluateJoinProtection(ctx, chat, policy.JoinProtection, time.Now())
+	subject := joinProtectionSubject{}
+	if policy.JoinProtection.Enabled {
+		subject = s.joinProtectionSubjectForUser(ctx, chat.ID, user.ID)
+		if subject.Trusted {
+			s.releaseVerificationJoinLock(ctx, chat.ID, user.ID)
+			s.logger.Info("trusted member bypassed join protection", zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
+			return nil
+		}
+	}
+	decision := joinProtectionDecision{}
+	if subject.Candidate {
+		decision = s.evaluateJoinProtection(ctx, chat, policy.JoinProtection, time.Now())
+	}
 	if !actionsPaused {
 		latestState, latestStateErr := s.GetSystemState(ctx)
 		if latestStateErr != nil {
@@ -904,7 +916,7 @@ func (s *Service) startVerification(chat *tele.Chat, user *tele.User, joinEventM
 		}
 	}
 	if decision.Protect {
-		action := s.joinProtectionActionForUser(ctx, chat.ID, user.ID)
+		action := subject.Action
 		s.upsertJoinSideEffects(ctx, chat, user)
 		if !actionsPaused && policy.Verify.DeleteJoinMessage && joinEventMessage != nil {
 			go s.deleteJoinEventMessageAsync(chat, user, joinEventMessage)
