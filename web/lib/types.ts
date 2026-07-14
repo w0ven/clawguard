@@ -18,6 +18,7 @@ export type GuardPolicy = {
     profile_check_mode: string;
     profile_blacklist: string[];
   };
+  join_protection: JoinProtectionPolicy;
   filter: {
     non_text_messages: string;
     keywords: {
@@ -125,6 +126,17 @@ export type GuardPolicy = {
     trust_graduated: ActionFeedback;
     admin_action: ActionFeedback;
   };
+};
+
+export type JoinProtectionPolicy = {
+  enabled: boolean;
+  join_threshold: number;
+  join_window_seconds: number;
+  protection_duration_seconds: number;
+  temporary_ban_seconds: number;
+  admin_notify_interval_seconds: number;
+  max_pending_verifications: number;
+  telegram_failure_cooldown_seconds: number;
 };
 
 export type ActionFeedback = {

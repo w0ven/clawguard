@@ -13,14 +13,15 @@ import (
 )
 
 type GuardPolicy struct {
-	Verify   VerifyPolicy         `json:"verify"`
-	Filter   FilterConfig         `json:"filter"`
-	Messages MessagesPolicy       `json:"messages"`
-	AntiSpam AntiSpamPolicy       `json:"anti_spam"`
-	Warnings WarningsConfig       `json:"warnings"`
-	Logging  LoggingConfig        `json:"logging"`
-	AI       AIPolicy             `json:"ai"`
-	Feedback ActionFeedbackPolicy `json:"feedback"`
+	Verify         VerifyPolicy         `json:"verify"`
+	JoinProtection JoinProtectionPolicy `json:"join_protection"`
+	Filter         FilterConfig         `json:"filter"`
+	Messages       MessagesPolicy       `json:"messages"`
+	AntiSpam       AntiSpamPolicy       `json:"anti_spam"`
+	Warnings       WarningsConfig       `json:"warnings"`
+	Logging        LoggingConfig        `json:"logging"`
+	AI             AIPolicy             `json:"ai"`
+	Feedback       ActionFeedbackPolicy `json:"feedback"`
 }
 
 // ActionFeedback 单个动作的群内反馈配置
@@ -263,6 +264,7 @@ var DefaultPolicy = GuardPolicy{
 			"币圈",
 		},
 	},
+	JoinProtection: DefaultJoinProtectionPolicy,
 	Filter: FilterConfig{
 		Keywords: FilterKeywordPolicy{
 			Enabled: true,
@@ -460,6 +462,7 @@ func LoadPolicy(ctx context.Context, queries *store.Queries, chatID int64) (Guar
 	}
 
 	applyVerifyDefaults(&policy.Verify)
+	applyJoinProtectionDefaults(&policy.JoinProtection)
 	applyFilterDefaults(&policy.Filter)
 	applyMessagesDefaults(&policy.Messages)
 	applyWarningsDefaults(&policy.Warnings)

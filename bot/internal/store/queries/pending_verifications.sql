@@ -29,7 +29,7 @@ SELECT id, chat_id, user_id, username, first_name, method, payload, join_message
 FROM pending_verifications
 WHERE chat_id = $1 AND user_id = $2 AND expires_at > NOW();
 
--- name: DeletePendingVerification :exec
+-- name: DeletePendingVerification :execrows
 DELETE FROM pending_verifications
 WHERE chat_id = $1 AND user_id = $2;
 
@@ -54,3 +54,8 @@ LIMIT $1;
 SELECT id, chat_id, user_id, username, first_name, method, payload, join_message_id, expires_at, created_at
 FROM pending_verifications
 ORDER BY created_at DESC;
+
+-- name: CountActivePendingVerificationsByChat :one
+SELECT COUNT(*)
+FROM pending_verifications
+WHERE chat_id = $1 AND expires_at > NOW();

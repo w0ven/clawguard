@@ -46,6 +46,8 @@ func (s *Server) registerAdminRoutes() {
 	admin.GET("/groups", s.handleListGroups)
 	admin.GET("/groups/:chat_id", s.handleGetGroup)
 	admin.PUT("/groups/:chat_id/config", s.handlePutGroupConfig)
+	admin.GET("/groups/:chat_id/join-protection", s.handleGetJoinProtection)
+	admin.PUT("/groups/:chat_id/join-protection", s.handlePutJoinProtection)
 	admin.GET("/authorized-groups", s.handleListAuthorizedGroups)
 	admin.POST("/authorized-groups", s.handleCreateAuthorizedGroup)
 	admin.PUT("/authorized-groups/:chat_id", s.handleUpdateAuthorizedGroup)
@@ -155,6 +157,13 @@ func (s *Server) handlePutGroupConfig(c echo.Context) error {
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": redact.ErrorString(err)})
 	}
+	nextConfig, err = preserveCurrentJoinProtection(group.Config, nextConfig)
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": redact.ErrorString(err)})
+	}
+	if err := validateJoinProtectionConfigDocument(nextConfig); err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": redact.ErrorString(err)})
+	}
 
 	updated, err := s.botService.Queries().UpdateGroupConfig(c.Request().Context(), store.UpdateGroupConfigParams{
 		ChatID: chatID,
@@ -164,7 +173,7 @@ func (s *Server) handlePutGroupConfig(c echo.Context) error {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "update group config failed"})
 	}
 
-	if err := s.writeAudit(c.Request().Context(), admin, "group", &chatID, "update_group_config", group.Config, nextConfig); err != nil {
+	if err := s.writeAudit(c.Request().Context(), admin, "group", &chatID, "update_group_config", group.Config, updated.Config); err != nil {
 		s.logger.Warn("write group config audit failed")
 	}
 
@@ -177,6 +186,77 @@ func (s *Server) handlePutGroupConfig(c echo.Context) error {
 	return c.JSON(http.StatusOK, map[string]any{
 		"group":         serializeGroup(updated),
 		"merged_policy": policy,
+	})
+}
+
+func (s *Server) handleGetJoinProtection(c echo.Context) error {
+	admin, _ := currentAdmin(c)
+	chatID, err := parseRequiredInt64(c.Param("chat_id"))
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid chat_id"})
+	}
+	if !adminCanAccessChat(admin, chatID) {
+		return c.JSON(http.StatusForbidden, map[string]string{"error": "group out of scope"})
+	}
+	if _, err := s.botService.Queries().GetGroupByChatID(c.Request().Context(), chatID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return c.JSON(http.StatusNotFound, map[string]string{"error": "group not found"})
+		}
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "load group failed"})
+	}
+	policy, err := config.LoadPolicy(c.Request().Context(), s.botService.Queries(), chatID)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "load join protection failed"})
+	}
+	return c.JSON(http.StatusOK, map[string]any{
+		"join_protection": policy.JoinProtection,
+		"defaults":        config.DefaultJoinProtectionPolicy,
+	})
+}
+
+func (s *Server) handlePutJoinProtection(c echo.Context) error {
+	admin, _ := currentAdmin(c)
+	chatID, err := parseRequiredInt64(c.Param("chat_id"))
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid chat_id"})
+	}
+	if !adminCanAccessChat(admin, chatID) {
+		return c.JSON(http.StatusForbidden, map[string]string{"error": "group out of scope"})
+	}
+	group, err := s.botService.Queries().GetGroupByChatID(c.Request().Context(), chatID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return c.JSON(http.StatusNotFound, map[string]string{"error": "group not found"})
+		}
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "load group failed"})
+	}
+
+	var next config.JoinProtectionPolicy
+	decoder := json.NewDecoder(c.Request().Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&next); err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid join protection config"})
+	}
+	if err := config.ValidateJoinProtectionPolicy(next); err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": redact.ErrorString(err)})
+	}
+	raw, err := json.Marshal(next)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "marshal join protection failed"})
+	}
+	updated, err := s.botService.Queries().UpdateGroupJoinProtection(c.Request().Context(), store.UpdateGroupJoinProtectionParams{
+		ChatID:         chatID,
+		JoinProtection: raw,
+	})
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "update join protection failed"})
+	}
+	if err := s.writeAudit(c.Request().Context(), admin, "group", &chatID, "update_join_protection", group.Config, updated.Config); err != nil {
+		s.logger.Warn("write join protection audit failed", zap.Error(err))
+	}
+	return c.JSON(http.StatusOK, map[string]any{
+		"join_protection": next,
+		"group":           serializeGroup(updated),
 	})
 }
 
@@ -1554,6 +1634,71 @@ func normalizeJSONBody(c echo.Context) ([]byte, error) {
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		return nil, fmt.Errorf("marshal json body")
+	}
+	return raw, nil
+}
+
+func validateJoinProtectionConfigDocument(raw []byte) error {
+	var document map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &document); err != nil {
+		return fmt.Errorf("invalid json body")
+	}
+	section, ok := document["join_protection"]
+	if !ok {
+		return nil
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(section, &fields); err != nil {
+		return fmt.Errorf("join_protection must be an object")
+	}
+	known := map[string]struct{}{
+		"enabled":                           {},
+		"join_threshold":                    {},
+		"join_window_seconds":               {},
+		"protection_duration_seconds":       {},
+		"temporary_ban_seconds":             {},
+		"admin_notify_interval_seconds":     {},
+		"max_pending_verifications":         {},
+		"telegram_failure_cooldown_seconds": {},
+	}
+	for key := range fields {
+		if _, ok := known[key]; !ok {
+			return fmt.Errorf("unknown join_protection field %s", key)
+		}
+	}
+	policy := config.DefaultJoinProtectionPolicy
+	if err := json.Unmarshal(section, &policy); err != nil {
+		return fmt.Errorf("invalid join_protection config")
+	}
+	for key, field := range fields {
+		if key == "enabled" {
+			continue
+		}
+		var value int
+		if err := json.Unmarshal(field, &value); err != nil || value <= 0 {
+			return fmt.Errorf("%s must be a positive integer", key)
+		}
+	}
+	return config.ValidateJoinProtectionPolicy(policy)
+}
+
+func preserveCurrentJoinProtection(currentRaw, nextRaw []byte) ([]byte, error) {
+	var current map[string]json.RawMessage
+	if err := json.Unmarshal(currentRaw, &current); err != nil {
+		return nil, fmt.Errorf("invalid current group config")
+	}
+	currentJoinProtection, ok := current["join_protection"]
+	if !ok {
+		return nextRaw, nil
+	}
+	var next map[string]json.RawMessage
+	if err := json.Unmarshal(nextRaw, &next); err != nil {
+		return nil, fmt.Errorf("invalid json body")
+	}
+	next["join_protection"] = currentJoinProtection
+	raw, err := json.Marshal(next)
+	if err != nil {
+		return nil, fmt.Errorf("marshal group config")
 	}
 	return raw, nil
 }
