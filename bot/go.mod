@@ -3,6 +3,7 @@ module github.com/openclaw/clawguard
 go 1.22
 
 require (
+	github.com/alicebob/miniredis/v2 v2.38.0
 	github.com/caarlos0/env/v11 v11.3.1
 	github.com/fogleman/gg v1.3.0
 	github.com/golang-jwt/jwt/v5 v5.3.0
@@ -13,6 +14,7 @@ require (
 	github.com/robfig/cron/v3 v3.0.1
 	go.uber.org/zap v1.27.0
 	golang.org/x/sync v0.10.0
+	golang.org/x/time v0.8.0
 	gopkg.in/telebot.v3 v3.3.8
 )
 
@@ -30,11 +32,11 @@ require (
 	github.com/sethvargo/go-retry v0.3.0 // indirect
 	github.com/valyala/bytebufferpool v1.0.0 // indirect
 	github.com/valyala/fasttemplate v1.2.2 // indirect
+	github.com/yuin/gopher-lua v1.1.1 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	golang.org/x/crypto v0.31.0 // indirect
 	golang.org/x/image v0.0.0-20190802002840-cff245a6509b // indirect
 	golang.org/x/net v0.33.0 // indirect
 	golang.org/x/sys v0.28.0 // indirect
 	golang.org/x/text v0.21.0 // indirect
-	golang.org/x/time v0.8.0 // indirect
 )

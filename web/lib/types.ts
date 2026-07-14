@@ -139,6 +139,26 @@ export type JoinProtectionPolicy = {
   telegram_failure_cooldown_seconds: number;
 };
 
+export type JoinProtectionRuntimeStatus = {
+  state: "disabled" | "normal" | "protecting" | "cleanup_cooldown";
+  source: "redis" | "memory";
+  degraded: boolean;
+  protection_until?: string;
+  trigger?: string;
+  intercepted: number;
+  recent_joins: number;
+  pending_verifications: number;
+  last_notification_at?: string;
+  last_entered_at?: string;
+  last_recovered_at?: string;
+  last_intercepted: number;
+  cleanup_cooldown_until?: string;
+  cleanup_failures: number;
+  last_cleanup_error?: string;
+  last_cleanup_error_at?: string;
+  deferred_cleanup_task_count: number;
+};
+
 export type ActionFeedback = {
   enabled: boolean;
   template: string;

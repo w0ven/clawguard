@@ -21,7 +21,7 @@ services:
     restart: unless-stopped
     env_file:
       - .env
-    command: ["sh", "-c", "redis-server --requirepass \"$${REDIS_PASSWORD}\""]
+    command: ["sh", "-c", "redis-server --requirepass \"$${REDIS_PASSWORD}\" --appendonly yes --appendfsync everysec"]
     volumes:
       - redisdata:/data
     healthcheck:

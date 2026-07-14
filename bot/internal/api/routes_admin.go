@@ -208,9 +208,11 @@ func (s *Server) handleGetJoinProtection(c echo.Context) error {
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "load join protection failed"})
 	}
+	status := s.botService.JoinProtectionStatus(c.Request().Context(), chatID, policy.JoinProtection.Enabled)
 	return c.JSON(http.StatusOK, map[string]any{
 		"join_protection": policy.JoinProtection,
 		"defaults":        config.DefaultJoinProtectionPolicy,
+		"status":          status,
 	})
 }
 
@@ -251,12 +253,18 @@ func (s *Server) handlePutJoinProtection(c echo.Context) error {
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "update join protection failed"})
 	}
+	if !next.Enabled {
+		if err := s.botService.ClearJoinProtectionState(c.Request().Context(), chatID); err != nil {
+			s.logger.Warn("clear disabled join protection runtime state failed", zap.Error(err), zap.Int64("chat_id", chatID))
+		}
+	}
 	if err := s.writeAudit(c.Request().Context(), admin, "group", &chatID, "update_join_protection", group.Config, updated.Config); err != nil {
 		s.logger.Warn("write join protection audit failed", zap.Error(err))
 	}
 	return c.JSON(http.StatusOK, map[string]any{
 		"join_protection": next,
 		"group":           serializeGroup(updated),
+		"status":          s.botService.JoinProtectionStatus(c.Request().Context(), chatID, next.Enabled),
 	})
 }
 

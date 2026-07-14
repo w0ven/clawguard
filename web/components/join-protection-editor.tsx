@@ -3,6 +3,8 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   ArrowRight,
+  Activity,
+  AlertTriangle,
   Ban,
   Bell,
   CheckCircle2,
@@ -11,15 +13,17 @@ import {
   RotateCcw,
   Save,
   ShieldAlert,
+  ShieldCheck,
   Users,
 } from "lucide-react";
 import { apiFetch } from "@/lib/api";
-import type { JoinProtectionPolicy } from "@/lib/types";
+import type { JoinProtectionPolicy, JoinProtectionRuntimeStatus } from "@/lib/types";
 import { useToast } from "@/components/providers";
 import { Button } from "@/components/ui/button";
 import { Card, CardBody, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
+import { Badge } from "@/components/ui/badge";
 
 type Props = {
   chatId: number;
@@ -100,6 +104,7 @@ export function JoinProtectionEditor({ chatId }: Props) {
   const [initial, setInitial] = useState<JoinProtectionPolicy | null>(null);
   const [draft, setDraft] = useState<JoinProtectionPolicy | null>(null);
   const [defaults, setDefaults] = useState<JoinProtectionPolicy | null>(null);
+  const [runtimeStatus, setRuntimeStatus] = useState<JoinProtectionRuntimeStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -112,12 +117,14 @@ export function JoinProtectionEditor({ chatId }: Props) {
     apiFetch<{
       join_protection: JoinProtectionPolicy;
       defaults: JoinProtectionPolicy;
+      status: JoinProtectionRuntimeStatus;
     }>(`/api/admin/groups/${chatId}/join-protection`)
       .then((payload) => {
         if (!alive) return;
         setInitial(payload.join_protection);
         setDraft(payload.join_protection);
         setDefaults(payload.defaults);
+        setRuntimeStatus(payload.status);
       })
       .catch((loadError) => {
         if (!alive) return;
@@ -128,6 +135,21 @@ export function JoinProtectionEditor({ chatId }: Props) {
       });
     return () => {
       alive = false;
+    };
+  }, [chatId]);
+
+  useEffect(() => {
+    let alive = true;
+    const timer = window.setInterval(() => {
+      apiFetch<{ status: JoinProtectionRuntimeStatus }>(`/api/admin/groups/${chatId}/join-protection`)
+        .then((payload) => {
+          if (alive) setRuntimeStatus(payload.status);
+        })
+        .catch(() => undefined);
+    }, 10_000);
+    return () => {
+      alive = false;
+      window.clearInterval(timer);
     };
   }, [chatId]);
 
@@ -170,12 +192,13 @@ export function JoinProtectionEditor({ chatId }: Props) {
     setSaving(true);
     setError(null);
     try {
-      const payload = await apiFetch<{ join_protection: JoinProtectionPolicy }>(
+      const payload = await apiFetch<{ join_protection: JoinProtectionPolicy; status: JoinProtectionRuntimeStatus }>(
         `/api/admin/groups/${chatId}/join-protection`,
         { method: "PUT", body: JSON.stringify(draft) },
       );
       setInitial(payload.join_protection);
       setDraft(payload.join_protection);
+      setRuntimeStatus(payload.status);
       pushToast("入群防护配置已保存", "success");
     } catch (saveError) {
       const message = saveError instanceof Error ? saveError.message : "保存失败";
@@ -219,6 +242,8 @@ export function JoinProtectionEditor({ chatId }: Props) {
           </div>
         </CardBody>
       </Card>
+
+      {runtimeStatus && <JoinProtectionStatusCard status={runtimeStatus} />}
 
       <Card>
         <CardHeader><CardTitle>自动处理流程</CardTitle></CardHeader>
@@ -282,6 +307,70 @@ export function JoinProtectionEditor({ chatId }: Props) {
         <Button className="w-full sm:w-auto" size="lg" disabled={!dirty || saving || Boolean(validationError)} onClick={save}><Save className="h-4 w-4" />{saving ? "保存中…" : dirty ? "保存配置" : "已保存"}</Button>
       </div>
     </div>
+  );
+}
+
+const runtimeStateLabels: Record<JoinProtectionRuntimeStatus["state"], string> = {
+  disabled: "已关闭",
+  normal: "运行正常",
+  protecting: "防护中",
+  cleanup_cooldown: "清理冷却中",
+};
+
+function formatRuntimeTime(value?: string) {
+  if (!value) return "-";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "-" : date.toLocaleString("zh-CN", { hour12: false });
+}
+
+function JoinProtectionStatusCard({ status }: { status: JoinProtectionRuntimeStatus }) {
+  const tone = status.state === "protecting" ? "warning" : status.state === "cleanup_cooldown" ? "danger" : status.state === "normal" ? "success" : "default";
+  const stateIcon = status.state === "protecting" || status.state === "cleanup_cooldown" ? ShieldAlert : ShieldCheck;
+  const StateIcon = stateIcon;
+  const triggerLabel = status.trigger === "join_threshold" ? "入群人数阈值" : status.trigger === "pending_limit" ? "待验证人数上限" : "-";
+  const metrics = [
+    [Users, "窗口内入群", String(status.recent_joins)],
+    [Activity, "待验证", String(status.pending_verifications)],
+    [Ban, "本轮已拦截", String(status.intercepted)],
+    [Clock3, "防护结束", formatRuntimeTime(status.protection_until)],
+  ] as const;
+
+  return (
+    <Card>
+      <CardHeader>
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <CardTitle>实时运行状态</CardTitle>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <Badge tone={tone}><StateIcon className="mr-1 h-3.5 w-3.5" />{runtimeStateLabels[status.state]}</Badge>
+            {status.degraded && <Badge tone="warning">内存降级</Badge>}
+          </div>
+        </div>
+      </CardHeader>
+      <CardBody className="space-y-4">
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          {metrics.map(([Icon, label, value]) => (
+            <div key={label} className="min-w-0 rounded-lg border border-[var(--border)] p-4">
+              <span className="flex items-center gap-2 text-xs text-[var(--text-muted)]"><Icon className="h-4 w-4" />{label}</span>
+              <p className="mt-2 break-words text-sm font-medium text-[var(--text)]">{value}</p>
+            </div>
+          ))}
+        </div>
+        <div className="grid gap-x-8 gap-y-2 border-t border-[var(--border)] pt-4 text-xs text-[var(--text-muted)] sm:grid-cols-2">
+          <p>本轮触发原因：<span className="text-[var(--text)]">{triggerLabel}</span></p>
+          <p>最近恢复：<span className="text-[var(--text)]">{formatRuntimeTime(status.last_recovered_at)}</span></p>
+          <p>上轮拦截：<span className="text-[var(--text)]">{status.last_intercepted}</span></p>
+          <p>Redis 兜底任务：<span className="text-[var(--text)]">{status.deferred_cleanup_task_count}</span></p>
+        </div>
+        {status.last_cleanup_error && (
+          <div className="flex gap-3 rounded-lg border border-[var(--warning)]/30 bg-[var(--warning-soft)] p-4 text-xs text-[var(--warning)]">
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+            <p className="min-w-0 break-words">最近 Telegram 清理错误：{status.last_cleanup_error}（{formatRuntimeTime(status.last_cleanup_error_at)}）</p>
+          </div>
+        )}
+      </CardBody>
+    </Card>
   );
 }
 
