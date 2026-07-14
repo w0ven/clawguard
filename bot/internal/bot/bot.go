@@ -827,7 +827,32 @@ func (s *Service) startVerification(chat *tele.Chat, user *tele.User, joinEventM
 		}
 	}
 
-	if !policy.Verify.Enabled && !policy.JoinProtection.Enabled {
+	decision := s.evaluateJoinProtection(ctx, chat, policy.JoinProtection, time.Now())
+	if decision.Protect {
+		s.upsertJoinSideEffects(ctx, chat, user)
+		if policy.Verify.DeleteJoinMessage && joinEventMessage != nil {
+			go s.deleteJoinEventMessageAsync(chat, user, joinEventMessage)
+		}
+		if err := s.handleJoinProtectionBan(ctx, chat, user, policy.JoinProtection); err != nil {
+			s.logger.Error("handle join protection temporary ban failed", zap.Error(err), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
+		}
+		if decision.Notify {
+			s.notifyJoinProtectionAdmins(ctx, chat, decision, time.Now())
+		}
+		if decision.Entered {
+			s.logger.Warn(
+				"join protection entered",
+				zap.String("event", "join_protection_entered"),
+				zap.Int64("chat_id", chat.ID),
+				zap.String("trigger", decision.Trigger),
+				zap.Time("protection_until", decision.ProtectionUntil),
+			)
+		}
+		s.scheduleJoinProtectionRecovery(chat, decision)
+		return nil
+	}
+
+	if !policy.Verify.Enabled {
 		trust, trustOK := s.upsertJoinSideEffects(ctx, chat, user)
 		s.logger.Info("verification disabled by policy, skip flow", zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
 		if trustOK {
@@ -853,44 +878,6 @@ func (s *Service) startVerification(chat *tele.Chat, user *tele.User, joinEventM
 		zap.String("step", "restrict"),
 		zap.Duration("elapsed", time.Since(restrictStartedAt)),
 	)
-
-	s.ensureRuntimeGuards()
-	databasePending, countErr := s.queries.CountActivePendingVerificationsByChat(ctx, chat.ID)
-	if countErr != nil {
-		s.logger.Warn("count active pending verifications failed, enter protection fail-safe", zap.Error(countErr), zap.Int64("chat_id", chat.ID))
-		databasePending = int64(policy.JoinProtection.MaxPendingVerifications)
-	}
-	decision := s.joinProtector.ObserveJoin(chat.ID, policy.JoinProtection, int(databasePending), time.Now())
-	if decision.Protect {
-		s.upsertJoinSideEffects(ctx, chat, user)
-		if policy.Verify.DeleteJoinMessage && joinEventMessage != nil {
-			go s.deleteJoinEventMessageAsync(chat, user, joinEventMessage)
-		}
-		if err := s.handleJoinProtectionBan(ctx, chat, user, policy.JoinProtection); err != nil {
-			s.logger.Error("handle join protection temporary ban failed; member remains restricted and cleanup remains fail-closed", zap.Error(err), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
-		}
-		if decision.Notify {
-			s.notifyJoinProtectionAdmins(ctx, chat, decision, time.Now())
-		}
-		if decision.Entered {
-			expectedUntil := decision.ProtectionUntil
-			s.runDelayed(time.Until(expectedUntil), func() {
-				if summary, ok := s.joinProtector.FinishProtection(chat.ID, expectedUntil, time.Now()); ok {
-					s.notifyJoinProtectionRecovery(context.Background(), chat, summary)
-				}
-			})
-		}
-		return nil
-	}
-
-	if !policy.Verify.Enabled {
-		s.upsertJoinSideEffects(ctx, chat, user)
-		if err := s.applyVerificationPassPermissions(ctx, chat, user, policy); err != nil {
-			s.logger.Error("restore permissions for join without verification failed", zap.Error(err), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
-		}
-		s.joinProtector.ReleasePending(chat.ID)
-		return nil
-	}
 
 	s.upsertJoinSideEffects(ctx, chat, user)
 
@@ -1731,8 +1718,11 @@ func (s *Service) HandleVerificationExpiry(ctx context.Context, pending store.Pe
 		Username:  derefString(pending.Username),
 		FirstName: derefString(pending.FirstName),
 	}
+	if pending.Method == "join_protection_cleanup" {
+		return s.handleJoinProtectionCleanupExpiry(ctx, pending, policy, chat, user)
+	}
 	s.ensureRuntimeGuards()
-	allowed, _ := s.cleanupBreaker.Allow(pending.ChatID, time.Now())
+	allowed, _ := s.allowTelegramCleanup(ctx, pending.ChatID, time.Now())
 	if !allowed {
 		return nil
 	}
@@ -1746,7 +1736,7 @@ func (s *Service) HandleVerificationExpiry(ctx context.Context, pending store.Pe
 			return nil
 		}
 	}
-	s.cleanupBreaker.Success(pending.ChatID)
+	s.markTelegramCleanupSuccess(ctx, pending.ChatID)
 
 	s.deleteVerificationMessage(chat, pending.JoinMessageID)
 
@@ -1764,27 +1754,21 @@ func (s *Service) HandleVerificationExpiry(ctx context.Context, pending store.Pe
 		s.joinProtector.ReleasePending(pending.ChatID)
 	}
 
-	rule := "verify_timeout"
-	if pending.Method == "join_protection_cleanup" {
-		rule = "join_protection_temporary_ban_failed_cleanup"
-	}
 	if _, err := s.queries.InsertViolation(ctx, store.InsertViolationParams{
 		ChatID:   pending.ChatID,
 		UserID:   pending.UserID,
 		Username: pending.Username,
-		Rule:     rule,
+		Rule:     "verify_timeout",
 		Action:   action,
 	}); err != nil {
 		return fmt.Errorf("insert verification timeout violation: %w", err)
 	}
 
-	if pending.Method != "join_protection_cleanup" {
-		s.sendActionFeedback(chat, nil, policy.Feedback.VerifyFail, map[string]string{
-			"user":         feedbackUserLabel(user, policy.Feedback.VerifyFail.ParseMode),
-			"user_mention": feedbackUserMention(user, policy.Feedback.VerifyFail.ParseMode),
-			"reason":       "验证超时",
-		})
-	}
+	s.sendActionFeedback(chat, nil, policy.Feedback.VerifyFail, map[string]string{
+		"user":         feedbackUserLabel(user, policy.Feedback.VerifyFail.ParseMode),
+		"user_mention": feedbackUserMention(user, policy.Feedback.VerifyFail.ParseMode),
+		"reason":       "验证超时",
+	})
 
 	s.logger.Info(
 		"expired verification handled",

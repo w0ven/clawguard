@@ -122,6 +122,8 @@ func main() {
 
 	expiryWorker := worker.NewVerificationExpiry(logger, queries, botService)
 	go expiryWorker.Run(workerCtx)
+	joinProtectionRecoveryWorker := worker.NewJoinProtectionRecovery(logger, botService)
+	go joinProtectionRecoveryWorker.Run(workerCtx)
 	healthcheckWorker := worker.NewHealthcheck(logger, queries, botService)
 	go healthcheckWorker.Run(workerCtx)
 	llmProberNotifier := &worker.OwnerNotifier{Bot: botService, Queries: queries, Logger: logger}

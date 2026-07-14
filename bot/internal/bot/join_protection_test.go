@@ -203,6 +203,7 @@ func TestPromptSendFailureRemainsOnCleanupPath(t *testing.T) {
 func TestJoinProtectionBanFailurePersistsAndOpensCooldown(t *testing.T) {
 	telegramErr := errors.New("telegram unavailable")
 	var temporaryBanCalls atomic.Int64
+	var fallbackRestrictCalls atomic.Int64
 	var persistedReason string
 	var failed atomic.Bool
 	err := runJoinProtectionBan(joinProtectionBanOps{
@@ -211,6 +212,10 @@ func TestJoinProtectionBanFailurePersistsAndOpensCooldown(t *testing.T) {
 			temporaryBanCalls.Add(1)
 			return telegramErr
 		},
+		fallbackRestrict: func() error {
+			fallbackRestrictCalls.Add(1)
+			return nil
+		},
 		persistCleanup: func(reason string) error {
 			persistedReason = reason
 			return nil
@@ -218,8 +223,8 @@ func TestJoinProtectionBanFailurePersistsAndOpensCooldown(t *testing.T) {
 		success: func() { t.Fatal("failed ban marked successful") },
 		fail:    func(error) { failed.Store(true) },
 	})
-	if !errors.Is(err, telegramErr) || temporaryBanCalls.Load() != 1 || persistedReason != "join_protection_temporary_ban_failed" || !failed.Load() {
-		t.Fatalf("err=%v calls=%d reason=%q failed=%t", err, temporaryBanCalls.Load(), persistedReason, failed.Load())
+	if !errors.Is(err, telegramErr) || temporaryBanCalls.Load() != 1 || fallbackRestrictCalls.Load() != 1 || persistedReason != "join_protection_temporary_ban_failed" || !failed.Load() {
+		t.Fatalf("err=%v ban_calls=%d restrict_calls=%d reason=%q failed=%t", err, temporaryBanCalls.Load(), fallbackRestrictCalls.Load(), persistedReason, failed.Load())
 	}
 }
 
@@ -243,11 +248,16 @@ func TestJoinProtectionBanTerminalErrorDoesNotPersist(t *testing.T) {
 
 func TestJoinProtectionBanCooldownDefersWithoutTelegramRetry(t *testing.T) {
 	var temporaryBanCalls atomic.Int64
+	var fallbackRestrictCalls atomic.Int64
 	var persistedReason string
 	err := runJoinProtectionBan(joinProtectionBanOps{
 		allow: func() bool { return false },
 		temporaryBan: func() error {
 			temporaryBanCalls.Add(1)
+			return nil
+		},
+		fallbackRestrict: func() error {
+			fallbackRestrictCalls.Add(1)
 			return nil
 		},
 		persistCleanup: func(reason string) error {
@@ -257,8 +267,8 @@ func TestJoinProtectionBanCooldownDefersWithoutTelegramRetry(t *testing.T) {
 		success: func() { t.Fatal("deferred ban marked successful") },
 		fail:    func(error) { t.Fatal("existing cooldown reopened") },
 	})
-	if err != nil || temporaryBanCalls.Load() != 0 || persistedReason != "join_protection_cleanup_deferred_during_cooldown" {
-		t.Fatalf("err=%v calls=%d reason=%q", err, temporaryBanCalls.Load(), persistedReason)
+	if err != nil || temporaryBanCalls.Load() != 0 || fallbackRestrictCalls.Load() != 1 || persistedReason != "join_protection_cleanup_deferred_during_cooldown" {
+		t.Fatalf("err=%v ban_calls=%d restrict_calls=%d reason=%q", err, temporaryBanCalls.Load(), fallbackRestrictCalls.Load(), persistedReason)
 	}
 }
 
