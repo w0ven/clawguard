@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
+	tele "gopkg.in/telebot.v3"
 
 	"github.com/openclaw/clawguard/internal/config"
 )
@@ -16,7 +17,9 @@ import (
 const (
 	joinProtectionActiveKey       = "clawguard:join-protection:active"
 	joinProtectionCleanupQueueKey = "clawguard:join-protection:cleanup-queue"
+	joinProtectionCleanupDeadKey  = "clawguard:join-protection:cleanup-dead"
 	joinProtectionStateTTL        = 7 * 24 * time.Hour
+	membershipSessionTTL          = 30 * 24 * time.Hour
 )
 
 var joinProtectionEventSequence atomic.Uint64
@@ -210,12 +213,17 @@ redis.call('HSET', KEYS[1],
     'reason', ARGV[6],
     'action', ARGV[7],
     'rule', ARGV[8],
-    'created_at_ms', ARGV[9])
+    'created_at_ms', ARGV[9],
+    'action_until_ms', ARGV[10],
+    'membership_generation', ARGV[11])
 redis.call('HINCRBY', KEYS[1], 'enqueue_count', 1)
-redis.call('PEXPIRE', KEYS[1], ARGV[10])
-redis.call('ZADD', KEYS[2], ARGV[9], ARGV[11])
-redis.call('SADD', KEYS[3], ARGV[11])
-redis.call('PEXPIRE', KEYS[3], ARGV[10])
+redis.call('PERSIST', KEYS[1])
+redis.call('ZADD', KEYS[2], ARGV[9], ARGV[12])
+redis.call('SADD', KEYS[3], ARGV[12])
+redis.call('PERSIST', KEYS[3])
+if ARGV[11] ~= '' and not redis.call('GET', KEYS[4]) then
+    redis.call('PSETEX', KEYS[4], ARGV[13], ARGV[11])
+end
 return 1
 `)
 
@@ -226,6 +234,21 @@ if #members == 0 then
 end
 redis.call('ZADD', KEYS[1], ARGV[2], members[1])
 return members[1]
+`)
+
+var cancelJoinProtectionCleanupScript = redis.NewScript(`
+local members = redis.call('SMEMBERS', KEYS[1])
+local removed = 0
+for _, member in ipairs(members) do
+    if member == ARGV[1] or string.sub(member, 1, string.len(ARGV[2])) == ARGV[2] then
+        redis.call('DEL', ARGV[3] .. member)
+        redis.call('ZREM', KEYS[2], member)
+        redis.call('SREM', KEYS[1], member)
+        removed = removed + 1
+    end
+end
+redis.call('DEL', KEYS[3])
+return removed
 `)
 
 type joinProtectionRedisObservation struct {
@@ -256,16 +279,18 @@ type JoinProtectionRuntimeStatus struct {
 }
 
 type joinProtectionDeferredCleanup struct {
-	Member              string
-	ChatID              int64
-	UserID              int64
-	Username            string
-	FirstName           string
-	TemporaryBanSeconds int
-	Reason              string
-	Action              string
-	Rule                string
-	CreatedAt           time.Time
+	Member               string
+	ChatID               int64
+	UserID               int64
+	Username             string
+	FirstName            string
+	TemporaryBanSeconds  int
+	ActionUntil          time.Time
+	Reason               string
+	Action               string
+	Rule                 string
+	MembershipGeneration string
+	CreatedAt            time.Time
 }
 
 func joinProtectionStateKey(chatID int64) string {
@@ -286,6 +311,57 @@ func joinProtectionCleanupGroupKey(chatID int64) string {
 
 func joinProtectionCleanupTaskKey(member string) string {
 	return "clawguard:join-protection:cleanup-task:" + member
+}
+
+func membershipSessionMapKey(chatID, userID int64) string {
+	return fmt.Sprintf("%d:%d", chatID, userID)
+}
+
+func membershipSessionKey(chatID, userID int64) string {
+	return "clawguard:membership-session:" + membershipSessionMapKey(chatID, userID)
+}
+
+func membershipGenerationForUpdate(updateID int, update *tele.ChatMemberUpdate) string {
+	if updateID > 0 {
+		return "u" + strconv.Itoa(updateID)
+	}
+	timestamp := int64(0)
+	if update != nil {
+		timestamp = update.Unixtime
+	}
+	return fmt.Sprintf("t%d-%d", timestamp, joinProtectionEventSequence.Add(1))
+}
+
+func (s *Service) rememberMembershipSession(ctx context.Context, chatID, userID int64, generation string) error {
+	if s == nil || chatID == 0 || userID == 0 || strings.TrimSpace(generation) == "" {
+		return nil
+	}
+	s.membershipSessions.Store(membershipSessionMapKey(chatID, userID), generation)
+	if s.redis == nil {
+		return nil
+	}
+	return s.redis.Set(ctx, membershipSessionKey(chatID, userID), generation, membershipSessionTTL).Err()
+}
+
+func (s *Service) membershipSessionCurrent(ctx context.Context, chatID, userID int64, generation string) (bool, error) {
+	if strings.TrimSpace(generation) == "" {
+		return true, nil
+	}
+	if s != nil && s.redis != nil {
+		current, err := s.redis.Get(ctx, membershipSessionKey(chatID, userID)).Result()
+		if err == nil {
+			return current == generation, nil
+		}
+		if err != redis.Nil {
+			return false, err
+		}
+		return false, nil
+	}
+	if s == nil {
+		return false, nil
+	}
+	current, ok := s.membershipSessions.Load(membershipSessionMapKey(chatID, userID))
+	return ok && current == generation, nil
 }
 
 func observeJoinProtectionRedis(
@@ -533,6 +609,9 @@ func markTelegramCleanupFailureRedis(
 
 func enqueueJoinProtectionCleanupRedis(ctx context.Context, rdb redis.Cmdable, task joinProtectionDeferredCleanup, now time.Time) error {
 	member := fmt.Sprintf("%d:%d", task.ChatID, task.UserID)
+	if generation := strings.TrimSpace(task.MembershipGeneration); generation != "" {
+		member += ":" + generation
+	}
 	action := strings.TrimSpace(task.Action)
 	if action == "" {
 		action = "temporary_ban"
@@ -541,6 +620,10 @@ func enqueueJoinProtectionCleanupRedis(ctx context.Context, rdb redis.Cmdable, t
 	if rule == "" {
 		rule = "join_protection_redis_fallback_cleanup"
 	}
+	actionUntilMillis := int64(0)
+	if !task.ActionUntil.IsZero() {
+		actionUntilMillis = task.ActionUntil.UnixMilli()
+	}
 	_, err := enqueueJoinProtectionCleanupScript.Run(
 		ctx,
 		rdb,
@@ -548,6 +631,7 @@ func enqueueJoinProtectionCleanupRedis(ctx context.Context, rdb redis.Cmdable, t
 			joinProtectionCleanupTaskKey(member),
 			joinProtectionCleanupQueueKey,
 			joinProtectionCleanupGroupKey(task.ChatID),
+			membershipSessionKey(task.ChatID, task.UserID),
 		},
 		task.ChatID,
 		task.UserID,
@@ -558,8 +642,10 @@ func enqueueJoinProtectionCleanupRedis(ctx context.Context, rdb redis.Cmdable, t
 		action,
 		rule,
 		now.UnixMilli(),
-		joinProtectionStateTTL.Milliseconds(),
+		actionUntilMillis,
+		task.MembershipGeneration,
 		member,
+		membershipSessionTTL.Milliseconds(),
 	).Result()
 	return err
 }
@@ -583,43 +669,63 @@ func claimDueJoinProtectionCleanupRedis(ctx context.Context, rdb redis.Cmdable, 
 		return joinProtectionDeferredCleanup{}, false, loadErr
 	}
 	if len(values) == 0 {
-		parts := strings.SplitN(member, ":", 2)
-		if len(parts) == 2 {
-			chatID, _ := strconv.ParseInt(parts[0], 10, 64)
-			_ = removeJoinProtectionCleanupRedis(ctx, rdb, member, chatID)
+		chatID, _ := cleanupTaskMemberIDs(member)
+		_ = rdb.ZRem(ctx, joinProtectionCleanupQueueKey, member).Err()
+		if chatID != 0 {
+			_ = rdb.SRem(ctx, joinProtectionCleanupGroupKey(chatID), member).Err()
 		}
-		return joinProtectionDeferredCleanup{}, false, nil
+		_ = rdb.ZAdd(ctx, joinProtectionCleanupDeadKey, redis.Z{Score: float64(now.UnixMilli()), Member: member}).Err()
+		return joinProtectionDeferredCleanup{}, false, fmt.Errorf("join protection cleanup task %q is missing its payload and was moved to dead letter", member)
 	}
 	createdAtMillis, _ := strconv.ParseInt(values["created_at_ms"], 10, 64)
 	chatID, _ := strconv.ParseInt(values["chat_id"], 10, 64)
 	userID, _ := strconv.ParseInt(values["user_id"], 10, 64)
 	seconds, _ := strconv.Atoi(values["temporary_ban_seconds"])
+	actionUntilMillis, _ := strconv.ParseInt(values["action_until_ms"], 10, 64)
 	action := strings.TrimSpace(values["action"])
 	if action == "" {
 		action = "temporary_ban"
 	}
-	if chatID == 0 || userID == 0 || !validDeferredCleanupAction(action, seconds) {
-		_ = removeJoinProtectionCleanupRedis(ctx, rdb, member, chatID)
-		return joinProtectionDeferredCleanup{}, false, nil
+	createdAt := time.UnixMilli(createdAtMillis)
+	actionUntil := time.Time{}
+	if actionUntilMillis > 0 {
+		actionUntil = time.UnixMilli(actionUntilMillis)
+	} else if action == joinProtectionActionTemporaryBan || action == joinProtectionActionTemporaryRestrict {
+		actionUntil = createdAt.Add(time.Duration(seconds) * time.Second)
 	}
+	if chatID == 0 || userID == 0 || !validDeferredCleanupAction(action, seconds, actionUntil) {
+		_ = rdb.ZRem(ctx, joinProtectionCleanupQueueKey, member).Err()
+		if chatID != 0 {
+			_ = rdb.SRem(ctx, joinProtectionCleanupGroupKey(chatID), member).Err()
+		}
+		_ = rdb.ZAdd(ctx, joinProtectionCleanupDeadKey, redis.Z{Score: float64(now.UnixMilli()), Member: member}).Err()
+		return joinProtectionDeferredCleanup{}, false, fmt.Errorf("join protection cleanup task %q is invalid and was moved to dead letter", member)
+	}
+	_, _ = rdb.Pipelined(ctx, func(pipe redis.Pipeliner) error {
+		pipe.Persist(ctx, joinProtectionCleanupTaskKey(member))
+		pipe.Persist(ctx, joinProtectionCleanupGroupKey(chatID))
+		return nil
+	})
 	return joinProtectionDeferredCleanup{
-		Member:              member,
-		ChatID:              chatID,
-		UserID:              userID,
-		Username:            values["username"],
-		FirstName:           values["first_name"],
-		TemporaryBanSeconds: seconds,
-		Reason:              values["reason"],
-		Action:              action,
-		Rule:                values["rule"],
-		CreatedAt:           time.UnixMilli(createdAtMillis),
+		Member:               member,
+		ChatID:               chatID,
+		UserID:               userID,
+		Username:             values["username"],
+		FirstName:            values["first_name"],
+		TemporaryBanSeconds:  seconds,
+		ActionUntil:          actionUntil,
+		Reason:               values["reason"],
+		Action:               action,
+		Rule:                 values["rule"],
+		MembershipGeneration: values["membership_generation"],
+		CreatedAt:            createdAt,
 	}, true, nil
 }
 
-func validDeferredCleanupAction(action string, temporaryBanSeconds int) bool {
+func validDeferredCleanupAction(action string, temporaryBanSeconds int, actionUntil time.Time) bool {
 	switch action {
-	case "temporary_ban":
-		return temporaryBanSeconds > 0
+	case joinProtectionActionTemporaryBan, joinProtectionActionTemporaryRestrict:
+		return temporaryBanSeconds > 0 && !actionUntil.IsZero()
 	case "kick", "ban", "mute_permanent":
 		return true
 	default:
@@ -628,7 +734,16 @@ func validDeferredCleanupAction(action string, temporaryBanSeconds int) bool {
 }
 
 func rescheduleJoinProtectionCleanupRedis(ctx context.Context, rdb redis.Cmdable, member string, retryAt time.Time) error {
-	return rdb.ZAdd(ctx, joinProtectionCleanupQueueKey, redis.Z{Score: float64(retryAt.UnixMilli()), Member: member}).Err()
+	chatID, _ := cleanupTaskMemberIDs(member)
+	_, err := rdb.Pipelined(ctx, func(pipe redis.Pipeliner) error {
+		pipe.ZAdd(ctx, joinProtectionCleanupQueueKey, redis.Z{Score: float64(retryAt.UnixMilli()), Member: member})
+		pipe.Persist(ctx, joinProtectionCleanupTaskKey(member))
+		if chatID != 0 {
+			pipe.Persist(ctx, joinProtectionCleanupGroupKey(chatID))
+		}
+		return nil
+	})
+	return err
 }
 
 func removeJoinProtectionCleanupRedis(ctx context.Context, rdb redis.Cmdable, member string, chatID int64) error {
@@ -641,6 +756,28 @@ func removeJoinProtectionCleanupRedis(ctx context.Context, rdb redis.Cmdable, me
 		return nil
 	})
 	return err
+}
+
+func cancelJoinProtectionCleanupRedis(ctx context.Context, rdb redis.Cmdable, chatID, userID int64) error {
+	base := fmt.Sprintf("%d:%d", chatID, userID)
+	return cancelJoinProtectionCleanupScript.Run(
+		ctx,
+		rdb,
+		[]string{joinProtectionCleanupGroupKey(chatID), joinProtectionCleanupQueueKey, membershipSessionKey(chatID, userID)},
+		base,
+		base+":",
+		"clawguard:join-protection:cleanup-task:",
+	).Err()
+}
+
+func cleanupTaskMemberIDs(member string) (int64, int64) {
+	parts := strings.Split(member, ":")
+	if len(parts) < 2 {
+		return 0, 0
+	}
+	chatID, _ := strconv.ParseInt(parts[0], 10, 64)
+	userID, _ := strconv.ParseInt(parts[1], 10, 64)
+	return chatID, userID
 }
 
 func redisResultInt64(value any) int64 {

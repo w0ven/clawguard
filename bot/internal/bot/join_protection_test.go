@@ -233,9 +233,9 @@ func TestJoinProtectionBanFailurePersistsAndOpensCooldown(t *testing.T) {
 	var fallbackRestrictCalls atomic.Int64
 	var persistedReason string
 	var failed atomic.Bool
-	err := runJoinProtectionBan(joinProtectionBanOps{
+	err := runJoinProtectionAction(joinProtectionActionOps{
 		allow: func() bool { return true },
-		temporaryBan: func() error {
+		applyAction: func() error {
 			temporaryBanCalls.Add(1)
 			return telegramErr
 		},
@@ -247,10 +247,11 @@ func TestJoinProtectionBanFailurePersistsAndOpensCooldown(t *testing.T) {
 			persistedReason = reason
 			return nil
 		},
-		success: func() { t.Fatal("failed ban marked successful") },
-		fail:    func(error) { failed.Store(true) },
+		success:       func() { t.Fatal("failed ban marked successful") },
+		fail:          func(error) { failed.Store(true) },
+		failureReason: "join_protection_temporary_ban_failed",
 	})
-	if !errors.Is(err, telegramErr) || temporaryBanCalls.Load() != 1 || fallbackRestrictCalls.Load() != 1 || persistedReason != "join_protection_temporary_ban_failed" || !failed.Load() {
+	if err != nil || temporaryBanCalls.Load() != 1 || fallbackRestrictCalls.Load() != 1 || persistedReason != "join_protection_temporary_ban_failed" || !failed.Load() {
 		t.Fatalf("err=%v ban_calls=%d restrict_calls=%d reason=%q failed=%t", err, temporaryBanCalls.Load(), fallbackRestrictCalls.Load(), persistedReason, failed.Load())
 	}
 }
@@ -258,9 +259,9 @@ func TestJoinProtectionBanFailurePersistsAndOpensCooldown(t *testing.T) {
 func TestJoinProtectionBanTerminalErrorDoesNotPersist(t *testing.T) {
 	var persisted atomic.Bool
 	var succeeded atomic.Bool
-	err := runJoinProtectionBan(joinProtectionBanOps{
-		allow:        func() bool { return true },
-		temporaryBan: func() error { return errors.New("Bad Request: user not found") },
+	err := runJoinProtectionAction(joinProtectionActionOps{
+		allow:       func() bool { return true },
+		applyAction: func() error { return errors.New("Bad Request: user not found") },
 		persistCleanup: func(string) error {
 			persisted.Store(true)
 			return nil
@@ -277,9 +278,9 @@ func TestJoinProtectionBanCooldownDefersWithoutTelegramRetry(t *testing.T) {
 	var temporaryBanCalls atomic.Int64
 	var fallbackRestrictCalls atomic.Int64
 	var persistedReason string
-	err := runJoinProtectionBan(joinProtectionBanOps{
+	err := runJoinProtectionAction(joinProtectionActionOps{
 		allow: func() bool { return false },
-		temporaryBan: func() error {
+		applyAction: func() error {
 			temporaryBanCalls.Add(1)
 			return nil
 		},
