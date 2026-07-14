@@ -55,7 +55,8 @@ func TestExtractReviewableContentAdditionalTelegramTypes(t *testing.T) {
 		{name: "game", msg: &tele.Message{Game: &tele.Game{Title: "游戏", Description: "描述"}}, wantKind: "game", wantParts: []string{"[游戏]", "title=游戏", "description=描述"}},
 		{name: "invoice", msg: &tele.Message{Invoice: &tele.Invoice{Title: "订单", Description: "说明", Total: 123, Currency: "USD"}}, wantKind: "invoice", wantParts: []string{"[Invoice]", "title=订单", "description=说明", "total=123", "currency=USD"}},
 		{name: "story", msg: &tele.Message{Story: &tele.Story{ID: 9, Poster: &tele.Chat{ID: -100, Title: "频道"}}}, wantKind: "story", wantParts: []string{"[Story 转发]", "来源=频道/9"}},
-		{name: "giveaway", msg: &tele.Message{Giveaway: &tele.Giveaway{PrizeDescription: "奖品", WinnerCount: 3, SelectionUnixtime: 1710000000}}, wantKind: "giveaway", wantParts: []string{"[赠品]", "描述=奖品", "数量=3", "截止=2024-03-10T"}},
+		{name: "giveaway", msg: &tele.Message{Giveaway: &tele.Giveaway{PrizeDescription: "奖品", WinnerCount: 3, SelectionUnixtime: 1710000000}}, wantKind: "giveaway", wantParts: []string{"[赠品]", "描述=奖品", "数量=3", "截止=2024-03-09T16:00:00Z"}},
+		{name: "giveaway_winners", msg: &tele.Message{GiveawayWinners: &tele.GiveawayWinners{PrizeDescription: "奖品", WinnerCount: 2, SelectionUnixtime: 1710000000}}, wantKind: "giveaway_winners", wantParts: []string{"[赠品]", "描述=奖品", "数量=2", "截止=2024-03-09T16:00:00Z"}},
 		{name: "giveaway_created", msg: &tele.Message{GiveawayCreated: &tele.GiveawayCreated{}}, wantKind: "giveaway_created", wantParts: []string{"[赠品]", "描述=created"}},
 	}
 	for _, tt := range tests {

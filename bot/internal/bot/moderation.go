@@ -2050,7 +2050,7 @@ func giveawayReviewText(giveaway *tele.Giveaway) string {
 	}
 	deadline := ""
 	if giveaway.SelectionUnixtime > 0 {
-		deadline = time.Unix(giveaway.SelectionUnixtime, 0).Format(time.RFC3339)
+		deadline = time.Unix(giveaway.SelectionUnixtime, 0).UTC().Format(time.RFC3339)
 	}
 	return fmt.Sprintf("[赠品] 描述=%s 数量=%d 截止=%s", strings.TrimSpace(giveaway.PrizeDescription), giveaway.WinnerCount, deadline)
 }
@@ -2061,7 +2061,7 @@ func giveawayWinnersReviewText(winners *tele.GiveawayWinners) string {
 	}
 	deadline := ""
 	if winners.SelectionUnixtime > 0 {
-		deadline = time.Unix(winners.SelectionUnixtime, 0).Format(time.RFC3339)
+		deadline = time.Unix(winners.SelectionUnixtime, 0).UTC().Format(time.RFC3339)
 	}
 	return fmt.Sprintf("[赠品] 描述=%s 数量=%d 截止=%s", strings.TrimSpace(winners.PrizeDescription), winners.WinnerCount, deadline)
 }
