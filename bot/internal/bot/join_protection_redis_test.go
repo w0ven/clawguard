@@ -113,18 +113,20 @@ func TestRedisTelegramCleanupBreakerPersists(t *testing.T) {
 }
 
 func TestRedisDeferredCleanupQueueLifecycle(t *testing.T) {
-	_, client := newJoinProtectionTestRedis(t)
+	server, client := newJoinProtectionTestRedis(t)
 	ctx := context.Background()
 	now := time.Unix(1_800_000_000, 0)
 	task := joinProtectionDeferredCleanup{
-		ChatID:              400,
-		UserID:              500,
-		Username:            "queued-user",
-		FirstName:           "Queued",
-		TemporaryBanSeconds: 3600,
-		Reason:              "temporary_ban_failed",
-		Action:              "temporary_ban",
-		Rule:                "join_protection_cleanup_test",
+		ChatID:               400,
+		UserID:               500,
+		Username:             "queued-user",
+		FirstName:            "Queued",
+		TemporaryBanSeconds:  3600,
+		ActionUntil:          now.Add(time.Hour),
+		Reason:               "temporary_ban_failed",
+		Action:               joinProtectionActionTemporaryBan,
+		Rule:                 "join_protection_cleanup_test",
+		MembershipGeneration: "u123",
 	}
 	if err := enqueueJoinProtectionCleanupRedis(ctx, client, task, now); err != nil {
 		t.Fatal(err)
@@ -133,8 +135,23 @@ func TestRedisDeferredCleanupQueueLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !ok || loaded.ChatID != task.ChatID || loaded.UserID != task.UserID || loaded.TemporaryBanSeconds != 3600 || loaded.Action != task.Action || loaded.Rule != task.Rule {
+	if !ok || loaded.ChatID != task.ChatID || loaded.UserID != task.UserID || loaded.TemporaryBanSeconds != 3600 || loaded.Action != task.Action || loaded.Rule != task.Rule || loaded.MembershipGeneration != task.MembershipGeneration || !loaded.ActionUntil.Equal(task.ActionUntil) {
 		t.Fatalf("loaded = %+v", loaded)
+	}
+	if loaded.Member != "400:500:u123" {
+		t.Fatalf("member = %q", loaded.Member)
+	}
+	if ttl := server.TTL(joinProtectionCleanupTaskKey(loaded.Member)); ttl != 0 {
+		t.Fatalf("cleanup task TTL = %s, want no expiry", ttl)
+	}
+	if ttl := server.TTL(joinProtectionCleanupGroupKey(task.ChatID)); ttl != 0 {
+		t.Fatalf("cleanup group TTL = %s, want no expiry", ttl)
+	}
+	if got, err := client.Get(ctx, membershipSessionKey(task.ChatID, task.UserID)).Result(); err != nil || got != task.MembershipGeneration {
+		t.Fatalf("membership session = %q, err=%v", got, err)
+	}
+	if ttl := server.TTL(membershipSessionKey(task.ChatID, task.UserID)); ttl <= 0 {
+		t.Fatalf("membership session TTL = %s, want positive TTL", ttl)
 	}
 	if _, ok, err := claimDueJoinProtectionCleanupRedis(ctx, client, now, time.Minute); err != nil || ok {
 		t.Fatalf("leased task was claimed twice: ok=%t err=%v", ok, err)
@@ -145,6 +162,54 @@ func TestRedisDeferredCleanupQueueLifecycle(t *testing.T) {
 	_, ok, err = claimDueJoinProtectionCleanupRedis(ctx, client, now.Add(time.Minute), time.Minute)
 	if err != nil || ok {
 		t.Fatalf("queue not empty: ok=%t err=%v", ok, err)
+	}
+}
+
+func TestCancelJoinProtectionCleanupRemovesEveryMembershipGeneration(t *testing.T) {
+	server, client := newJoinProtectionTestRedis(t)
+	ctx := context.Background()
+	now := time.Unix(1_800_000_000, 0)
+	for _, generation := range []string{"u1", "u2"} {
+		if err := enqueueJoinProtectionCleanupRedis(ctx, client, joinProtectionDeferredCleanup{
+			ChatID:               410,
+			UserID:               510,
+			TemporaryBanSeconds:  3600,
+			ActionUntil:          now.Add(time.Hour),
+			Action:               joinProtectionActionTemporaryBan,
+			MembershipGeneration: generation,
+		}, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := enqueueJoinProtectionCleanupRedis(ctx, client, joinProtectionDeferredCleanup{
+		ChatID:               410,
+		UserID:               511,
+		TemporaryBanSeconds:  3600,
+		ActionUntil:          now.Add(time.Hour),
+		Action:               joinProtectionActionTemporaryBan,
+		MembershipGeneration: "other",
+	}, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Set(ctx, membershipSessionKey(410, 510), "u2", time.Hour).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if err := cancelJoinProtectionCleanupRedis(ctx, client, 410, 510); err != nil {
+		t.Fatal(err)
+	}
+	for _, member := range []string{"410:510:u1", "410:510:u2"} {
+		if server.Exists(joinProtectionCleanupTaskKey(member)) {
+			t.Fatalf("cleanup task %q still exists", member)
+		}
+		if score, err := client.ZScore(ctx, joinProtectionCleanupQueueKey, member).Result(); err != redis.Nil || score != 0 {
+			t.Fatalf("queue member %q score=%v err=%v", member, score, err)
+		}
+	}
+	if server.Exists(membershipSessionKey(410, 510)) {
+		t.Fatal("membership session still exists")
+	}
+	if !server.Exists(joinProtectionCleanupTaskKey("410:511:other")) {
+		t.Fatal("another user's cleanup task was removed")
 	}
 }
 
@@ -225,11 +290,12 @@ func TestRestoreJoinWindowFromMemoryShadow(t *testing.T) {
 }
 
 func TestJoinProtectionCleanupPayloadUsesTemporaryBanDuration(t *testing.T) {
-	payload := decodeJoinProtectionCleanupPayload([]byte(`{"reason":"failed","temporary_ban_seconds":7200}`), 3600)
-	if payload.TemporaryBanSeconds != 7200 || payload.Reason != "failed" {
+	createdAt := time.Unix(1_800_000_000, 0)
+	payload := decodeJoinProtectionCleanupPayload([]byte(`{"reason":"failed","temporary_ban_seconds":7200}`), 3600, createdAt)
+	if payload.TemporaryBanSeconds != 7200 || payload.Reason != "failed" || !payload.ActionUntil.Equal(createdAt.Add(2*time.Hour)) {
 		t.Fatalf("payload = %+v", payload)
 	}
-	invalid := decodeJoinProtectionCleanupPayload([]byte(`{"temporary_ban_seconds":0}`), 3600)
+	invalid := decodeJoinProtectionCleanupPayload([]byte(`{"temporary_ban_seconds":0}`), 3600, createdAt)
 	if invalid.TemporaryBanSeconds != 3600 {
 		t.Fatalf("fallback duration = %d", invalid.TemporaryBanSeconds)
 	}

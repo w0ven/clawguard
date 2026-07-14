@@ -56,6 +56,8 @@ type Service struct {
 	userActionLocks    sync.Map
 	messageDeleteLocks sync.Map
 	joinEventLocks     sync.Map
+	updateExecutions   sync.Map
+	membershipSessions sync.Map
 	authorizedGroups   sync.Map
 	policySnapshots    sync.Map
 	systemState        atomic.Value
@@ -338,14 +340,45 @@ func (s *Service) deleteDelayedMessage(msg tele.Editable) error {
 	return s.bot.Delete(msg)
 }
 
-func (s *Service) ProcessUpdate(update tele.Update) error {
+func (s *Service) ProcessUpdate(update tele.Update) (err error) {
+	execution := newTelegramUpdateExecution()
+	actual, loaded := s.updateExecutions.LoadOrStore(update.ID, execution)
+	if loaded {
+		return actual.(*telegramUpdateExecution).wait()
+	}
+	claim := telegramUpdateClaim{}
+	finalizeClaim := false
 	defer func() {
 		if r := recover(); r != nil {
-			s.logger.Error("telegram update panic recovered", zap.Any("panic", r))
+			err = fmt.Errorf("telegram update panic: %v", r)
+			if s.logger != nil {
+				s.logger.Error("telegram update panic recovered", zap.Any("panic", r), zap.Int("update_id", update.ID))
+			}
 		}
+		if finalizeClaim {
+			if err != nil {
+				claim.release(context.Background())
+			} else {
+				claim.complete(context.Background())
+			}
+		}
+		execution.finish(err)
+		s.updateExecutions.Delete(update.ID)
 	}()
+
+	var process bool
+	var claimErr error
+	claim, process, claimErr = s.claimTelegramUpdate(context.Background(), update.ID)
+	if claimErr != nil {
+		return claimErr
+	}
+	if !process {
+		return nil
+	}
+	finalizeClaim = true
+
 	s.bot.ProcessUpdate(update)
-	return nil
+	return execution.result()
 }
 
 func (s *Service) SendHTMLPrivateMessage(telegramID int64, text string) error {
@@ -470,8 +503,13 @@ func (s *Service) registerHandlers() {
 func (s *Service) runHandler(name string, c tele.Context, handler func(tele.Context) error) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
-			s.logger.Error("telegram handler panic recovered", zap.String("handler", name), zap.Any("panic", r))
-			err = nil
+			if s.logger != nil {
+				s.logger.Error("telegram handler panic recovered", zap.String("handler", name), zap.Any("panic", r))
+			}
+			err = fmt.Errorf("telegram handler %s panic: %v", name, r)
+		}
+		if err != nil {
+			s.recordTelegramUpdateError(c, err)
 		}
 	}()
 	return handler(c)
@@ -516,12 +554,40 @@ func (s *Service) handleUserJoined(c tele.Context) error {
 	s.MarkUpdateSeen()
 	chat := c.Chat()
 	msg := c.Message()
-	user := c.Sender()
+	if c.Get(joinServiceMessageHandledContextKey) != nil {
+		return nil
+	}
+	c.Set(joinServiceMessageHandledContextKey, true)
+
+	user := joinedServiceMessageUser(msg)
 	if chat == nil || msg == nil || user == nil {
 		return nil
 	}
+	if s.bot != nil && s.bot.Me != nil && user.ID == s.bot.Me.ID {
+		return nil
+	}
 
-	return s.startVerification(chat, user, msg)
+	ctx := context.Background()
+	authorized, err := s.IsAuthorizedGroup(ctx, chat.ID)
+	if err != nil {
+		return fmt.Errorf("check authorized group for join service message: %w", err)
+	}
+	if !authorized {
+		return nil
+	}
+	state, err := s.GetSystemState(ctx)
+	if err != nil {
+		return fmt.Errorf("load system state for join service message: %w", err)
+	}
+	policy, err := s.LoadGuardPolicy(ctx, chat.ID)
+	if err != nil {
+		return fmt.Errorf("load guard policy for join service message: %w", err)
+	}
+	if !state.ActionsPaused && policy.Verify.DeleteJoinMessage {
+		go s.deleteJoinEventMessageAsync(chat, user, msg)
+	}
+
+	return nil
 }
 
 func (s *Service) handleChatMemberUpdate(c tele.Context) error {
@@ -548,6 +614,7 @@ func (s *Service) handleChatMemberUpdate(c tele.Context) error {
 	if !isJoinTransition(update.OldChatMember, member) {
 		return nil
 	}
+	generation := membershipGenerationForUpdate(c.Update().ID, update)
 
 	ctx := context.Background()
 	policy := config.DefaultPolicy
@@ -567,7 +634,7 @@ func (s *Service) handleChatMemberUpdate(c tele.Context) error {
 		return s.handleOtherBotJoined(update, member.User)
 	}
 
-	return s.startVerification(update.Chat, member.User, nil)
+	return s.startVerification(update.Chat, member.User, nil, generation)
 }
 
 func (s *Service) handleOtherBotJoined(update *tele.ChatMemberUpdate, user *tele.User) error {
@@ -777,7 +844,7 @@ func (s *Service) handleBotChatMemberUpdate(update *tele.ChatMemberUpdate) error
 	return nil
 }
 
-func (s *Service) startVerification(chat *tele.Chat, user *tele.User, joinEventMessage *tele.Message) error {
+func (s *Service) startVerification(chat *tele.Chat, user *tele.User, joinEventMessage *tele.Message, membershipGeneration string) error {
 	if chat == nil || user == nil {
 		return nil
 	}
@@ -787,7 +854,7 @@ func (s *Service) startVerification(chat *tele.Chat, user *tele.User, joinEventM
 	authorized, err := s.IsAuthorizedGroup(ctx, chat.ID)
 	if err != nil {
 		s.logger.Warn("authorized group check failed for verification, skip flow", zap.Error(err), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
-		return nil
+		return fmt.Errorf("check authorized group for verification: %w", err)
 	}
 	if !authorized {
 		s.logger.Info("verification skipped for unauthorized group", zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
@@ -797,7 +864,7 @@ func (s *Service) startVerification(chat *tele.Chat, user *tele.User, joinEventM
 	state, err := s.GetSystemState(ctx)
 	if err != nil {
 		s.logger.Warn("load system state failed for verification, skip flow", zap.Error(err), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
-		return nil
+		return fmt.Errorf("load system state for verification: %w", err)
 	}
 	actionsPaused := state.ActionsPaused
 
@@ -822,6 +889,9 @@ func (s *Service) startVerification(chat *tele.Chat, user *tele.User, joinEventM
 		s.logger.Debug("skip duplicate join event", zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
 		return nil
 	}
+	if err := s.rememberMembershipSession(ctx, chat.ID, user.ID, membershipGeneration); err != nil && s.logger != nil {
+		s.logger.Warn("persist membership session failed", zap.Error(err), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID), zap.String("generation", membershipGeneration))
+	}
 
 	decision := s.evaluateJoinProtection(ctx, chat, policy.JoinProtection, time.Now())
 	if !actionsPaused {
@@ -834,14 +904,17 @@ func (s *Service) startVerification(chat *tele.Chat, user *tele.User, joinEventM
 		}
 	}
 	if decision.Protect {
+		action := s.joinProtectionActionForUser(ctx, chat.ID, user.ID)
 		s.upsertJoinSideEffects(ctx, chat, user)
 		if !actionsPaused && policy.Verify.DeleteJoinMessage && joinEventMessage != nil {
 			go s.deleteJoinEventMessageAsync(chat, user, joinEventMessage)
 		}
 		if actionsPaused {
 			s.logger.Warn("join protection action skipped because telegram actions are paused", zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
-		} else if err := s.handleJoinProtectionBan(ctx, chat, user, policy.JoinProtection); err != nil {
-			s.logger.Error("handle join protection temporary ban failed", zap.Error(err), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
+		} else if err := s.handleJoinProtectionAction(ctx, chat, user, policy.JoinProtection, action, membershipGeneration, time.Now()); err != nil {
+			s.logger.Error("handle join protection action failed", zap.Error(err), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID), zap.String("action", action))
+			s.releaseVerificationJoinLock(ctx, chat.ID, user.ID)
+			return err
 		}
 		if decision.Notify {
 			s.notifyJoinProtectionAdmins(ctx, chat, decision, time.Now())
@@ -888,6 +961,7 @@ func (s *Service) startVerification(chat *tele.Chat, user *tele.User, joinEventM
 		s.logger.Error("restrict new member", zap.Error(readable), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
 		s.sendBotPermissionWarningToChat(chat, "⚠️ 新人入群验证启动失败："+htmlEscape(redact.ErrorString(readable))+"。请检查 bot 是否拥有封禁/禁言成员权限。")
 		if cleanupErr := s.handleVerificationPromptFailure(ctx, chat, user, policy, readable); cleanupErr != nil {
+			s.releaseVerificationJoinLock(ctx, chat.ID, user.ID)
 			return errors.Join(readable, cleanupErr)
 		}
 		return nil
@@ -907,6 +981,7 @@ func (s *Service) startVerification(chat *tele.Chat, user *tele.User, joinEventM
 	if err := s.startVerificationPrompt(ctx, chat, user, policy); err != nil {
 		s.joinProtector.ReleasePending(chat.ID)
 		if cleanupErr := s.handleVerificationPromptFailure(ctx, chat, user, policy, err); cleanupErr != nil {
+			s.releaseVerificationJoinLock(ctx, chat.ID, user.ID)
 			return errors.Join(err, cleanupErr)
 		}
 		return nil
@@ -1429,6 +1504,20 @@ func (s *Service) acquireVerificationJoinLock(chatID, userID int64) bool {
 	return ok
 }
 
+func (s *Service) releaseVerificationJoinLock(ctx context.Context, chatID, userID int64) {
+	key := fmt.Sprintf("clawguard:verify:lock:%d:%d", chatID, userID)
+	if s.redis != nil {
+		if err := s.redis.Del(ctx, key).Err(); err != nil && s.logger != nil {
+			s.logger.Warn("release verification join lock via redis failed", zap.Error(err), zap.Int64("chat_id", chatID), zap.Int64("user_id", userID))
+		}
+	}
+	if value, ok := s.joinEventLocks.LoadAndDelete(key); ok {
+		if timer, timerOK := value.(*time.Timer); timerOK {
+			timer.Stop()
+		}
+	}
+}
+
 func withVerificationFailActionSnapshot(payload []byte, failAction string) ([]byte, error) {
 	document := map[string]json.RawMessage{}
 	if len(payload) > 0 {
@@ -1492,17 +1581,15 @@ func (s *Service) cleanupVerificationStateOnLeave(ctx context.Context, chat *tel
 		s.joinProtector.ReleasePending(chat.ID)
 	}
 	if s.redis != nil {
-		lockKey := fmt.Sprintf("clawguard:verify:lock:%d:%d", chat.ID, user.ID)
-		if err := s.redis.Del(ctx, lockKey).Err(); err != nil {
-			s.logger.Warn("delete verification join lock on leave failed", zap.Error(err), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
+		if err := cancelJoinProtectionCleanupRedis(ctx, s.redis, chat.ID, user.ID); err != nil {
+			s.logger.Warn("cancel redis join protection cleanup on leave failed", zap.Error(err), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
+		}
+		if err := s.redis.Del(ctx, membershipSessionKey(chat.ID, user.ID)).Err(); err != nil {
+			s.logger.Warn("delete membership session on leave failed", zap.Error(err), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
 		}
 	}
-	lockKey := fmt.Sprintf("clawguard:verify:lock:%d:%d", chat.ID, user.ID)
-	if value, ok := s.joinEventLocks.LoadAndDelete(lockKey); ok {
-		if timer, timerOK := value.(*time.Timer); timerOK {
-			timer.Stop()
-		}
-	}
+	s.membershipSessions.Delete(membershipSessionMapKey(chat.ID, user.ID))
+	s.releaseVerificationJoinLock(ctx, chat.ID, user.ID)
 	s.bioCheckInFlight.Delete(user.ID)
 }
 
