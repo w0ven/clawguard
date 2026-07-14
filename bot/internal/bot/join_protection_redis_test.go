@@ -123,6 +123,8 @@ func TestRedisDeferredCleanupQueueLifecycle(t *testing.T) {
 		FirstName:           "Queued",
 		TemporaryBanSeconds: 3600,
 		Reason:              "temporary_ban_failed",
+		Action:              "temporary_ban",
+		Rule:                "join_protection_cleanup_test",
 	}
 	if err := enqueueJoinProtectionCleanupRedis(ctx, client, task, now); err != nil {
 		t.Fatal(err)
@@ -131,7 +133,7 @@ func TestRedisDeferredCleanupQueueLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !ok || loaded.ChatID != task.ChatID || loaded.UserID != task.UserID || loaded.TemporaryBanSeconds != 3600 {
+	if !ok || loaded.ChatID != task.ChatID || loaded.UserID != task.UserID || loaded.TemporaryBanSeconds != 3600 || loaded.Action != task.Action || loaded.Rule != task.Rule {
 		t.Fatalf("loaded = %+v", loaded)
 	}
 	if _, ok, err := claimDueJoinProtectionCleanupRedis(ctx, client, now, time.Minute); err != nil || ok {
@@ -143,6 +145,82 @@ func TestRedisDeferredCleanupQueueLifecycle(t *testing.T) {
 	_, ok, err = claimDueJoinProtectionCleanupRedis(ctx, client, now.Add(time.Minute), time.Minute)
 	if err != nil || ok {
 		t.Fatalf("queue not empty: ok=%t err=%v", ok, err)
+	}
+}
+
+func TestRedisDeferredCleanupQueueAcceptsSnapshottedVerificationAction(t *testing.T) {
+	_, client := newJoinProtectionTestRedis(t)
+	ctx := context.Background()
+	now := time.Unix(1_800_000_000, 0)
+	task := joinProtectionDeferredCleanup{
+		ChatID: 501,
+		UserID: 601,
+		Action: "ban",
+		Rule:   "verification_prompt_failed_redis_cleanup",
+	}
+	if err := enqueueJoinProtectionCleanupRedis(ctx, client, task, now); err != nil {
+		t.Fatal(err)
+	}
+	loaded, ok, err := claimDueJoinProtectionCleanupRedis(ctx, client, now, time.Minute)
+	if err != nil || !ok {
+		t.Fatalf("claim generic cleanup: ok=%t err=%v", ok, err)
+	}
+	if loaded.Action != "ban" || loaded.Rule != task.Rule || loaded.TemporaryBanSeconds != 0 {
+		t.Fatalf("loaded = %+v", loaded)
+	}
+}
+
+func TestRestoreActiveJoinProtectionFromMemoryShadow(t *testing.T) {
+	_, client := newJoinProtectionTestRedis(t)
+	ctx := context.Background()
+	policy := testJoinProtectionPolicy()
+	policy.JoinThreshold = 2
+	now := time.Unix(1_800_000_000, 0)
+	protector := newJoinProtector()
+	protector.ObserveJoin(701, policy, 0, now)
+	entered := protector.ObserveJoin(701, policy, 0, now.Add(time.Second))
+	if !entered.Entered {
+		t.Fatalf("memory decision = %+v", entered)
+	}
+	snapshot, ok := protector.Snapshot(701, policy, now.Add(2*time.Second))
+	if !ok {
+		t.Fatal("missing active memory snapshot")
+	}
+	if err := restoreJoinProtectionRedis(ctx, client, 701, snapshot, now.Add(2*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	observation, err := observeJoinProtectionRedis(ctx, client, 701, policy, nil, now.Add(3*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if observation.NeedsData || !observation.Decision.Protect || observation.Decision.Entered || observation.Decision.Intercepted != 2 {
+		t.Fatalf("restored observation = %+v", observation)
+	}
+}
+
+func TestRestoreJoinWindowFromMemoryShadow(t *testing.T) {
+	_, client := newJoinProtectionTestRedis(t)
+	ctx := context.Background()
+	policy := testJoinProtectionPolicy()
+	policy.JoinThreshold = 3
+	now := time.Unix(1_800_000_000, 0)
+	protector := newJoinProtector()
+	protector.ObserveJoin(702, policy, 0, now)
+	protector.ObserveJoin(702, policy, 0, now.Add(time.Second))
+	snapshot, ok := protector.Snapshot(702, policy, now.Add(2*time.Second))
+	if !ok || len(snapshot.Joins) != 2 {
+		t.Fatalf("memory snapshot = %+v", snapshot)
+	}
+	if err := restoreJoinProtectionWindowRedis(ctx, client, 702, snapshot.Joins, policy, now.Add(2*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	pending := 0
+	observation, err := observeJoinProtectionRedis(ctx, client, 702, policy, &pending, now.Add(2*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !observation.Decision.Protect || !observation.Decision.Entered || observation.Decision.Trigger != "join_threshold" {
+		t.Fatalf("restored window decision = %+v", observation.Decision)
 	}
 }
 

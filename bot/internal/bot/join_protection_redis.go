@@ -40,6 +40,7 @@ local protection_until = tonumber(redis.call('HGET', KEYS[1], 'protection_until_
 
 if protection_until > now_ms then
     local intercepted = redis.call('HINCRBY', KEYS[1], 'intercepted', 1)
+    local active_trigger = redis.call('HGET', KEYS[1], 'current_trigger') or 'active'
     local last_notification = tonumber(redis.call('HGET', KEYS[1], 'last_notification_ms') or '0')
     local notify = 0
     if last_notification == 0 or now_ms - last_notification >= notify_ms then
@@ -49,7 +50,7 @@ if protection_until > now_ms then
     redis.call('HSET', KEYS[1], 'last_join_at_ms', now_ms)
     redis.call('PEXPIRE', KEYS[1], state_ttl_ms)
     redis.call('ZADD', KEYS[3], protection_until, chat_id)
-    return {1, 0, notify, 'active', protection_until, intercepted, 0, 0, 0, 0}
+    return {1, 0, notify, active_trigger, protection_until, intercepted, 0, 0, 0, 0}
 end
 
 if protection_until > 0 then
@@ -129,6 +130,47 @@ redis.call('ZREM', KEYS[2], chat_id)
 return {1, intercepted, protection_until}
 `)
 
+var restoreJoinProtectionScript = redis.NewScript(`
+local now_ms = tonumber(ARGV[1])
+local protection_until = tonumber(ARGV[2])
+local intercepted = tonumber(ARGV[3])
+local last_notification = tonumber(ARGV[4])
+local trigger = ARGV[5]
+local chat_id = ARGV[6]
+local state_ttl_ms = tonumber(ARGV[7])
+local current_until = tonumber(redis.call('HGET', KEYS[1], 'protection_until_ms') or '0')
+if protection_until <= now_ms or current_until > now_ms then
+    return 0
+end
+redis.call('HSET', KEYS[1],
+    'protection_until_ms', protection_until,
+    'intercepted', intercepted,
+    'last_notification_ms', last_notification,
+    'current_trigger', trigger,
+    'last_trigger', trigger)
+redis.call('PEXPIRE', KEYS[1], state_ttl_ms)
+redis.call('ZADD', KEYS[2], protection_until, chat_id)
+redis.call('DEL', KEYS[3])
+return 1
+`)
+
+var restoreJoinProtectionWindowScript = redis.NewScript(`
+local window_start = tonumber(ARGV[1])
+local ttl_ms = tonumber(ARGV[2])
+redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', window_start - 1)
+if redis.call('ZCARD', KEYS[1]) > 0 then
+    return 0
+end
+for i = 3, #ARGV, 2 do
+    local score = tonumber(ARGV[i])
+    if score >= window_start then
+        redis.call('ZADD', KEYS[1], score, ARGV[i + 1])
+    end
+end
+redis.call('PEXPIRE', KEYS[1], ttl_ms)
+return 1
+`)
+
 var failTelegramCleanupScript = redis.NewScript(`
 local now_ms = tonumber(ARGV[1])
 local base_ms = tonumber(ARGV[2])
@@ -166,12 +208,14 @@ redis.call('HSET', KEYS[1],
     'first_name', ARGV[4],
     'temporary_ban_seconds', ARGV[5],
     'reason', ARGV[6],
-    'created_at_ms', ARGV[7])
+    'action', ARGV[7],
+    'rule', ARGV[8],
+    'created_at_ms', ARGV[9])
 redis.call('HINCRBY', KEYS[1], 'enqueue_count', 1)
-redis.call('PEXPIRE', KEYS[1], ARGV[8])
-redis.call('ZADD', KEYS[2], ARGV[7], ARGV[9])
-redis.call('SADD', KEYS[3], ARGV[9])
-redis.call('PEXPIRE', KEYS[3], ARGV[8])
+redis.call('PEXPIRE', KEYS[1], ARGV[10])
+redis.call('ZADD', KEYS[2], ARGV[9], ARGV[11])
+redis.call('SADD', KEYS[3], ARGV[11])
+redis.call('PEXPIRE', KEYS[3], ARGV[10])
 return 1
 `)
 
@@ -219,6 +263,8 @@ type joinProtectionDeferredCleanup struct {
 	FirstName           string
 	TemporaryBanSeconds int
 	Reason              string
+	Action              string
+	Rule                string
 	CreatedAt           time.Time
 }
 
@@ -300,6 +346,42 @@ func observeJoinProtectionRedis(
 		}
 	}
 	return observation, nil
+}
+
+func restoreJoinProtectionRedis(ctx context.Context, rdb redis.Cmdable, chatID int64, snapshot joinProtectionMemorySnapshot, now time.Time) error {
+	lastNotification := int64(0)
+	if !snapshot.LastNotification.IsZero() {
+		lastNotification = snapshot.LastNotification.UnixMilli()
+	}
+	trigger := snapshot.CurrentTrigger
+	if trigger == "" {
+		trigger = "active"
+	}
+	return restoreJoinProtectionScript.Run(
+		ctx,
+		rdb,
+		[]string{joinProtectionStateKey(chatID), joinProtectionActiveKey, joinProtectionJoinsKey(chatID)},
+		now.UnixMilli(),
+		snapshot.ProtectionUntil.UnixMilli(),
+		snapshot.Intercepted,
+		lastNotification,
+		trigger,
+		chatID,
+		joinProtectionStateTTL.Milliseconds(),
+	).Err()
+}
+
+func restoreJoinProtectionWindowRedis(ctx context.Context, rdb redis.Cmdable, chatID int64, joins []time.Time, policy config.JoinProtectionPolicy, now time.Time) error {
+	if len(joins) == 0 {
+		return nil
+	}
+	joinTTL := time.Duration(policy.JoinWindowSeconds)*time.Second + time.Minute
+	args := make([]any, 0, 2+len(joins)*2)
+	args = append(args, now.Add(-time.Duration(policy.JoinWindowSeconds)*time.Second).UnixMilli(), joinTTL.Milliseconds())
+	for i, joinedAt := range joins {
+		args = append(args, joinedAt.UnixMilli(), fmt.Sprintf("shadow:%d:%d", i, joinedAt.UnixNano()))
+	}
+	return restoreJoinProtectionWindowScript.Run(ctx, rdb, []string{joinProtectionJoinsKey(chatID)}, args...).Err()
 }
 
 func finishJoinProtectionRedis(ctx context.Context, rdb redis.Cmdable, chatID int64, expectedUntil, now time.Time) (joinProtectionSummary, bool, error) {
@@ -451,6 +533,14 @@ func markTelegramCleanupFailureRedis(
 
 func enqueueJoinProtectionCleanupRedis(ctx context.Context, rdb redis.Cmdable, task joinProtectionDeferredCleanup, now time.Time) error {
 	member := fmt.Sprintf("%d:%d", task.ChatID, task.UserID)
+	action := strings.TrimSpace(task.Action)
+	if action == "" {
+		action = "temporary_ban"
+	}
+	rule := strings.TrimSpace(task.Rule)
+	if rule == "" {
+		rule = "join_protection_redis_fallback_cleanup"
+	}
 	_, err := enqueueJoinProtectionCleanupScript.Run(
 		ctx,
 		rdb,
@@ -465,6 +555,8 @@ func enqueueJoinProtectionCleanupRedis(ctx context.Context, rdb redis.Cmdable, t
 		task.FirstName,
 		task.TemporaryBanSeconds,
 		task.Reason,
+		action,
+		rule,
 		now.UnixMilli(),
 		joinProtectionStateTTL.Milliseconds(),
 		member,
@@ -502,7 +594,11 @@ func claimDueJoinProtectionCleanupRedis(ctx context.Context, rdb redis.Cmdable, 
 	chatID, _ := strconv.ParseInt(values["chat_id"], 10, 64)
 	userID, _ := strconv.ParseInt(values["user_id"], 10, 64)
 	seconds, _ := strconv.Atoi(values["temporary_ban_seconds"])
-	if chatID == 0 || userID == 0 || seconds <= 0 {
+	action := strings.TrimSpace(values["action"])
+	if action == "" {
+		action = "temporary_ban"
+	}
+	if chatID == 0 || userID == 0 || !validDeferredCleanupAction(action, seconds) {
 		_ = removeJoinProtectionCleanupRedis(ctx, rdb, member, chatID)
 		return joinProtectionDeferredCleanup{}, false, nil
 	}
@@ -514,8 +610,21 @@ func claimDueJoinProtectionCleanupRedis(ctx context.Context, rdb redis.Cmdable, 
 		FirstName:           values["first_name"],
 		TemporaryBanSeconds: seconds,
 		Reason:              values["reason"],
+		Action:              action,
+		Rule:                values["rule"],
 		CreatedAt:           time.UnixMilli(createdAtMillis),
 	}, true, nil
+}
+
+func validDeferredCleanupAction(action string, temporaryBanSeconds int) bool {
+	switch action {
+	case "temporary_ban":
+		return temporaryBanSeconds > 0
+	case "kick", "ban", "mute_permanent":
+		return true
+	default:
+		return false
+	}
 }
 
 func rescheduleJoinProtectionCleanupRedis(ctx context.Context, rdb redis.Cmdable, member string, retryAt time.Time) error {

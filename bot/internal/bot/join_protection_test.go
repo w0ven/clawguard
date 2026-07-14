@@ -131,6 +131,33 @@ func TestSyntheticCleanupDoesNotReservePendingSlot(t *testing.T) {
 	}
 }
 
+func TestVerificationKickContinuesUnbanWhenRetryFindsExistingBan(t *testing.T) {
+	unbanCalls := 0
+	err := runVerificationKick(
+		func() error { return errors.New("Bad Request: user already banned") },
+		func() error {
+			unbanCalls++
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unbanCalls != 1 {
+		t.Fatalf("unban calls = %d, want 1", unbanCalls)
+	}
+}
+
+func TestVerificationKickKeepsRetryingNonterminalUnbanFailure(t *testing.T) {
+	err := runVerificationKick(
+		func() error { return nil },
+		func() error { return errors.New("telegram timeout") },
+	)
+	if err == nil {
+		t.Fatal("network failure during unban must remain retryable")
+	}
+}
+
 func TestJoinProtectorPendingRelease(t *testing.T) {
 	protector := newJoinProtector()
 	policy := testJoinProtectionPolicy()

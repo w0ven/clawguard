@@ -310,7 +310,7 @@ func (s *Service) sendMathImageChallenge(ctx context.Context, chat *tele.Chat, u
 		return err
 	}
 
-	if err := s.storePendingVerification(ctx, chat.ID, user, "math_image", payload, sent.ID, policy.Verify.TimeoutSeconds); err != nil {
+	if err := s.storePendingVerification(ctx, chat.ID, user, "math_image", payload, sent.ID, policy.Verify.TimeoutSeconds, policy.Verify.FailAction); err != nil {
 		s.deleteVerificationMessage(chat, int64Ptr(int64(sent.ID)))
 		return err
 	}

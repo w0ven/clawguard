@@ -7,10 +7,6 @@ DELETE FROM ai_decisions
 WHERE created_at < NOW() - make_interval(days => sqlc.arg(days)::int)
   AND admin_override IS NULL;
 
--- name: DeleteExpiredPendingVerifications :execrows
-DELETE FROM pending_verifications
-WHERE expires_at < NOW() - make_interval(hours => sqlc.arg(hours)::int);
-
 -- name: DeleteOldConfigAudit :execrows
 DELETE FROM config_audit
 WHERE created_at < NOW() - make_interval(days => sqlc.arg(days)::int);

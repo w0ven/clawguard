@@ -94,6 +94,11 @@ type PendingVerification struct {
 	JoinMessageID *int64
 	ExpiresAt     time.Time
 	CreatedAt     time.Time
+	NextAttemptAt time.Time
+	LeaseUntil    *time.Time
+	LeaseOwner    *string
+	AttemptCount  int32
+	LastError     *string
 }
 
 type Violation struct {

@@ -39,7 +39,7 @@ jobs:
         run: go vet ./...
       - name: Race tests
         working-directory: bot
-        run: go test -race ./internal/bot ./internal/api ./internal/config
+        run: go test -race ./internal/bot ./internal/api ./internal/config ./internal/worker
 
   test-web:
     name: Test web

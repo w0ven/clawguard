@@ -62,12 +62,6 @@ func runRetentionOnce(ctx context.Context, q *store.Queries, cfg config.Retentio
 	} else {
 		logger.Info("retention cleanup event config audit", zap.Int64("deleted", n), zap.Int32("days", eventDays))
 	}
-	if n, err := q.DeleteExpiredPendingVerifications(runCtx, int32(maxRetention(cfg.PendingVerificationsHours, 1))); err != nil {
-		logger.Warn("retention cleanup pending verifications failed", zap.Error(err))
-	} else {
-		logger.Info("retention cleanup pending verifications", zap.Int64("deleted", n))
-	}
-
 	zombieDays := int32(maxRetention(cfg.ZombieDays, 30))
 	if n, err := q.ArchiveZombieUserTrust(runCtx, zombieDays); err != nil {
 		logger.Warn("retention archive zombie users failed", zap.Error(err))
