@@ -60,7 +60,7 @@ func (db *otherBotMockDB) QueryRow(_ context.Context, query string, args ...any)
 	case strings.Contains(query, "FROM admins"):
 		return mockErrorRow{err: pgx.ErrNoRows}
 	case strings.Contains(query, "FROM system_state"):
-		return mockScanRow(int32(1), false, false, false, (*string)(nil), db.now, (*int64)(nil))
+		return mockScanRow(int32(1), false, false, false, "", db.now, (*int64)(nil))
 	case strings.Contains(query, "FROM user_trust"):
 		db.mu.Lock()
 		defer db.mu.Unlock()
