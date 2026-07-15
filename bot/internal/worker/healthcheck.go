@@ -28,19 +28,13 @@ type Healthcheck struct {
 }
 
 func NewHealthcheck(logger *zap.Logger, queries *store.Queries, botService *bot.Service) *Healthcheck {
-	return &Healthcheck{
-		logger:     logger,
-		queries:    queries,
-		botService: botService,
-	}
+	return &Healthcheck{logger: logger, queries: queries, botService: botService}
 }
 
 func (w *Healthcheck) Run(ctx context.Context) {
 	w.checkOnce(ctx)
-
 	ticker := time.NewTicker(healthcheckInterval)
 	defer ticker.Stop()
-
 	for {
 		select {
 		case <-ctx.Done():
@@ -53,22 +47,69 @@ func (w *Healthcheck) Run(ctx context.Context) {
 }
 
 func (w *Healthcheck) checkOnce(ctx context.Context) {
+	alerts := operationsAlerts(w.loadOperationsStatus(ctx))
 	verdicts, err := w.queries.ListRecentAIDecisionVerdicts(ctx, healthcheckSampleSize)
 	if err != nil {
 		w.logger.Warn("load recent ai decision verdicts failed", zap.Error(err))
-		return
-	}
-	if len(verdicts) < healthcheckSampleSize {
-		return
-	}
-	for _, verdict := range verdicts {
-		if strings.TrimSpace(strings.ToLower(verdict)) != "error" {
-			return
+	} else if len(verdicts) >= healthcheckSampleSize {
+		allFailed := true
+		for _, verdict := range verdicts {
+			if strings.TrimSpace(strings.ToLower(verdict)) != "error" {
+				allFailed = false
+				break
+			}
+		}
+		if allFailed {
+			alerts = append(alerts, fmt.Sprintf("AI moderation failed for the last %d decisions", healthcheckSampleSize))
 		}
 	}
-	if err := w.sendAlert(ctx, fmt.Sprintf("ClawGuard 告警：AI 审核最近 %d 次全部失败，请尽快检查模型服务、网络和 Redis/Postgres 状态。", healthcheckSampleSize)); err != nil {
+
+	if len(alerts) == 0 {
+		return
+	}
+	message := "<b>ClawGuard operations alert</b><br>" + strings.Join(alerts, "<br>")
+	if err := w.sendAlert(ctx, message); err != nil {
 		w.logger.Warn("send healthcheck alert failed", zap.Error(err))
 	}
+}
+
+type operationsStatus struct {
+	backlog store.OperationsBacklog
+	runtime bot.OperationsRuntimeStatus
+}
+
+func (w *Healthcheck) loadOperationsStatus(ctx context.Context) operationsStatus {
+	status := operationsStatus{runtime: w.botService.OperationsRuntimeStatus(ctx)}
+	backlog, err := w.queries.GetOperationsBacklog(ctx)
+	if err != nil {
+		w.logger.Warn("load operations backlog failed", zap.Error(err))
+		return status
+	}
+	status.backlog = backlog
+	return status
+}
+
+func operationsAlerts(status operationsStatus) []string {
+	alerts := make([]string, 0, 6)
+	if status.backlog.DueCleanup > 100 || status.backlog.OldestDueCleanupSeconds > 15*60 {
+		alerts = append(alerts, fmt.Sprintf("Verification cleanup backlog: due=%d, oldest=%ds", status.backlog.DueCleanup, status.backlog.OldestDueCleanupSeconds))
+	}
+	if status.backlog.RetryingCleanup > 20 {
+		alerts = append(alerts, fmt.Sprintf("Verification cleanup retries: %d", status.backlog.RetryingCleanup))
+	}
+	if status.runtime.JoinCleanupDeadLetters != nil && *status.runtime.JoinCleanupDeadLetters > 0 {
+		alerts = append(alerts, fmt.Sprintf("Join cleanup dead letters: %d", *status.runtime.JoinCleanupDeadLetters))
+	}
+	if status.runtime.BackupSecondsAgo != nil && *status.runtime.BackupSecondsAgo > int64((36*time.Hour)/time.Second) {
+		alerts = append(alerts, fmt.Sprintf("Last successful backup: %ds ago", *status.runtime.BackupSecondsAgo))
+	}
+	if status.runtime.VerificationWorkerSecondsAgo != nil && *status.runtime.VerificationWorkerSecondsAgo > 120 {
+		alerts = append(alerts, fmt.Sprintf("Verification worker heartbeat: %ds ago", *status.runtime.VerificationWorkerSecondsAgo))
+	}
+	if status.runtime.JoinRecoveryWorkerSecondsAgo != nil && *status.runtime.JoinRecoveryWorkerSecondsAgo > 90 {
+		alerts = append(alerts, fmt.Sprintf("Join recovery worker heartbeat: %ds ago", *status.runtime.JoinRecoveryWorkerSecondsAgo))
+	}
+	return alerts
 }
 
 func (w *Healthcheck) sendAlert(ctx context.Context, text string) error {

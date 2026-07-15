@@ -13,8 +13,8 @@ ClawGuard 是一套面向 Telegram 群组的群管理系统，包含入群验证
 | 数据库 Schema | goose migration `00028` |
 | 生产拓扑 | 单 bot 实例 + 单 web 实例 + PostgreSQL 16 + Redis 7 AOF + Caddy 2 |
 | 发布方式 | GitHub Actions 测试并构建 bot/web 镜像，生产机使用 Docker Compose 原位升级 |
-| 后端 CI | `go test ./...`、`go vet ./...`、关键包 race tests |
-| 前端 CI | TypeScript 类型检查、Next.js 生产构建 |
+| 后端 CI | 单测、vet、race、govulncheck、真实 PostgreSQL migration smoke |
+| 前端 CI | TypeScript、Next.js 生产构建、npm audit、Playwright 桌面/移动端 |
 | 入群洪泛防护 | 默认开启，Redis 原子状态机，数据库任务租约，Redis 清理兜底 |
 | AI 审核 | 能力完整，默认策略关闭，需要配置 Provider/Model 后按群启用 |
 
@@ -151,7 +151,7 @@ Cloudflare Tunnel
         |
 Caddy :80
   |             |
-  |             +--> Next.js 15 Web :3000
+  |             +--> Next.js 16 Web :3000
   |
   +--> Go Bot + Echo API :8080
              |          |
@@ -160,8 +160,8 @@ Caddy :80
 
 | 层 | 技术 |
 |---|---|
-| Bot/API | Go 1.22、telebot.v3、Echo v4 |
-| Web | Node.js 22、Next.js 15 App Router、React 19、Tailwind CSS |
+| Bot/API | Go 1.26.5、telebot.v3、Echo v4 |
+| Web | Node.js 22、Next.js 16 App Router、React 19、Tailwind CSS |
 | 数据 | PostgreSQL 16、pgx/v5、sqlc、goose migration |
 | 状态/限流 | Redis 7，AOF `everysec` |
 | 媒体 | ffmpeg、DejaVu 字体、Go 图片渲染 |
@@ -274,8 +274,9 @@ bot 启动时自动执行 goose migration、注册 Telegram webhook、加载模�
 | Auth | `JWT_SECRET`, `ENCRYPTION_KEY` | 登录 JWT 与 Provider Key 加密 |
 | Turnstile | `TURNSTILE_SITE_KEY`, `TURNSTILE_SECRET_KEY` | 新人入群验证验证码 |
 | LLM bootstrap | `LLM_PROVIDERS` 及 Provider Key env | 旧环境配置迁移和初始 Provider |
-| Runtime | `APP_ENV`, `HTTP_PORT`, `DAILY_REPORT_ENABLED`, `CLAWGUARD_LOG_RAW_UPDATES` | 运行模式、端口、日报和诊断日志 |
-| Retention | `RETENTION_EVENTS_DAYS`, `RETENTION_PROFILE_CHECK_LOGS_DAYS`, `RETENTION_ZOMBIE_DAYS`, `RETENTION_BANNED_DAYS` | 当前实际生效的数据保留参数 |
+| Runtime | `APP_ENV`, `HTTP_PORT`, `DAILY_REPORT_ENABLED`, `CLAWGUARD_LOG_RAW_UPDATES`, `CLAWGUARD_TAG` | 运行模式、端口、日报、诊断日志和固定镜像版本 |
+| Retention | `RETENTION_VIOLATIONS_DAYS`, `RETENTION_AI_DECISIONS_DAYS`, `RETENTION_CONFIG_AUDIT_DAYS`, `RETENTION_PROFILE_CHECK_LOGS_DAYS`, `RETENTION_ZOMBIE_DAYS`, `RETENTION_BANNED_DAYS` | 各类数据独立保留周期 |
+| Backup | `BACKUP_DIR`, `BACKUP_RETENTION_DAYS`, `BACKUP_OFFSITE_DIR` | 本机备份目录、保留天数和可选异地目录 |
 | Web build | `NEXT_PUBLIC_BOT_USERNAME`, `NEXT_PUBLIC_TURNSTILE_SITE_KEY` | GitHub Actions 构建时写入浏览器 bundle |
 
 `NEXT_PUBLIC_*` 必须配置在 GitHub Repository Variables；只修改生产机 `.env` 不会改变已构建的前端 bundle。
@@ -286,7 +287,7 @@ bot 启动时自动执行 goose migration、注册 Telegram webhook、加载模�
 |---|---|---|
 | VerificationExpiry | 轮询 | 领取到期验证任务并执行失败动作 |
 | JoinProtectionRecovery | 每 15 秒 | 防护恢复通知、数据库清理任务和 Redis 兜底队列 |
-| Healthcheck | 每 5 分钟 | 连续 AI 审核失败监测和 owner 限频告警 |
+| Healthcheck | 每 5 分钟 | AI 连续失败、清理积压、死信、备份和 Worker 心跳告警 |
 | LLMProber | 配置频率 | 模型探活、健康状态和 owner 告警 |
 | LLMStatsAggregator | 定时 | 聚合 AI 调用统计 |
 | DailyReport | 每日 | 向 owner 发送运营报告 |
@@ -310,6 +311,8 @@ bot 启动时自动执行 goose migration、注册 Telegram webhook、加载模�
 | HTTP | 服务端 timeout、Caddy 安全响应头、仅回环端口暴露给 Tunnel |
 | 日志 | 错误经过 redact 包处理，原始 Telegram update 默认关闭 |
 
+生产模式会拒绝短于 32 字符的 `JWT_SECRET`、`WEBHOOK_SECRET`、`ENCRYPTION_KEY`，也会拒绝占位符和非 HTTPS 的 `PUBLIC_BASE_URL`。Webhook 注册日志只记录公开地址，不记录 secret path。
+
 ## 发布与升级
 
 ### CI/CD
@@ -327,22 +330,14 @@ kelework/clawguard-web:sha-<commit>
 
 ### 生产原位升级
 
-升级前先给当前镜像打回滚标签，然后分服务升级：
+使用固定提交标签执行升级。脚本会先创建数据库备份和旧镜像回滚标签，再依次升级 Bot/Web、核对健康状态和 OCI revision；任何一步失败都会恢复旧镜像：
 
 ```bash
 cd /root/clawguard
-
-stamp=$(date +%Y%m%d-%H%M%S)
-bot_image=$(docker inspect -f '{{.Image}}' "$(docker compose ps -q bot)")
-web_image=$(docker inspect -f '{{.Image}}' "$(docker compose ps -q web)")
-docker image tag "$bot_image" "kelework/clawguard-bot:rollback-$stamp"
-docker image tag "$web_image" "kelework/clawguard-web:rollback-$stamp"
-
-docker compose pull bot web
-docker compose up -d --no-deps bot
-curl -fsS http://127.0.0.1:8080/readyz
-docker compose up -d --no-deps web
+bash scripts/deploy-production.sh sha-<commit>
 ```
+
+密钥疑似进入日志时，可用 `ROTATE_WEBHOOK_SECRET=1 bash scripts/deploy-production.sh sha-<commit>` 在可回滚事务中轮换 Webhook secret。
 
 只更新文档不需要重启生产服务。
 
@@ -369,7 +364,19 @@ ingress:
   - service: http_status:404
 ```
 
-### 备份恢复演练
+### 生产备份与恢复演练
+
+安装每日 02:20 备份定时器：
+
+```bash
+install -m 0644 deploy/systemd/clawguard-backup.service /etc/systemd/system/
+install -m 0644 deploy/systemd/clawguard-backup.timer /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now clawguard-backup.timer
+systemctl start clawguard-backup.service
+```
+
+备份使用 PostgreSQL custom archive、SHA-256 校验和、原子落盘与 14 天默认保留；配置 `BACKUP_OFFSITE_DIR` 后会额外复制到异地挂载目录。成功时间写入 Redis，并显示在后台运行状态卡。
 
 恢复演练脚本会把已有备份恢复到临时 PostgreSQL 容器，不会触碰生产数据库：
 
@@ -381,18 +388,18 @@ bash scripts/restore-rehearsal.sh
 BACKUP_PATH=/path/to/clawguard.sql.gz bash scripts/restore-rehearsal.sh
 ```
 
-`restore-rehearsal.sh` 只负责验证备份，不负责创建生产备份。生产环境仍需由 cron/systemd timer 或外部备份系统定期执行 `pg_dump` 并设置异地保留。
+`restore-rehearsal.sh` 只验证备份，不触碰生产数据库。真正的异机/对象存储副本仍需将 `BACKUP_OFFSITE_DIR` 指向外部挂载。
 
 ## 测试现状与边界
 
 2026-07-16 本地基线：
 
-- Go 代码有 53 个 `_test.go` 文件，总 statement coverage 约 30.3%。
-- 核心包覆盖率：bot 39.0%、AI 49.4%、config 55.2%、API 13.9%、scheduler 22.4%、worker 2.7%。
-- Web 有 TypeScript 类型检查和 Next.js build，但目前没有前端单元测试或 Playwright E2E。
-- CI 会构建并发布镜像，但当前生产 Compose 仍使用 `latest`；发布前后必须核对 image revision。
+- Go 代码有 57 个 `_test.go` 文件，总 statement coverage 约 30.3%。
+- 核心包覆盖率：bot 38.9%、AI 49.4%、config 56.7%、API 13.9%、scheduler 22.4%、worker 6.2%。
+- Web 已有 Playwright 桌面和移动端入口测试，仍需继续覆盖登录后的配置保存与运营操作。
+- CI 发布 `sha-<commit>` 镜像；生产 Compose 使用 `CLAWGUARD_TAG` 固定版本并由升级脚本核对 revision。
 - 当前不支持无脑横向扩容 bot，多实例前需要为 scheduler、日报和其他周期任务增加 leader election 或分布式锁。
-- 仓库提供恢复演练，没有内置生产备份定时器。
+- 仓库提供生产备份 timer 和恢复演练；真正的异机副本需要配置外部挂载。
 
 ## 近期版本变化
 
@@ -404,6 +411,8 @@ BACKUP_PATH=/path/to/clawguard.sql.gz bash scripts/restore-rehearsal.sh
 - 已毕业真人不会被普通内容审核自动降回 suspicious；内容过滤仍照常执行。
 - 加强全局配置截断保护、Telegram 动作暂停复核和关键 moderator 查询错误处理。
 - 入群防护界面改为“达到阈值 -> 临时处理新账号 -> 自动恢复”的简明流程。
+- 修复 Webhook secret 日志泄漏和数据保留周期混用，升级 Go/pgx/Next/PostCSS 安全版本。
+- 新增固定版本自动回滚发布、生产备份 timer、浏览器测试和运行状态/告警指标。
 
 ## 进一步设计
 

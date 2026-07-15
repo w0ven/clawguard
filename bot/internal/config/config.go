@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -42,15 +43,12 @@ type Config struct {
 }
 
 type RetentionConfig struct {
-	MessagesDays              int `env:"RETENTION_MESSAGES_DAYS" envDefault:"7"`
-	EventsDays                int `env:"RETENTION_EVENTS_DAYS" envDefault:"30"`
-	ViolationsDays            int `env:"RETENTION_VIOLATIONS_DAYS" envDefault:"90"`
-	AIDecisionsDays           int `env:"RETENTION_AI_DECISIONS_DAYS" envDefault:"90"`
-	PendingVerificationsHours int `env:"RETENTION_PENDING_VERIFICATIONS_HOURS" envDefault:"24"`
-	ConfigAuditDays           int `env:"RETENTION_CONFIG_AUDIT_DAYS" envDefault:"365"`
-	ProfileCheckLogsDays      int `env:"RETENTION_PROFILE_CHECK_LOGS_DAYS" envDefault:"90"`
-	ZombieDays                int `env:"RETENTION_ZOMBIE_DAYS" envDefault:"30"`
-	BannedDays                int `env:"RETENTION_BANNED_DAYS" envDefault:"90"`
+	ViolationsDays       int `env:"RETENTION_VIOLATIONS_DAYS" envDefault:"90"`
+	AIDecisionsDays      int `env:"RETENTION_AI_DECISIONS_DAYS" envDefault:"90"`
+	ConfigAuditDays      int `env:"RETENTION_CONFIG_AUDIT_DAYS" envDefault:"365"`
+	ProfileCheckLogsDays int `env:"RETENTION_PROFILE_CHECK_LOGS_DAYS" envDefault:"90"`
+	ZombieDays           int `env:"RETENTION_ZOMBIE_DAYS" envDefault:"30"`
+	BannedDays           int `env:"RETENTION_BANNED_DAYS" envDefault:"90"`
 }
 
 type LLMProvider struct {
@@ -67,8 +65,52 @@ func Load() (Config, error) {
 	if err := env.Parse(&cfg); err != nil {
 		return Config{}, fmt.Errorf("parse env: %w", err)
 	}
+	if err := cfg.Validate(); err != nil {
+		return Config{}, err
+	}
 
 	return cfg, nil
+}
+
+func (c Config) Validate() error {
+	publicURL, err := url.Parse(strings.TrimSpace(c.PublicBaseURL))
+	if err != nil || publicURL.Host == "" || (publicURL.Scheme != "http" && publicURL.Scheme != "https") {
+		return errors.New("PUBLIC_BASE_URL must be an absolute HTTP(S) URL")
+	}
+
+	if !strings.EqualFold(strings.TrimSpace(c.AppEnv), "production") {
+		return nil
+	}
+	if publicURL.Scheme != "https" {
+		return errors.New("PUBLIC_BASE_URL must use HTTPS in production")
+	}
+	for _, secret := range []struct {
+		name  string
+		value string
+	}{
+		{name: "JWT_SECRET", value: c.JWTSecret},
+		{name: "WEBHOOK_SECRET", value: c.WebhookSecret},
+		{name: "ENCRYPTION_KEY", value: c.EncryptionKey},
+	} {
+		value := strings.TrimSpace(secret.value)
+		if len(value) < 32 {
+			return fmt.Errorf("%s must contain at least 32 characters in production", secret.name)
+		}
+		if isPlaceholderSecret(value) {
+			return fmt.Errorf("%s must not use a placeholder value in production", secret.name)
+		}
+	}
+	return nil
+}
+
+func isPlaceholderSecret(value string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	for _, marker := range []string{"change-me", "changeme", "replace-me", "your-secret", "example-secret"} {
+		if strings.Contains(normalized, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func (c Config) DatabaseURL() string {

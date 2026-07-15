@@ -254,7 +254,7 @@ func (s *Service) RegisterWebhook(ctx context.Context) error {
 		return fmt.Errorf("set webhook: %w", err)
 	}
 
-	s.logger.Info("telegram webhook registered", zap.String("url", s.cfg.WebhookURL()))
+	s.logger.Info("telegram webhook registered", zap.String("public_base_url", strings.TrimRight(s.cfg.PublicBaseURL, "/")))
 	if err := s.setupCommandMenu(); err != nil {
 		s.logger.Warn("setup command menu failed", zap.Error(err))
 	}

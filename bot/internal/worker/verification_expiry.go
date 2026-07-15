@@ -70,6 +70,7 @@ func (w *VerificationExpiry) processExpired(ctx context.Context) {
 		w.logger.Error("load expired pending verifications", zap.Error(err))
 		return
 	}
+	w.botService.RecordWorkerSuccess(ctx, "verification-expiry")
 
 	if len(pendingList) == 0 {
 		return

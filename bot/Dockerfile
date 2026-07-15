@@ -1,4 +1,4 @@
-FROM golang:1.22-alpine AS builder
+FROM golang:1.26.5-alpine AS builder
 
 WORKDIR /app
 
@@ -13,7 +13,9 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /out/migrate ./cmd/migrate
 
 FROM alpine:3.20
 
-RUN apk add --no-cache ca-certificates tzdata font-dejavu ffmpeg
+RUN apk add --no-cache ca-certificates tzdata font-dejavu ffmpeg \
+    && addgroup -S -g 10001 clawguard \
+    && adduser -S -D -H -u 10001 -G clawguard clawguard
 
 WORKDIR /app
 
@@ -25,5 +27,7 @@ COPY --from=builder /app/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
 EXPOSE 8080
+
+USER 10001:10001
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

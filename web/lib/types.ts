@@ -291,6 +291,15 @@ export type HealthStatus = {
   ai_last_error: string;
   today_calls: number;
   uptime_seconds: number;
+  active_pending: number;
+  due_cleanup: number;
+  retrying_cleanup: number;
+  oldest_due_seconds: number;
+  join_cleanup_dead: Nullable<number>;
+  backup_last_at: Nullable<string>;
+  backup_seconds_ago: Nullable<number>;
+  verification_worker_seconds_ago: Nullable<number>;
+  join_recovery_worker_seconds_ago: Nullable<number>;
 };
 
 export type LiveEvent = {

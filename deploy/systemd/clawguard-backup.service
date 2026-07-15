@@ -1,0 +1,16 @@
+[Unit]
+Description=ClawGuard PostgreSQL backup
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/clawguard
+EnvironmentFile=-/root/clawguard/.env
+ExecStart=/root/clawguard/scripts/backup.sh
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+
+[Install]
+WantedBy=multi-user.target

@@ -1,3 +1,9 @@
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "20m"
+    max-file: "5"
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -15,6 +21,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    logging: *default-logging
 
   redis:
     image: redis:7-alpine
@@ -57,10 +64,10 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    logging: *default-logging
 
   bot:
-    image: kelework/clawguard-bot:latest
-    pull_policy: always
+    image: kelework/clawguard-bot:${CLAWGUARD_TAG:-latest}
     restart: unless-stopped
     env_file:
       - .env
@@ -80,10 +87,16 @@ services:
       timeout: 5s
       retries: 6
       start_period: 20s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp:mode=1777
+    logging: *default-logging
 
   web:
-    image: kelework/clawguard-web:latest
-    pull_policy: always
+    image: kelework/clawguard-web:${CLAWGUARD_TAG:-latest}
     restart: unless-stopped
     env_file:
       - .env
@@ -97,6 +110,20 @@ services:
         condition: service_healthy
     ports:
       - "127.0.0.1:3000:3000"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp:mode=1777
+      - /app/.next/cache:mode=1777
+    logging: *default-logging
 
   caddy:
     image: caddy:2-alpine
@@ -105,13 +132,14 @@ services:
       bot:
         condition: service_healthy
       web:
-        condition: service_started
+        condition: service_healthy
     ports:
       - "127.0.0.1:8090:80"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddydata:/data
       - caddyconfig:/config
+    logging: *default-logging
 
 volumes:
   pgdata:
