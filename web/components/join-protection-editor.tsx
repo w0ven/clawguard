@@ -227,7 +227,7 @@ export function JoinProtectionEditor({ chatId }: Props) {
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <div>
               <CardTitle>入群洪泛防护</CardTitle>
-              <p className="mt-1 text-xs text-[var(--text-muted)]">只统计未信任的新入群账号；可信成员直接放行且不占洪泛阈值。</p>
+              <p className="mt-1 text-xs text-[var(--text-muted)]">监测短时间内集中涌入的新账号，正常入群仍按原有验证流程处理。</p>
             </div>
             <div className="flex items-center gap-3">
               <span className="text-sm text-[var(--text-muted)]">{draft.enabled ? "已开启" : "已关闭"}</span>
@@ -238,7 +238,7 @@ export function JoinProtectionEditor({ chatId }: Props) {
         <CardBody>
           <div className="rounded-lg border border-[var(--border)] bg-[var(--surface-2)] p-4 text-sm leading-6">
             <p className="font-medium text-[var(--text)]">防护期间会发生什么？</p>
-            <p className="mt-1 text-[var(--text-muted)]">不发验证图，不调用 CAS、资料检查或 AI，不逐人发送提示；只临时处理未信任的新入群账号，可信成员不受防洪影响。正常少量用户仍按原来的数学图片等验证流程处理。</p>
+            <p className="mt-1 text-[var(--text-muted)]">不发验证图，不调用 CAS、资料检查或 AI，也不逐人发送提示；防护期间继续涌入的新账号会被临时封禁，结束后自动恢复原有验证流程。</p>
           </div>
         </CardBody>
       </Card>
@@ -251,8 +251,8 @@ export function JoinProtectionEditor({ chatId }: Props) {
           <div className="grid gap-3 lg:grid-cols-[1fr_auto_1fr_auto_1fr_auto_1fr] lg:items-stretch">
             {[
               [CheckCircle2, "正常时", "新人保持受限并完成原有验证"],
-              [Users, "达到阈值", `${draft.join_window_seconds} 秒内未信任入群达到 ${draft.join_threshold} 人，或待验证人数将到上限`],
-              [ShieldAlert, "防护期间", "仅处理未信任入群账号，可信成员放行"],
+              [Users, "达到阈值", `${draft.join_window_seconds} 秒内新入群账号达到 ${draft.join_threshold} 人，或待验证人数接近上限`],
+              [ShieldAlert, "防护期间", `后续新入群账号临时封禁 ${Math.ceil(draft.temporary_ban_seconds / 60)} 分钟`],
               [Clock3, "自动恢复", `${Math.ceil(draft.protection_duration_seconds / 60)} 分钟后恢复正常验证`],
             ].map(([Icon, title, description], index) => (
               <div key={String(title)} className="contents">
@@ -294,7 +294,7 @@ export function JoinProtectionEditor({ chatId }: Props) {
           {simulated && (
             <div className="mt-4 rounded-lg border border-[var(--border)] bg-[var(--surface-2)] p-4 text-sm">
               <p className="font-medium">🛡️ 入群防护已触发</p>
-              <p className="mt-2 text-[var(--text-muted)]">最近 {draft.join_window_seconds} 秒未信任入群达到 {draft.join_threshold} 人。后续未信任账号临时处理 {Math.ceil(draft.temporary_ban_seconds / 60)} 分钟；可信成员正常放行，预计 {Math.ceil(draft.protection_duration_seconds / 60)} 分钟后恢复。</p>
+              <p className="mt-2 text-[var(--text-muted)]">最近 {draft.join_window_seconds} 秒新入群账号达到 {draft.join_threshold} 人。防护期间，后续新入群账号临时封禁 {Math.ceil(draft.temporary_ban_seconds / 60)} 分钟，预计 {Math.ceil(draft.protection_duration_seconds / 60)} 分钟后自动恢复正常验证。</p>
             </div>
           )}
         </CardBody>
