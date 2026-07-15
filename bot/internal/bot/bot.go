@@ -255,13 +255,13 @@ func (s *Service) RegisterWebhook(ctx context.Context) error {
 	}
 
 	s.logger.Info("telegram webhook registered", zap.String("public_base_url", strings.TrimRight(s.cfg.PublicBaseURL, "/")))
-	if err := s.setupCommandMenu(); err != nil {
+	if err := s.setupCommandMenu(ctx); err != nil {
 		s.logger.Warn("setup command menu failed", zap.Error(err))
 	}
 	return nil
 }
 
-func (s *Service) setupCommandMenu() error {
+func (s *Service) setupCommandMenu(ctx context.Context) error {
 	groupCommands := []tele.Command{
 		{Text: "start", Description: "机器人介绍"},
 		{Text: "help", Description: "命令列表"},
@@ -295,15 +295,7 @@ func (s *Service) setupCommandMenu() error {
 	}); err != nil {
 		return fmt.Errorf("set private commands: %w", err)
 	}
-	if _, err := s.bot.Raw("setChatMenuButton", map[string]any{
-		"menu_button": map[string]any{
-			"type": "web_app",
-			"text": "管理面板",
-			"web_app": map[string]string{
-				"url": strings.TrimRight(s.cfg.PublicBaseURL, "/") + "/miniapp",
-			},
-		},
-	}); err != nil {
+	if err := setDefaultMiniAppMenuButton(ctx, s.cfg.BotToken, strings.TrimRight(s.cfg.PublicBaseURL, "/")+"/miniapp"); err != nil {
 		return fmt.Errorf("set mini app menu button: %w", err)
 	}
 	return nil
