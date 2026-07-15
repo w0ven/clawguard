@@ -2727,9 +2727,19 @@ func (s *Service) resetTrustAfterViolation(ctx context.Context, msg *tele.Messag
 		}
 	}
 
+	penaltyAction := normalizeTrustPenaltyAction(action)
+	if shouldKeepTrustedHumanAfterViolation(trust, msg.Sender, penaltyAction) {
+		s.logger.Info("trusted human retained trust after non-ban violation",
+			zap.Int64("chat_id", msg.Chat.ID),
+			zap.Int64("user_id", msg.Sender.ID),
+			zap.String("action", penaltyAction),
+		)
+		return
+	}
+
 	score := trust.Score
 	nextStatus := trust.Status
-	switch normalizeTrustPenaltyAction(action) {
+	switch penaltyAction {
 	case "ban":
 		nextStatus = "banned"
 		score = 0
@@ -2775,6 +2785,14 @@ func (s *Service) resetTrustAfterViolation(ctx context.Context, msg *tele.Messag
 			s.logger.Warn("update user trust after violation failed", zap.Error(err), zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID), zap.String("action", action))
 		}
 	}
+}
+
+func shouldKeepTrustedHumanAfterViolation(trust store.UserTrust, user *tele.User, penaltyAction string) bool {
+	return strings.EqualFold(strings.TrimSpace(trust.Status), "trusted") &&
+		user != nil &&
+		!trust.IsBot &&
+		!user.IsBot &&
+		penaltyAction != "ban"
 }
 
 func isViolationAction(action string) bool {
@@ -2990,6 +3008,9 @@ func (s *Service) escalateWarnings(ctx context.Context, chat *tele.Chat, user *t
 		auditOutcome = "failed"
 		auditError = fmt.Sprintf("unknown warnings escalate action %q", action)
 		return fmt.Errorf("unknown warnings escalate action %q", action)
+	}
+	if action == "ban" {
+		s.resetTrustAfterViolation(ctx, &tele.Message{Chat: chat, Sender: user}, "ban", stringPtr("warnings_threshold"))
 	}
 
 	if sendEscalationFeedback {
