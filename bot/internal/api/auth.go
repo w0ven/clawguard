@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -26,6 +27,7 @@ import (
 const adminCookieName = "cg_admin"
 const csrfCookieName = "cg_csrf"
 const adminContextKey = "cg_admin_actor"
+const telegramMiniAppMaxAge = 10 * time.Minute
 
 type adminClaims struct {
 	Role string `json:"role"`
@@ -43,11 +45,106 @@ type telegramLoginPayload struct {
 	Hash      string
 }
 
+type telegramMiniAppRequest struct {
+	InitData string `json:"init_data"`
+}
+
+type telegramMiniAppUser struct {
+	ID        int64  `json:"id"`
+	FirstName string `json:"first_name"`
+	LastName  string `json:"last_name"`
+	Username  string `json:"username"`
+	PhotoURL  string `json:"photo_url"`
+}
+
 func (s *Server) registerAuthRoutes() {
 	s.echo.GET("/api/auth/telegram-login", s.handleTelegramLogin)
 	s.echo.POST("/api/auth/telegram-login", s.handleTelegramLogin, s.apiRateLimit(s.ipRateLimitKey("auth:telegram_login_ip"), telegramLoginIPLimit, apiRateLimitWindow), s.apiRateLimit(s.telegramLoginUserRateLimitKey, telegramLoginUserLimit, apiRateLimitWindow))
+	s.echo.POST("/api/auth/miniapp", s.handleTelegramMiniApp, s.apiRateLimit(s.ipRateLimitKey("auth:miniapp_ip"), telegramLoginIPLimit, apiRateLimitWindow))
 	s.echo.POST("/api/auth/logout", s.handleLogout, s.apiRateLimit(s.ipRateLimitKey("auth:logout_ip"), logoutIPLimit, apiRateLimitWindow))
 	s.echo.GET("/api/auth/me", s.requireAdminJWT(s.handleMe))
+}
+
+func (s *Server) handleTelegramMiniApp(c echo.Context) error {
+	var body telegramMiniAppRequest
+	if err := c.Bind(&body); err != nil || len(body.InitData) > 8192 {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid init data"})
+	}
+	user, err := validateTelegramMiniApp(body.InitData, s.cfg.BotToken, time.Now())
+	if err != nil {
+		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "invalid mini app authorization"})
+	}
+
+	queries := s.botService.Queries()
+	admin, err := queries.GetAdminByTelegramID(c.Request().Context(), user.ID)
+	if err != nil {
+		return c.JSON(http.StatusForbidden, map[string]string{"error": "admin not allowed"})
+	}
+	admin, err = queries.TouchAdminLogin(c.Request().Context(), store.TouchAdminLoginParams{
+		TelegramID: user.ID,
+		Username:   stringPtr(user.Username),
+		FirstName:  stringPtr(strings.TrimSpace(user.FirstName + " " + user.LastName)),
+		PhotoURL:   stringPtr(user.PhotoURL),
+	})
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "update admin failed"})
+	}
+
+	tokenString, err := s.signAdminJWT(admin)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "sign token failed"})
+	}
+	csrfToken, err := newCSRFToken()
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "csrf token failed"})
+	}
+	setAdminCookie(c, tokenString)
+	setCSRFCookie(c, csrfToken)
+	return c.JSON(http.StatusOK, map[string]any{"admin": serializeAdmin(admin), "csrf_token": csrfToken, "redirect_to": "/dashboard"})
+}
+
+func validateTelegramMiniApp(raw, botToken string, now time.Time) (telegramMiniAppUser, error) {
+	values, err := url.ParseQuery(strings.TrimSpace(raw))
+	if err != nil {
+		return telegramMiniAppUser{}, err
+	}
+	providedHash, err := hex.DecodeString(values.Get("hash"))
+	if err != nil || len(providedHash) != sha256.Size {
+		return telegramMiniAppUser{}, fmt.Errorf("invalid hash")
+	}
+	authDate, err := strconv.ParseInt(values.Get("auth_date"), 10, 64)
+	if err != nil || authDate <= 0 {
+		return telegramMiniAppUser{}, fmt.Errorf("invalid auth date")
+	}
+	age := now.Sub(time.Unix(authDate, 0))
+	if age < -time.Minute || age > telegramMiniAppMaxAge {
+		return telegramMiniAppUser{}, fmt.Errorf("authorization expired")
+	}
+
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		if key != "hash" && key != "signature" {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, key := range keys {
+		parts = append(parts, key+"="+values.Get(key))
+	}
+	secretMAC := hmac.New(sha256.New, []byte("WebAppData"))
+	_, _ = secretMAC.Write([]byte(botToken))
+	checkMAC := hmac.New(sha256.New, secretMAC.Sum(nil))
+	_, _ = checkMAC.Write([]byte(strings.Join(parts, "\n")))
+	if !hmac.Equal(providedHash, checkMAC.Sum(nil)) {
+		return telegramMiniAppUser{}, fmt.Errorf("signature mismatch")
+	}
+
+	var user telegramMiniAppUser
+	if err := json.Unmarshal([]byte(values.Get("user")), &user); err != nil || user.ID == 0 {
+		return telegramMiniAppUser{}, fmt.Errorf("invalid user")
+	}
+	return user, nil
 }
 
 func (s *Server) requireAdminJWT(next echo.HandlerFunc) echo.HandlerFunc {

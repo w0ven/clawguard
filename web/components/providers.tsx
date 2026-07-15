@@ -3,6 +3,7 @@
 import type { ReactNode } from "react";
 import { createContext, useCallback, useContext, useMemo, useState } from "react";
 import { ToastViewport } from "@/components/ui/toast";
+import { TelegramMiniAppProvider } from "@/components/telegram-miniapp-provider";
 
 type ToastItem = {
   id: number;
@@ -31,8 +32,10 @@ export function Providers({ children }: { children: ReactNode }) {
 
   return (
     <ToastContext.Provider value={value}>
-      {children}
-      <ToastViewport items={items} />
+      <TelegramMiniAppProvider>
+        {children}
+        <ToastViewport items={items} />
+      </TelegramMiniAppProvider>
     </ToastContext.Provider>
   );
 }

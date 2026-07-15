@@ -142,6 +142,14 @@ new(长期无发言) -> archived
 
 私聊管理员可使用 `/start`、`/help`、`/status`、`/trust <user_id>` 和 `/config`。
 
+## Telegram Mini App
+
+Bot 私聊底部的“管理面板”按钮会打开 `/miniapp`。Mini App 使用 Telegram `initData` 在服务端完成 HMAC-SHA-256 校验，只允许 `admins` 表中的管理员登录，并复用原有 JWT、CSRF、权限范围和审计体系。
+
+Mini App 覆盖完整后台功能：总览、群管理、群授权、违规、AI 复核、AI 统计、信任系统、Prompt、模型管理、审计和管理员管理。界面自动适配 Telegram 明暗主题、安全区、返回按钮与触觉反馈；手机端使用底部高频导航和“全部功能”菜单，桌面 Web 后台保持原布局。
+
+上线前需要在 BotFather 中为 Bot 配置 Mini App/Web App 允许域名，域名必须与 `PUBLIC_BASE_URL` 一致并使用 HTTPS。Bot 每次启动注册 webhook 时会同步默认 Mini App 菜单按钮。
+
 ## 技术架构
 
 ```text
