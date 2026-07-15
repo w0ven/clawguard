@@ -12,6 +12,7 @@ ENV_FILE="${ROOT_DIR}/.env"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 ENV_BACKUP="${ENV_FILE}.before-${STAMP}"
 ROLLBACK_TAG="rollback-${STAMP}"
+DEPLOYED=0
 
 cd "$ROOT_DIR"
 test -f "$ENV_FILE"
@@ -53,7 +54,24 @@ rollback() {
   docker compose up -d --no-deps bot
   docker compose up -d --no-deps web
 }
-trap rollback ERR
+
+finish() {
+  local status=$?
+  trap - EXIT
+  if [[ "$status" -ne 0 && "$DEPLOYED" -ne 1 ]]; then
+    rollback || echo "automatic rollback failed; manual recovery is required" >&2
+  fi
+  exit "$status"
+}
+
+web_is_healthy() {
+  local container
+  container="$(docker compose ps -q web)"
+  [[ -n "$container" ]] &&
+    [[ "$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$container")" == "healthy" ]]
+}
+
+trap finish EXIT
 
 "${ROOT_DIR}/scripts/backup.sh"
 if [[ "${ROTATE_WEBHOOK_SECRET:-0}" == "1" ]]; then
@@ -74,17 +92,17 @@ curl --fail --silent http://127.0.0.1:8080/readyz | grep -q '"status":"ready"'
 docker compose up -d --no-deps web
 
 for _ in $(seq 1 36); do
-  if docker compose ps --format json web | grep -q '"Health":"healthy"'; then
+  if web_is_healthy; then
     break
   fi
   sleep 5
 done
 
 curl --fail --silent http://127.0.0.1:8080/readyz | grep -q '"status":"ready"'
-docker compose ps --format json web | grep -q '"Health":"healthy"'
+web_is_healthy
 PUBLIC_URL="$(docker compose exec -T bot sh -ec 'printf %s "$PUBLIC_BASE_URL"')"
 EXPECTED_REVISION="${NEW_TAG#sha-}" "${ROOT_DIR}/scripts/prod-smoke.sh" --url "$PUBLIC_URL"
 
-trap - ERR
+DEPLOYED=1
 rm -f "$ENV_BACKUP"
 echo "deployed=${NEW_TAG}"
