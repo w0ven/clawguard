@@ -6,7 +6,6 @@ COMPOSE_FILE=docker-compose.yml
 SINCE=5m
 WEBHOOK_LOG_WINDOW=24h
 PUBLIC_URL=https://rfcguard.misaka.si
-EXPECTED_DOMAIN=rfcguard.misaka.si
 SERVICES="bot web postgres redis caddy"
 
 failures=0
@@ -98,6 +97,7 @@ case "$PUBLIC_URL" in
 esac
 url_host=${url_host%%/*}
 url_host=${url_host%%:*}
+EXPECTED_DOMAIN=$url_host
 
 log "ClawGuard production smoke"
 log "app_dir=$APP_DIR"
