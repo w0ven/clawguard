@@ -43,9 +43,14 @@ export function HealthCard() {
   const unhealthy =
     Boolean(error) ||
     (health?.db_latency_ms ?? -1) < 0 ||
+    (health != null && health.redis_latency_ms == null) ||
+    (health != null && health.join_cleanup_dead == null) ||
     deadLetters > 0 ||
+    (health != null && health.backup_seconds_ago == null) ||
     (health?.backup_seconds_ago ?? 0) > 36 * 3600 ||
+    (health != null && health.verification_worker_seconds_ago == null) ||
     (health?.verification_worker_seconds_ago ?? 0) > 120 ||
+    (health != null && health.join_recovery_worker_seconds_ago == null) ||
     (health?.join_recovery_worker_seconds_ago ?? 0) > 90;
 
   const metrics = [
@@ -85,22 +90,30 @@ export function HealthCard() {
     {
       label: "清理死信",
       value: health?.join_cleanup_dead == null ? "不可用" : `${deadLetters}`,
-      alert: deadLetters > 0,
+      alert: health != null && (health.join_cleanup_dead == null || deadLetters > 0),
     },
     {
       label: "最近备份",
       value: ageLabel(health?.backup_seconds_ago),
-      alert: (health?.backup_seconds_ago ?? 0) > 36 * 3600,
+      alert:
+        health != null &&
+        (health.backup_seconds_ago == null || health.backup_seconds_ago > 36 * 3600),
     },
     {
       label: "验证清理 Worker",
       value: ageLabel(health?.verification_worker_seconds_ago),
-      alert: (health?.verification_worker_seconds_ago ?? 0) > 120,
+      alert:
+        health != null &&
+        (health.verification_worker_seconds_ago == null ||
+          health.verification_worker_seconds_ago > 120),
     },
     {
       label: "入群恢复 Worker",
       value: ageLabel(health?.join_recovery_worker_seconds_ago),
-      alert: (health?.join_recovery_worker_seconds_ago ?? 0) > 90,
+      alert:
+        health != null &&
+        (health.join_recovery_worker_seconds_ago == null ||
+          health.join_recovery_worker_seconds_ago > 90),
     },
   ];
 

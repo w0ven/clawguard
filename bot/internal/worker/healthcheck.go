@@ -100,7 +100,9 @@ func operationsAlerts(status operationsStatus) []string {
 	if status.runtime.JoinCleanupDeadLetters != nil && *status.runtime.JoinCleanupDeadLetters > 0 {
 		alerts = append(alerts, fmt.Sprintf("Join cleanup dead letters: %d", *status.runtime.JoinCleanupDeadLetters))
 	}
-	if status.runtime.BackupSecondsAgo != nil && *status.runtime.BackupSecondsAgo > int64((36*time.Hour)/time.Second) {
+	if status.runtime.BackupSecondsAgo == nil {
+		alerts = append(alerts, "No successful database backup has been recorded")
+	} else if *status.runtime.BackupSecondsAgo > int64((36*time.Hour)/time.Second) {
 		alerts = append(alerts, fmt.Sprintf("Last successful backup: %ds ago", *status.runtime.BackupSecondsAgo))
 	}
 	if status.runtime.VerificationWorkerSecondsAgo != nil && *status.runtime.VerificationWorkerSecondsAgo > 120 {
