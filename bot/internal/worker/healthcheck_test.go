@@ -34,3 +34,10 @@ func TestOperationsAlertsOnlyReportsActionableConditions(t *testing.T) {
 		t.Fatalf("operationsAlerts() = %v, want 4 alerts", unhealthy)
 	}
 }
+
+func TestOperationsAlertsReportsMissingBackup(t *testing.T) {
+	alerts := operationsAlerts(operationsStatus{})
+	if len(alerts) != 1 || alerts[0] != "No successful database backup has been recorded" {
+		t.Fatalf("operationsAlerts() = %v, want missing backup alert", alerts)
+	}
+}
