@@ -999,7 +999,7 @@ func (s *Service) ProcessJoinProtectionCleanupFallbacks(ctx context.Context, lim
 
 func (s *Service) notifyJoinProtectionAdmins(ctx context.Context, chat *tele.Chat, decision joinProtectionDecision, now time.Time) {
 	message := fmt.Sprintf(
-		"🛡️ <b>入群防护已触发</b>\n原因：%s\n已拦截：%d 人\n预计剩余：%s\n\n防护期间不发送验证图、不调用 CAS/Bio/AI，也不会逐人刷屏；可信成员会直接放行且不计入洪泛，首次出现的未信任账号会被临时移出，曾出现但尚未取得信任的账号只会被临时禁言。",
+		"🛡️ <b>入群防护已触发</b>\n原因：%s\n已拦截：%d 人\n预计剩余：%s\n\n防护期间不发送验证图、不调用 CAS/Bio/AI，也不会逐人刷屏；后续集中涌入的新账号将被临时处理，防护到期后自动恢复正常验证。",
 		htmlEscape(formatJoinProtectionTrigger(decision.Trigger)),
 		decision.Intercepted,
 		htmlEscape(formatRemaining(decision.ProtectionUntil, now)),
