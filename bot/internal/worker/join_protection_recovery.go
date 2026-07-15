@@ -39,10 +39,16 @@ func (w *JoinProtectionRecovery) Run(ctx context.Context) {
 }
 
 func (w *JoinProtectionRecovery) process(ctx context.Context) {
+	succeeded := true
 	if err := w.botService.ProcessJoinProtectionRecoveries(ctx, joinProtectionRecoveryBatch); err != nil {
 		w.logger.Error("process join protection recoveries", zap.Error(err))
+		succeeded = false
 	}
 	if err := w.botService.ProcessJoinProtectionCleanupFallbacks(ctx, joinProtectionRecoveryBatch); err != nil {
 		w.logger.Error("process join protection cleanup fallbacks", zap.Error(err))
+		succeeded = false
+	}
+	if succeeded {
+		w.botService.RecordWorkerSuccess(ctx, "join-protection-recovery")
 	}
 }

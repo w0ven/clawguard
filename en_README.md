@@ -13,8 +13,8 @@ This document reflects the `main` branch as of **2026-07-16**.
 | Database schema | goose migration `00028` |
 | Production topology | One bot, one web service, PostgreSQL 16, Redis 7 AOF, and Caddy 2 |
 | Delivery | GitHub Actions tests and publishes bot/web images; production is upgraded in place with Docker Compose |
-| Backend CI | `go test ./...`, `go vet ./...`, and race tests for critical packages |
-| Frontend CI | TypeScript checking and a Next.js production build |
+| Backend CI | Unit tests, vet, race, govulncheck, and a real PostgreSQL migration smoke test |
+| Frontend CI | TypeScript, production build, npm audit, and desktop/mobile Playwright smoke tests |
 | Join-flood protection | Enabled by default, Redis atomic state, leased database jobs, and a Redis cleanup fallback |
 | AI moderation | Feature-complete but disabled by default until providers and models are configured |
 
@@ -119,7 +119,7 @@ Cloudflare Tunnel
         |
 Caddy :80
   |             |
-  |             +--> Next.js 15 Web :3000
+  |             +--> Next.js 16 Web :3000
   |
   +--> Go Bot + Echo API :8080
              |          |
@@ -128,8 +128,8 @@ Caddy :80
 
 | Layer | Technology |
 |---|---|
-| Bot/API | Go 1.22, telebot.v3, Echo v4 |
-| Web | Node.js 22, Next.js 15 App Router, React 19, Tailwind CSS |
+| Bot/API | Go 1.26.5, telebot.v3, Echo v4 |
+| Web | Node.js 22, Next.js 16 App Router, React 19, Tailwind CSS |
 | Data | PostgreSQL 16, pgx/v5, sqlc, goose |
 | State and rate limits | Redis 7 with AOF `everysec` |
 | Media | ffmpeg, DejaVu fonts, Go image rendering |
@@ -226,7 +226,7 @@ See [`.env.example`](./.env.example) for the deployment template.
 | Turnstile | `TURNSTILE_SITE_KEY`, `TURNSTILE_SECRET_KEY` |
 | LLM bootstrap | `LLM_PROVIDERS` and provider-key environment variables |
 | Runtime | `APP_ENV`, `HTTP_PORT`, `DAILY_REPORT_ENABLED`, `CLAWGUARD_LOG_RAW_UPDATES` |
-| Retention | `RETENTION_EVENTS_DAYS`, `RETENTION_PROFILE_CHECK_LOGS_DAYS`, `RETENTION_ZOMBIE_DAYS`, `RETENTION_BANNED_DAYS` |
+| Retention | `RETENTION_VIOLATIONS_DAYS`, `RETENTION_AI_DECISIONS_DAYS`, `RETENTION_CONFIG_AUDIT_DAYS`, `RETENTION_PROFILE_CHECK_LOGS_DAYS`, `RETENTION_ZOMBIE_DAYS`, `RETENTION_BANNED_DAYS` |
 | Web build | `NEXT_PUBLIC_BOT_USERNAME`, `NEXT_PUBLIC_TURNSTILE_SITE_KEY` |
 
 `NEXT_PUBLIC_*` values must be configured as GitHub Repository Variables because Next.js embeds them into the browser bundle at build time.
@@ -259,19 +259,20 @@ See [`.env.example`](./.env.example) for the deployment template.
 | HTTP | Server timeouts, Caddy security headers, loopback-only host ports |
 | Logging | Error redaction and raw Telegram update logging disabled by default |
 
+Production startup rejects placeholder or shorter-than-32-character `JWT_SECRET`, `WEBHOOK_SECRET`, and `ENCRYPTION_KEY` values, and requires an HTTPS `PUBLIC_BASE_URL`. Webhook registration logs never include the secret path.
+
 ## CI/CD and Production Upgrades
 
-Pull Requests run backend tests/vet/race and frontend type/build checks. A `main` push publishes `latest` and `sha-<commit>` tags for both images. Images include the `org.opencontainers.image.revision` label.
+Pull Requests run backend tests/vet/race/vulnerability/migration checks and frontend type/build/audit/Playwright checks. A `main` push publishes `latest` and `sha-<commit>` tags for both images. Production pins `CLAWGUARD_TAG=sha-<commit>`, and images include the `org.opencontainers.image.revision` label.
 
-Before upgrading production, tag the currently running images for rollback, pull the new images, then update bot and web separately:
+Use the pinned deployment script. It creates a database backup and rollback image tags, updates bot and web separately, verifies health and OCI revisions, and restores the previous images on failure:
 
 ```bash
 cd /root/clawguard
-docker compose pull bot web
-docker compose up -d --no-deps bot
-curl -fsS http://127.0.0.1:8080/readyz
-docker compose up -d --no-deps web
+bash scripts/deploy-production.sh sha-<commit>
 ```
+
+If a webhook secret may have reached logs, run `ROTATE_WEBHOOK_SECRET=1 bash scripts/deploy-production.sh sha-<commit>` to rotate it inside the rollback-safe deployment.
 
 Run the production smoke suite afterward:
 
@@ -302,18 +303,25 @@ bash scripts/restore-rehearsal.sh
 BACKUP_PATH=/path/to/clawguard.sql.gz bash scripts/restore-rehearsal.sh
 ```
 
-The script validates backups but does not create them. Production still needs a cron/systemd timer or an external backup system for regular `pg_dump` creation and off-host retention.
+`scripts/backup.sh` creates validated custom-format PostgreSQL archives with checksums and retention. The included systemd timer runs daily; set `BACKUP_OFFSITE_DIR` to an external mount for an off-host copy.
+
+```bash
+install -m 0644 deploy/systemd/clawguard-backup.service /etc/systemd/system/
+install -m 0644 deploy/systemd/clawguard-backup.timer /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now clawguard-backup.timer
+```
 
 ## Test Status and Known Boundaries
 
 Baseline measured on 2026-07-16:
 
-- 53 Go test files and about 30.3% total statement coverage.
-- Package coverage: bot 39.0%, AI 49.4%, config 55.2%, API 13.9%, scheduler 22.4%, worker 2.7%.
-- The Web project has type/build checks but no unit tests or Playwright E2E yet.
-- Production Compose still consumes `latest`; verify the image revision on every rollout.
+- 57 Go test files and about 30.3% total statement coverage.
+- Package coverage: bot 38.9%, AI 49.4%, config 56.7%, API 13.9%, scheduler 22.4%, worker 6.2%.
+- The Web project has desktop/mobile Playwright entry tests; authenticated configuration workflows still need broader coverage.
+- Production Compose pins a `sha-<commit>` tag and the deployment script verifies the image revision and rolls back on failure.
 - Horizontal bot scaling requires leader election or distributed locking for periodic jobs.
-- Restore rehearsal exists, but the repository does not install a production backup timer.
+- A production backup timer and restore rehearsal are included; an actual off-host destination must still be configured.
 
 ## Recent Changes
 

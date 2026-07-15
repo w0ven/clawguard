@@ -46,21 +46,21 @@ func runRetentionOnce(ctx context.Context, q *store.Queries, cfg config.Retentio
 	runCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 
-	eventDays := int32(maxRetention(cfg.EventsDays, 30))
-	if n, err := q.DeleteOldViolations(runCtx, eventDays); err != nil {
-		logger.Warn("retention cleanup event violations failed", zap.Error(err))
+	windows := resolveRetentionWindows(cfg)
+	if n, err := q.DeleteOldViolations(runCtx, windows.violationsDays); err != nil {
+		logger.Warn("retention cleanup violations failed", zap.Error(err))
 	} else {
-		logger.Info("retention cleanup event violations", zap.Int64("deleted", n), zap.Int32("days", eventDays))
+		logger.Info("retention cleanup violations", zap.Int64("deleted", n), zap.Int32("days", windows.violationsDays))
 	}
-	if n, err := q.DeleteOldAIDecisions(runCtx, eventDays); err != nil {
-		logger.Warn("retention cleanup event ai decisions failed", zap.Error(err))
+	if n, err := q.DeleteOldAIDecisions(runCtx, windows.aiDecisionsDays); err != nil {
+		logger.Warn("retention cleanup ai decisions failed", zap.Error(err))
 	} else {
-		logger.Info("retention cleanup event ai decisions", zap.Int64("deleted", n), zap.Int32("days", eventDays))
+		logger.Info("retention cleanup ai decisions", zap.Int64("deleted", n), zap.Int32("days", windows.aiDecisionsDays))
 	}
-	if n, err := q.DeleteOldConfigAudit(runCtx, eventDays); err != nil {
-		logger.Warn("retention cleanup event config audit failed", zap.Error(err))
+	if n, err := q.DeleteOldConfigAudit(runCtx, windows.configAuditDays); err != nil {
+		logger.Warn("retention cleanup config audit failed", zap.Error(err))
 	} else {
-		logger.Info("retention cleanup event config audit", zap.Int64("deleted", n), zap.Int32("days", eventDays))
+		logger.Info("retention cleanup config audit", zap.Int64("deleted", n), zap.Int32("days", windows.configAuditDays))
 	}
 	zombieDays := int32(maxRetention(cfg.ZombieDays, 30))
 	if n, err := q.ArchiveZombieUserTrust(runCtx, zombieDays); err != nil {
@@ -74,6 +74,20 @@ func runRetentionOnce(ctx context.Context, q *store.Queries, cfg config.Retentio
 		logger.Warn("retention cleanup banned users failed", zap.Error(err))
 	} else {
 		logger.Info("retention cleanup banned users", zap.Int64("deleted", n), zap.Int32("days", bannedDays))
+	}
+}
+
+type retentionWindows struct {
+	violationsDays  int32
+	aiDecisionsDays int32
+	configAuditDays int32
+}
+
+func resolveRetentionWindows(cfg config.RetentionConfig) retentionWindows {
+	return retentionWindows{
+		violationsDays:  int32(maxRetention(cfg.ViolationsDays, 90)),
+		aiDecisionsDays: int32(maxRetention(cfg.AIDecisionsDays, 90)),
+		configAuditDays: int32(maxRetention(cfg.ConfigAuditDays, 365)),
 	}
 }
 

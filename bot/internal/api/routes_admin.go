@@ -869,17 +869,31 @@ func (s *Server) handleHealth(c echo.Context) error {
 		todayCalls = 0
 	}
 	status := s.botService.Status()
+	backlog, backlogErr := s.botService.Queries().GetOperationsBacklog(ctx)
+	if backlogErr != nil {
+		backlog = store.OperationsBacklog{}
+	}
+	operations := s.botService.OperationsRuntimeStatus(ctx)
 
 	return c.JSON(http.StatusOK, map[string]any{
-		"db_latency_ms":          dbLatency,
-		"redis_latency_ms":       redisLatency,
-		"webhook_last_update_at": status["webhook_last_update_at"],
-		"webhook_seconds_ago":    status["webhook_seconds_ago"],
-		"ai_last_ok_at":          status["ai_last_ok_at"],
-		"ai_last_fail_at":        status["ai_last_fail_at"],
-		"ai_last_error":          redact.Value(status["ai_last_error"]),
-		"today_calls":            todayCalls,
-		"uptime_seconds":         status["uptime_seconds"],
+		"db_latency_ms":                    dbLatency,
+		"redis_latency_ms":                 redisLatency,
+		"webhook_last_update_at":           status["webhook_last_update_at"],
+		"webhook_seconds_ago":              status["webhook_seconds_ago"],
+		"ai_last_ok_at":                    status["ai_last_ok_at"],
+		"ai_last_fail_at":                  status["ai_last_fail_at"],
+		"ai_last_error":                    redact.Value(status["ai_last_error"]),
+		"today_calls":                      todayCalls,
+		"uptime_seconds":                   status["uptime_seconds"],
+		"active_pending":                   backlog.ActivePending,
+		"due_cleanup":                      backlog.DueCleanup,
+		"retrying_cleanup":                 backlog.RetryingCleanup,
+		"oldest_due_seconds":               backlog.OldestDueCleanupSeconds,
+		"join_cleanup_dead":                operations.JoinCleanupDeadLetters,
+		"backup_last_at":                   operations.BackupLastAt,
+		"backup_seconds_ago":               operations.BackupSecondsAgo,
+		"verification_worker_seconds_ago":  operations.VerificationWorkerSecondsAgo,
+		"join_recovery_worker_seconds_ago": operations.JoinRecoveryWorkerSecondsAgo,
 	})
 }
 

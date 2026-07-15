@@ -6,6 +6,7 @@ COMPOSE_FILE=docker-compose.yml
 SINCE=5m
 WEBHOOK_LOG_WINDOW=24h
 PUBLIC_URL=https://rfcguard.misaka.si
+EXPECTED_REVISION=${EXPECTED_REVISION:-}
 SERVICES="bot web postgres redis caddy"
 
 failures=0
@@ -183,7 +184,6 @@ check_bot_logs() {
   webhook_match=$(printf '%s\n' "$webhook_lines" | grep -F "$EXPECTED_DOMAIN" || true)
   if [ -n "$webhook_match" ]; then
     pass "webhook registered log includes $EXPECTED_DOMAIN"
-    printf '%s\n' "$webhook_match" | tail -n 3
   else
     webhook_window_logs=$(compose logs --since "$WEBHOOK_LOG_WINDOW" bot 2>&1 || true)
     webhook_window_lines=$(printf '%s\n' "$webhook_window_logs" | grep -Eai 'webhook.*registered|registered.*webhook' || true)
@@ -191,16 +191,13 @@ check_bot_logs() {
     if [ -n "$webhook_window_match" ]; then
       pass "webhook registered log includes $EXPECTED_DOMAIN within $WEBHOOK_LOG_WINDOW"
       warn "webhook registration was not found in the last $SINCE; bot may not have restarted recently"
-      printf '%s\n' "$webhook_window_match" | tail -n 3
     else
       fail "webhook registered log with domain $EXPECTED_DOMAIN not found in the last $SINCE or $WEBHOOK_LOG_WINDOW"
       if [ -n "$webhook_lines" ]; then
-        log "Recent webhook registration lines:"
-        printf '%s\n' "$webhook_lines" | tail -n 5
+        warn "recent webhook registration lines were redacted"
       fi
       if [ -n "$webhook_window_lines" ]; then
-        log "Webhook registration lines within $WEBHOOK_LOG_WINDOW:"
-        printf '%s\n' "$webhook_window_lines" | tail -n 5
+        warn "webhook registration lines within $WEBHOOK_LOG_WINDOW were redacted"
       fi
     fi
   fi
@@ -272,6 +269,12 @@ print_image_revision() {
     log "  oci_revision: ${revision:-unavailable}"
     log "  oci_source: ${source:-unavailable}"
     log "  oci_version: ${version:-unavailable}"
+    if [ -n "$EXPECTED_REVISION" ] && { [ "$service" = "bot" ] || [ "$service" = "web" ]; }; then
+      case "$revision" in
+        "$EXPECTED_REVISION"*) pass "$service revision matches $EXPECTED_REVISION" ;;
+        *) fail "$service revision ${revision:-unavailable} does not match $EXPECTED_REVISION" ;;
+      esac
+    fi
   done
   log ""
 
