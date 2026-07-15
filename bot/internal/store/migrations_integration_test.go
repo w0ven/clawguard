@@ -35,7 +35,7 @@ func TestProductionMigrationsExposeRequiredOperationsSchema(t *testing.T) {
 	}
 
 	for _, index := range []string{
-		"pending_verifications_chat_expires_idx",
+		"idx_pending_verifications_chat_expires_at",
 		"idx_pending_verifications_due",
 	} {
 		var exists bool
