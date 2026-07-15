@@ -123,7 +123,7 @@ func validateTelegramMiniApp(raw, botToken string, now time.Time) (telegramMiniA
 
 	keys := make([]string, 0, len(values))
 	for key := range values {
-		if key != "hash" && key != "signature" {
+		if key != "hash" {
 			keys = append(keys, key)
 		}
 	}

@@ -20,7 +20,7 @@ func signedMiniAppData(t *testing.T, token string, now time.Time) string {
 		"signature": {"telegram-ed25519-signature"},
 		"user":      {`{"id":42,"first_name":"Mini","username":"admin"}`},
 	}
-	keys := []string{"auth_date", "query_id", "user"}
+	keys := []string{"auth_date", "query_id", "signature", "user"}
 	sort.Strings(keys)
 	parts := make([]string, 0, len(keys))
 	for _, key := range keys {
@@ -43,6 +43,14 @@ func TestValidateTelegramMiniApp(t *testing.T) {
 	}
 	if _, err := validateTelegramMiniApp(raw, "wrong-token", now); err == nil {
 		t.Fatal("validateTelegramMiniApp() accepted wrong token")
+	}
+	tampered, err := url.ParseQuery(raw)
+	if err != nil {
+		t.Fatalf("parse signed data: %v", err)
+	}
+	tampered.Set("signature", "changed-ed25519-signature")
+	if _, err := validateTelegramMiniApp(tampered.Encode(), "bot-token", now); err == nil {
+		t.Fatal("validateTelegramMiniApp() accepted a changed signature field")
 	}
 	if _, err := validateTelegramMiniApp(raw, "bot-token", now.Add(telegramMiniAppMaxAge+time.Second)); err == nil {
 		t.Fatal("validateTelegramMiniApp() accepted expired data")
