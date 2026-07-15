@@ -250,6 +250,8 @@ Bio 通过 `getChat` 抓取，`policy.AI.BioCacheTTLMinutes` 控制 Redis 缓存
 
 毕业条件（`maybeGraduateUser`）：普通未毕业用户和 suspicious 用户都要求 `messages_clean ≥ GraduateAfterMessages`；`GraduateAfterDays` 仅为兼容旧配置保留，不参与毕业判定。
 
+已毕业真人仍执行关键词、正则、链接和速率等内容规则；非封禁处罚只记录动作与警告，不再把 `trusted` 降回 `suspicious`。未毕业用户与 Bot 仍按原状态机处罚，明确封禁会把信任状态同步为 `banned`。
+
 ### 5.6 LLM Provider / Model 注册表
 
 替代早期 `LLM_PROVIDERS` env JSON，改为 DB 驱动：
