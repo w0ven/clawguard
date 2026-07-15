@@ -295,6 +295,17 @@ func (s *Service) setupCommandMenu() error {
 	}); err != nil {
 		return fmt.Errorf("set private commands: %w", err)
 	}
+	if _, err := s.bot.Raw("setChatMenuButton", map[string]any{
+		"menu_button": map[string]any{
+			"type": "web_app",
+			"text": "管理面板",
+			"web_app": map[string]string{
+				"url": strings.TrimRight(s.cfg.PublicBaseURL, "/") + "/miniapp",
+			},
+		},
+	}); err != nil {
+		return fmt.Errorf("set mini app menu button: %w", err)
+	}
 	return nil
 }
 

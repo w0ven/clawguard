@@ -110,6 +110,14 @@ new (long-term inactive) -> archived
 | `/warn_status` | Inspect warning history |
 | `/config` | Issue a one-time Web admin login link |
 
+## Telegram Mini App
+
+The "Admin Console" button in the bot's private-chat menu opens `/miniapp`. The backend validates Telegram `initData` with HMAC-SHA-256, accepts only users present in the `admins` table, and reuses the existing JWT, CSRF, authorization scope, and audit controls.
+
+The Mini App exposes the complete console: dashboard, groups, group authorization, violations, AI review and statistics, trust, prompts, model management, audit, and administrators. It follows Telegram themes and safe areas, supports the native back button and haptics, and provides mobile bottom navigation plus an all-features menu while preserving the desktop console layout.
+
+Configure the Mini App/Web App allowed domain in BotFather before release. It must match the HTTPS `PUBLIC_BASE_URL`. The bot synchronizes its default Mini App menu button whenever it registers the webhook.
+
 ## Architecture
 
 ```text

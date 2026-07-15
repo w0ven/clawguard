@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 
-const publicPrefixes = ["/auth", "/verify", "/api"];
+const publicPrefixes = ["/auth", "/verify", "/miniapp", "/api"];
 
 export function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;

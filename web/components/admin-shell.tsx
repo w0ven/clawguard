@@ -1,25 +1,29 @@
 "use client";
 
 import type { ReactNode } from "react";
+import { useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
-  Shield,
-  Users,
-  TriangleAlert,
-  ScrollText,
-  LogOut,
-  UserCog,
-  Bot,
   BarChart3,
-  UserRoundCheck,
+  Bot,
+  Cpu,
   FileCode2,
   LayoutDashboard,
+  LogOut,
+  Menu,
+  ScrollText,
+  Shield,
+  TriangleAlert,
+  UserCog,
+  UserRoundCheck,
+  Users,
   Waypoints,
-  Cpu,
+  X,
 } from "lucide-react";
 import { apiFetch } from "@/lib/api";
 import { useToast } from "@/components/providers";
+import { useTelegramMiniApp } from "@/components/telegram-miniapp-provider";
 import { cn } from "@/lib/utils";
 
 const navItems = [
@@ -34,7 +38,11 @@ const navItems = [
   { href: "/llm", label: "模型管理", icon: Cpu },
   { href: "/audit", label: "审计", icon: ScrollText },
   { href: "/admins", label: "管理员", icon: UserCog },
-];
+] as const;
+
+const primaryMobileItems = navItems.filter((item) =>
+  ["/dashboard", "/groups", "/violations", "/trust"].includes(item.href),
+);
 
 export function AdminShell({
   title,
@@ -49,123 +57,119 @@ export function AdminShell({
 }) {
   const pathname = usePathname();
   const { pushToast } = useToast();
+  const { active: miniApp, haptic } = useTelegramMiniApp();
+  const [menuOpen, setMenuOpen] = useState(false);
+
+  const isActive = (href: string) => pathname === href || pathname.startsWith(href + "/");
 
   async function handleLogout() {
     try {
       await apiFetch<void>("/api/auth/logout", { method: "POST" });
     } catch {
-      // ignore
+      // The local session is cleared by navigation even if revocation is unavailable.
     } finally {
+      sessionStorage.removeItem("cg_miniapp");
       pushToast("已登出", "success");
-      window.location.href = "/";
+      window.location.href = miniApp ? "/miniapp" : "/";
     }
   }
 
+  const navLink = (item: (typeof navItems)[number], compact = false) => {
+    const Icon = item.icon;
+    return (
+      <Link
+        key={item.href}
+        href={item.href}
+        onClick={() => {
+          haptic();
+          setMenuOpen(false);
+        }}
+        className={cn(
+          compact
+            ? "flex min-h-12 flex-col items-center justify-center gap-1 px-2 text-[11px]"
+            : "flex min-h-11 items-center gap-2.5 rounded-md px-3 py-2 text-sm",
+          isActive(item.href)
+            ? "bg-[var(--accent-soft)] font-medium text-[var(--accent)]"
+            : "text-[var(--text-muted)] hover:bg-[var(--surface-2)] hover:text-[var(--text)]",
+        )}
+      >
+        <Icon className={compact ? "h-5 w-5" : "h-4 w-4 shrink-0"} />
+        <span>{item.label}</span>
+      </Link>
+    );
+  };
+
   return (
-    <div className="flex min-h-screen">
-      {/* Sidebar */}
-      <aside className="hidden md:flex w-56 shrink-0 flex-col border-r border-[var(--border)] bg-[var(--surface)]">
+    <div className={cn("flex min-h-screen", miniApp && "miniapp-shell")}>
+      <aside className="hidden w-56 shrink-0 flex-col border-r border-[var(--border)] bg-[var(--surface)] md:flex">
         <div className="flex h-14 items-center gap-2 border-b border-[var(--border)] px-4">
           <div className="flex h-7 w-7 items-center justify-center rounded-md bg-[var(--accent)] text-white">
             <Shield className="h-4 w-4" strokeWidth={2.5} />
           </div>
-          <span className="font-semibold tracking-tight">ClawGuard</span>
+          <span className="font-semibold">ClawGuard</span>
         </div>
         <nav className="flex-1 overflow-y-auto px-2 py-3">
-          <ul className="flex flex-col gap-0.5">
-            {navItems.map((item) => {
-              const Icon = item.icon;
-              const active =
-                pathname === item.href || pathname.startsWith(item.href + "/");
-              return (
-                <li key={item.href}>
-                  <Link
-                    href={item.href}
-                    className={cn(
-                      "flex items-center gap-2.5 rounded-md px-2.5 py-2 text-sm transition-colors",
-                      active
-                        ? "bg-[var(--accent-soft)] text-[var(--accent)] font-medium"
-                        : "text-[var(--text-muted)] hover:bg-[var(--surface-2)] hover:text-[var(--text)]",
-                    )}
-                  >
-                    <Icon className="h-4 w-4 shrink-0" />
-                    <span>{item.label}</span>
-                  </Link>
-                </li>
-              );
-            })}
-          </ul>
+          <ul className="flex flex-col gap-0.5">{navItems.map((item) => <li key={item.href}>{navLink(item)}</li>)}</ul>
         </nav>
         <div className="border-t border-[var(--border)] p-2">
-          <button
-            type="button"
-            onClick={handleLogout}
-            className="flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-sm text-[var(--text-muted)] hover:bg-[var(--surface-2)] hover:text-[var(--text)]"
-          >
-            <LogOut className="h-4 w-4" />
-            登出
+          <button type="button" onClick={handleLogout} className="flex min-h-11 w-full items-center gap-2.5 rounded-md px-3 text-sm text-[var(--text-muted)] hover:bg-[var(--surface-2)]">
+            <LogOut className="h-4 w-4" />登出
           </button>
         </div>
       </aside>
 
-      {/* Main */}
-      <div className="flex flex-1 flex-col min-w-0">
-        {/* Mobile topbar */}
-        <div className="md:hidden flex h-14 items-center gap-2 border-b border-[var(--border)] bg-[var(--surface)] px-4">
+      <div className="flex min-w-0 flex-1 flex-col">
+        <div className={cn("flex h-14 items-center gap-2 border-b border-[var(--border)] bg-[var(--surface)] px-4 md:hidden", miniApp && "miniapp-topbar")}>
           <div className="flex h-7 w-7 items-center justify-center rounded-md bg-[var(--accent)] text-white">
             <Shield className="h-4 w-4" strokeWidth={2.5} />
           </div>
-          <span className="font-semibold tracking-tight">ClawGuard</span>
+          <span className="font-semibold">ClawGuard</span>
+          {miniApp && <span className="ml-auto text-xs text-[var(--text-muted)]">Mini App</span>}
         </div>
 
-        {/* Mobile nav scroll */}
-        <div className="md:hidden overflow-x-auto border-b border-[var(--border)] bg-[var(--surface)]">
-          <div className="flex gap-1 px-4 py-2 min-w-max">
-            {navItems.map((item) => {
-              const Icon = item.icon;
-              const active =
-                pathname === item.href || pathname.startsWith(item.href + "/");
-              return (
-                <Link
-                  key={item.href}
-                  href={item.href}
-                  className={cn(
-                    "flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm whitespace-nowrap",
-                    active
-                      ? "bg-[var(--accent-soft)] text-[var(--accent)] font-medium"
-                      : "text-[var(--text-muted)]",
-                  )}
-                >
-                  <Icon className="h-3.5 w-3.5" />
-                  {item.label}
-                </Link>
-              );
-            })}
+        {!miniApp && (
+          <div className="overflow-x-auto border-b border-[var(--border)] bg-[var(--surface)] md:hidden">
+            <div className="flex min-w-max gap-1 px-4 py-2">{navItems.map((item) => navLink(item))}</div>
           </div>
-        </div>
+        )}
 
-        {/* Header */}
-        <header className="border-b border-[var(--border)] bg-[var(--surface)] px-5 md:px-8 py-5">
-          <div className="flex items-start justify-between gap-4">
+        <header className={cn("border-b border-[var(--border)] bg-[var(--surface)] px-5 py-5 md:px-8", miniApp && "px-4 py-3")}>
+          <div className="flex items-start justify-between gap-3">
             <div className="min-w-0">
-              <h1 className="text-xl font-semibold tracking-tight">{title}</h1>
-              {subtitle ? (
-                <p className="mt-1 text-sm text-[var(--text-muted)]">
-                  {subtitle}
-                </p>
-              ) : null}
+              <h1 className={cn("text-xl font-semibold", miniApp && "text-lg")}>{title}</h1>
+              {subtitle && <p className="mt-1 text-sm text-[var(--text-muted)]">{subtitle}</p>}
             </div>
-            {actions}
+            <div className="shrink-0">{actions}</div>
           </div>
         </header>
 
-        {/* Content */}
-        <main className="flex-1 overflow-y-auto bg-[var(--bg)] px-5 md:px-8 py-6">
-          <div className="mx-auto max-w-7xl flex flex-col gap-6">
-            {children}
-          </div>
+        <main className={cn("flex-1 overflow-y-auto bg-[var(--bg)] px-5 py-6 md:px-8", miniApp && "px-3 py-4 pb-24")}>
+          <div className={cn("mx-auto flex max-w-7xl flex-col gap-6", miniApp && "gap-4")}>{children}</div>
         </main>
       </div>
+
+      {miniApp && (
+        <>
+          <nav className="miniapp-bottom-nav fixed inset-x-0 bottom-0 z-40 grid grid-cols-5 border-t border-[var(--border)] bg-[var(--surface)] md:hidden">
+            {primaryMobileItems.map((item) => navLink(item, true))}
+            <button type="button" onClick={() => { haptic(); setMenuOpen(true); }} className="flex min-h-12 flex-col items-center justify-center gap-1 px-2 text-[11px] text-[var(--text-muted)]">
+              <Menu className="h-5 w-5" />全部
+            </button>
+          </nav>
+          {menuOpen && (
+            <div className="fixed inset-0 z-50 bg-black/40 md:hidden" onClick={() => setMenuOpen(false)}>
+              <section className="miniapp-menu absolute inset-x-0 bottom-0 max-h-[78vh] overflow-y-auto rounded-t-lg bg-[var(--surface)] p-4" onClick={(event) => event.stopPropagation()}>
+                <div className="mb-3 flex items-center justify-between">
+                  <h2 className="text-base font-semibold">全部功能</h2>
+                  <button type="button" aria-label="关闭" onClick={() => setMenuOpen(false)} className="flex h-10 w-10 items-center justify-center rounded-md hover:bg-[var(--surface-2)]"><X className="h-5 w-5" /></button>
+                </div>
+                <div className="grid grid-cols-2 gap-2">{navItems.map((item) => navLink(item))}</div>
+                <button type="button" onClick={handleLogout} className="mt-4 flex min-h-11 w-full items-center justify-center gap-2 rounded-md border border-[var(--border)] text-sm text-[var(--text-muted)]"><LogOut className="h-4 w-4" />登出</button>
+              </section>
+            </div>
+          )}
+        </>
+      )}
     </div>
   );
 }

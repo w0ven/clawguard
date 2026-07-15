@@ -122,3 +122,57 @@ code {
   border-radius: 4px;
   border: 1px solid var(--border);
 }
+
+html.telegram-miniapp {
+  color-scheme: var(--tg-color-scheme, light);
+  --bg: var(--tg-theme-secondary-bg-color, #f4f4f5);
+  --surface: var(--tg-theme-bg-color, #ffffff);
+  --surface-2: var(--tg-theme-section-bg-color, #f4f4f5);
+  --border: var(--tg-theme-section-separator-color, #e4e4e7);
+  --text: var(--tg-theme-text-color, #09090b);
+  --text-muted: var(--tg-theme-hint-color, #71717a);
+  --text-subtle: var(--tg-theme-subtitle-text-color, #a1a1aa);
+  --accent: var(--tg-theme-button-color, #2563eb);
+  --accent-hover: var(--tg-theme-button-color, #1d4ed8);
+  --accent-soft: color-mix(in srgb, var(--tg-theme-button-color, #2563eb) 15%, transparent);
+}
+
+html.telegram-miniapp,
+html.telegram-miniapp body {
+  min-height: var(--tg-viewport-stable-height, 100vh);
+  overscroll-behavior-y: none;
+}
+
+.telegram-miniapp .miniapp-shell,
+.telegram-miniapp .miniapp-entry {
+  min-height: var(--tg-viewport-stable-height, 100vh);
+}
+
+.telegram-miniapp .miniapp-topbar {
+  padding-top: var(--tg-safe-area-inset-top, 0px);
+  height: calc(3.5rem + var(--tg-safe-area-inset-top, 0px));
+}
+
+.telegram-miniapp .miniapp-bottom-nav {
+  padding-bottom: max(var(--tg-safe-area-inset-bottom, 0px), 6px);
+}
+
+.telegram-miniapp .miniapp-menu {
+  padding-bottom: max(var(--tg-safe-area-inset-bottom, 0px), 16px);
+}
+
+@media (max-width: 767px) {
+  .telegram-miniapp button,
+  .telegram-miniapp input,
+  .telegram-miniapp select {
+    min-height: 44px;
+  }
+
+  .telegram-miniapp table {
+    min-width: 680px;
+  }
+
+  .telegram-miniapp header p {
+    line-height: 1.35;
+  }
+}
