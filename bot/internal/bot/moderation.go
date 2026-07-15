@@ -33,6 +33,8 @@ end
 return 0
 `
 
+var errActionsPaused = errors.New("moderation actions are paused")
+
 const (
 	userActionLockTTL    = 60 * time.Second
 	messageDeleteLockTTL = 30 * time.Second
@@ -173,28 +175,29 @@ func (s *Service) handleIncomingMessageWithOptions(c tele.Context, isEdited bool
 	ctx := context.Background()
 	authorized, err := s.IsAuthorizedGroup(ctx, msg.Chat.ID)
 	if err != nil {
-		s.logger.Warn("authorized group check failed, allow message", zap.Error(err), zap.Int64("chat_id", msg.Chat.ID))
+		s.logger.Warn("authorized group check failed, skip moderation", zap.Error(err), zap.Int64("chat_id", msg.Chat.ID))
+		return nil
 	} else if !authorized {
 		return nil
 	}
 
 	state, err := s.GetSystemState(ctx)
 	if err != nil {
-		s.logger.Warn("load system state failed, allow message", zap.Error(err), zap.Int64("chat_id", msg.Chat.ID))
-		state = store.SystemState{}
+		s.logger.Warn("load system state failed, skip moderation", zap.Error(err), zap.Int64("chat_id", msg.Chat.ID))
+		return nil
 	}
 	if state.Frozen {
 		s.logger.Info("message ignored because system is frozen", zap.Int64("chat_id", msg.Chat.ID), zap.Int64("sender_id", messageSenderID(msg)), zap.Int("message_id", msg.ID))
 		return nil
 	}
 
-	policy, err := config.LoadPolicy(ctx, s.queries, msg.Chat.ID)
+	policy, err := s.LoadGuardPolicy(ctx, msg.Chat.ID)
 	if err != nil {
-		s.logger.Warn("load guard policy failed for message filter, using defaults", zap.Error(err), zap.Int64("chat_id", msg.Chat.ID))
-		policy = config.DefaultPolicy
+		s.logger.Warn("load guard policy failed, skip moderation", zap.Error(err), zap.Int64("chat_id", msg.Chat.ID))
+		return nil
 	}
 
-	if handled, err := s.handleSenderChatMessage(ctx, msg, policy); err != nil {
+	if handled, err := s.handleSenderChatMessage(ctx, msg, policy, state.ActionsPaused); err != nil {
 		return err
 	} else if handled {
 		return nil
@@ -212,12 +215,13 @@ func (s *Service) handleIncomingMessageWithOptions(c tele.Context, isEdited bool
 	isAdmin := false
 	adminStatus, err := s.isChatAdmin(ctx, msg.Chat.ID, msg.Sender.ID)
 	if err != nil {
-		s.logger.Warn("check chat admin failed", zap.Error(err), zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID))
+		s.logger.Warn("check chat admin failed, skip moderation", zap.Error(err), zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID))
+		return nil
 	} else {
 		isAdmin = adminStatus
 	}
 
-	handled, err := s.applyFilterChecks(ctx, msg, policy, isAdmin)
+	handled, err := s.applyFilterChecks(ctx, msg, policy, isAdmin, isEdited, state.ActionsPaused)
 	if err != nil {
 		return err
 	}
@@ -238,39 +242,21 @@ func (s *Service) handleIncomingMessageWithOptions(c tele.Context, isEdited bool
 		return nil
 	}
 	if content.Kind != "text" {
-		recordNonTextViolation := func(action string) {
-			caption := truncateString(strings.TrimSpace(collectMessageContent(msg)), 1000)
-			if _, err := s.queries.InsertViolation(ctx, store.InsertViolationParams{
-				ChatID:      msg.Chat.ID,
-				UserID:      msg.Sender.ID,
-				Username:    stringPtr(msg.Sender.Username),
-				Rule:        "filter_non_text_message",
-				Matched:     stringPtr(caption),
-				Action:      action,
-				MessageText: stringPtr(caption),
-			}); err != nil {
-				s.logger.Warn("insert non-text violation failed", zap.Error(err), zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID), zap.String("action", action))
-			}
-		}
-		switch strings.TrimSpace(strings.ToLower(policy.Filter.NonTextMessages)) {
+		nonTextAction := strings.TrimSpace(strings.ToLower(policy.Filter.NonTextMessages))
+		switch nonTextAction {
 		case "", "ai_review":
 		case "off":
 			return nil
-		case "delete":
-			if err := s.deleteMessage(msg); err != nil {
-				s.logger.Warn("delete non-text message failed", zap.Error(err), zap.Int64("chat_id", msg.Chat.ID), zap.Int("message_id", msg.ID))
+		case "delete", "delete_warn":
+			result := FilterResult{
+				Hit:         true,
+				Reason:      "filter_non_text_message",
+				MatchedRule: truncateString(strings.TrimSpace(collectMessageContent(msg)), 200),
+				Action:      nonTextAction,
 			}
-			recordNonTextViolation("delete")
-			return nil
-		case "delete_warn":
-			if err := s.deleteMessage(msg); err != nil {
-				s.logger.Warn("delete non-text message failed", zap.Error(err), zap.Int64("chat_id", msg.Chat.ID), zap.Int("message_id", msg.ID))
-				return nil
+			if err := s.applyFilterResult(ctx, msg, policy, result, state.ActionsPaused); err != nil {
+				return err
 			}
-			if _, _, err := s.IncrWarning(ctx, msg.Chat, msg.Sender, "filter_non_text_message", policy, true, false); err != nil {
-				s.logger.Warn("warn non-text message failed", zap.Error(err), zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID))
-			}
-			recordNonTextViolation("delete_warn")
 			return nil
 		default:
 			s.logger.Warn("unknown non_text_messages policy, fallback to ai_review", zap.String("action", policy.Filter.NonTextMessages), zap.Int64("chat_id", msg.Chat.ID))
@@ -284,7 +270,7 @@ func (s *Service) handleIncomingMessageWithOptions(c tele.Context, isEdited bool
 	return s.applyAIModeration(ctx, msg, policy, isAdmin, content, isEdited)
 }
 
-func (s *Service) handleSenderChatMessage(ctx context.Context, msg *tele.Message, policy config.GuardPolicy) (bool, error) {
+func (s *Service) handleSenderChatMessage(ctx context.Context, msg *tele.Message, policy config.GuardPolicy, actionsPaused bool) (bool, error) {
 	if msg == nil || msg.Chat == nil || msg.SenderChat == nil || !policy.Filter.BanSenderChats {
 		return false, nil
 	}
@@ -301,11 +287,26 @@ func (s *Service) handleSenderChatMessage(ctx context.Context, msg *tele.Message
 		return false, nil
 	}
 
-	if err := s.deleteMessage(msg); err != nil {
-		s.logger.Warn("delete sender_chat message failed", zap.Error(err), zap.Int64("chat_id", msg.Chat.ID), zap.Int64("sender_chat_id", msg.SenderChat.ID), zap.Int("message_id", msg.ID))
-	}
-	if err := s.banSenderChat(msg.Chat, msg.SenderChat); err != nil {
-		s.logger.Warn("ban sender_chat failed", zap.Error(err), zap.Int64("chat_id", msg.Chat.ID), zap.Int64("sender_chat_id", msg.SenderChat.ID))
+	action := "delete_ban"
+	if actionsPaused {
+		action = "skipped_paused:delete_ban"
+	} else {
+		if err := s.deleteMessage(msg); err != nil {
+			if errors.Is(err, errActionsPaused) {
+				action = "skipped_paused:delete_ban"
+			} else {
+				s.logger.Warn("delete sender_chat message failed", zap.Error(err), zap.Int64("chat_id", msg.Chat.ID), zap.Int64("sender_chat_id", msg.SenderChat.ID), zap.Int("message_id", msg.ID))
+			}
+		}
+		if action == "delete_ban" {
+			if err := s.banSenderChat(msg.Chat, msg.SenderChat); err != nil {
+				if errors.Is(err, errActionsPaused) {
+					action = "partial_paused:delete_ban"
+				} else {
+					s.logger.Warn("ban sender_chat failed", zap.Error(err), zap.Int64("chat_id", msg.Chat.ID), zap.Int64("sender_chat_id", msg.SenderChat.ID))
+				}
+			}
+		}
 	}
 
 	messageText := truncateString(collectMessageContent(msg), 1000)
@@ -316,7 +317,7 @@ func (s *Service) handleSenderChatMessage(ctx context.Context, msg *tele.Message
 		Username:    stringPtr(strings.TrimPrefix(msg.SenderChat.Username, "@")),
 		Rule:        "filter_sender_chat",
 		Matched:     stringPtr(matched),
-		Action:      "delete_ban",
+		Action:      action,
 		MessageText: stringPtr(messageText),
 	}); err != nil {
 		return true, fmt.Errorf("insert sender_chat violation: %w", err)
@@ -380,13 +381,22 @@ func (s *Service) applyAIModeration(ctx context.Context, msg *tele.Message, poli
 		return nil
 	}
 
-	nonWhitelistedBot := isOtherBot(msg.Sender, s.bot) && !s.isBotWhitelistedForChat(ctx, msg.Chat.ID, msg.Sender)
+	nonWhitelistedBot := isOtherBot(msg.Sender, s.bot) && !isBotWhitelisted(msg.Sender, policy.Filter.BotWhitelist)
 	switch trust.Status {
 	case "trusted":
 		if !nonWhitelistedBot {
 			return nil
 		}
 	case "banned":
+		paused, stateErr := s.actionsPaused(ctx)
+		if stateErr != nil {
+			s.logger.Warn("system state unavailable for banned-user enforcement, skip moderation", zap.Error(stateErr), zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID))
+			return nil
+		}
+		if paused {
+			s.logger.Info("skip banned-user enforcement because actions are paused", zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID))
+			return nil
+		}
 		deleteRelease, deleteOK := s.acquireMessageDeleteLock(msg.Chat.ID, msg.ID)
 		if deleteOK {
 			defer deleteRelease()
@@ -544,6 +554,22 @@ func (s *Service) applyAIModerationErrorFallback(ctx context.Context, msg *tele.
 		s.logger.Warn("ai moderation failed for graduated user, no fallback action", zap.Error(callErr), zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID), zap.String("trust_status", trust.Status))
 		return nil
 	}
+	paused, stateErr := s.actionsPaused(ctx)
+	if stateErr != nil || paused {
+		outcome := "skipped_paused"
+		errorText := ""
+		if stateErr != nil {
+			outcome = "skipped_state_unavailable"
+			errorText = redact.ErrorString(stateErr)
+		}
+		s.writeModerationAudit(ctx, "ai", msg.Chat, msg.Sender, "ai_error_delete", "AI 审核异常兜底", map[string]any{
+			"message_id":   msg.ID,
+			"trust_status": trust.Status,
+			"outcome":      outcome,
+			"error":        errorText,
+		})
+		return nil
+	}
 
 	reason := "AI 审核暂时不可用，已删除未毕业用户消息等待管理员复核"
 	auditOutcome := "success"
@@ -581,11 +607,11 @@ func (s *Service) applyAIModerationErrorFallback(ctx context.Context, msg *tele.
 	return nil
 }
 
-func (s *Service) applyFilterChecks(ctx context.Context, msg *tele.Message, policy config.GuardPolicy, isAdmin bool) (bool, error) {
+func (s *Service) applyFilterChecks(ctx context.Context, msg *tele.Message, policy config.GuardPolicy, isAdmin, isEdited, actionsPaused bool) (bool, error) {
 	result := checkMessage(ctx, msg, policy.Filter, isAdmin)
 	if !result.Hit {
 		var err error
-		result, err = s.checkStatefulFilter(ctx, msg, policy, isAdmin)
+		result, err = s.checkStatefulFilter(ctx, msg, policy, isAdmin, !isEdited, actionsPaused)
 		if err != nil {
 			return false, err
 		}
@@ -593,42 +619,78 @@ func (s *Service) applyFilterChecks(ctx context.Context, msg *tele.Message, poli
 	if !result.Hit {
 		return false, nil
 	}
-	if err := s.applyFilterAction(ctx, msg, policy, result); err != nil {
+	if err := s.applyFilterResult(ctx, msg, policy, result, actionsPaused); err != nil {
 		return false, err
 	}
 	return true, nil
 }
 
-func (s *Service) checkStatefulFilter(ctx context.Context, msg *tele.Message, policy config.GuardPolicy, isAdmin bool) (FilterResult, error) {
+func (s *Service) applyFilterResult(ctx context.Context, msg *tele.Message, policy config.GuardPolicy, result FilterResult, actionsPaused bool) error {
+	if actionsPaused {
+		action := result.Action
+		if strings.TrimSpace(action) == "" {
+			action = config.DefaultPolicy.Filter.Keywords.Action
+		}
+		if err := s.recordFilterViolation(ctx, msg, result, "skipped_paused:"+config.NormalizeFilterAction(action)); err != nil {
+			s.logger.Warn("record paused filter hit failed", zap.Error(err), zap.Int64("chat_id", msg.Chat.ID), zap.Int("message_id", msg.ID))
+		}
+		return nil
+	}
+	if err := s.applyFilterAction(ctx, msg, policy, result); err != nil {
+		if errors.Is(err, errActionsPaused) {
+			action := result.Action
+			if strings.TrimSpace(action) == "" {
+				action = config.DefaultPolicy.Filter.Keywords.Action
+			}
+			normalizedAction := config.NormalizeFilterAction(action)
+			outcome := "skipped_paused:"
+			if s.moderationEventState(ctx, moderationEventKey(msg, "filter", result.Reason, normalizedAction)) == "message_deleted" {
+				outcome = "partial_paused:"
+			}
+			if recordErr := s.recordFilterViolation(ctx, msg, result, outcome+normalizedAction); recordErr != nil {
+				s.logger.Warn("record filter hit paused during action failed", zap.Error(recordErr), zap.Int64("chat_id", msg.Chat.ID), zap.Int("message_id", msg.ID))
+			}
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
+func (s *Service) checkStatefulFilter(ctx context.Context, msg *tele.Message, policy config.GuardPolicy, isAdmin, countRate, actionsPaused bool) (FilterResult, error) {
 	if msg == nil || msg.Chat == nil || msg.Sender == nil {
 		return FilterResult{}, nil
 	}
-	if s.queries == nil {
-		return FilterResult{}, nil
+	if countRate {
+		if result, err := s.checkRateLimitFilter(ctx, msg, policy.AntiSpam.RateLimit); err != nil {
+			return FilterResult{}, err
+		} else if result.Hit {
+			return result, nil
+		}
 	}
 
 	if !isAdmin {
+		if s.queries == nil {
+			return FilterResult{}, nil
+		}
 		trust, err := s.ensureUserTrust(ctx, msg)
 		if err != nil {
 			return FilterResult{}, fmt.Errorf("load user trust for filter: %w", err)
 		}
 
-		if result, err := s.checkNewUserFilter(ctx, msg, trust, policy.Filter.NewUser); err != nil {
+		if result, err := s.checkNewUserFilter(ctx, msg, trust, policy.Filter.NewUser, countRate); err != nil {
 			return FilterResult{}, err
 		} else if result.Hit {
-			s.applyUngraduatedPermissionRestriction(msg.Chat, msg.Sender, policy, trust, result.Reason)
+			if !actionsPaused {
+				s.applyUngraduatedPermissionRestriction(msg.Chat, msg.Sender, policy, trust, result.Reason)
+			}
 			return result, nil
 		}
-	}
-	if result, err := s.checkRateLimitFilter(ctx, msg, policy.AntiSpam.RateLimit); err != nil {
-		return FilterResult{}, err
-	} else if result.Hit {
-		return result, nil
 	}
 	return FilterResult{}, nil
 }
 
-func (s *Service) checkNewUserFilter(ctx context.Context, msg *tele.Message, trust store.UserTrust, policy config.FilterNewUserPolicy) (FilterResult, error) {
+func (s *Service) checkNewUserFilter(ctx context.Context, msg *tele.Message, trust store.UserTrust, policy config.FilterNewUserPolicy, countRate bool) (FilterResult, error) {
 	if !policy.Enabled || !isRestrictedNewUser(trust, policy.DurationHours) {
 		return FilterResult{}, nil
 	}
@@ -659,10 +721,20 @@ func (s *Service) checkNewUserFilter(ctx context.Context, msg *tele.Message, tru
 			Action:      "delete",
 		}, nil
 	}
-	if policy.MaxMessagesPerMinute > 0 {
-		count, err := s.bumpWindowCounter(ctx, fmt.Sprintf("newuser:ratelimit:%d:%d", msg.Chat.ID, msg.Sender.ID), time.Minute)
+	if countRate && policy.MaxMessagesPerMinute > 0 {
+		now := time.Now()
+		count, err := s.bumpSlidingWindowCounter(
+			ctx,
+			fmt.Sprintf("clawguard:newuser:ratelimit:v2:%d:%d", msg.Chat.ID, msg.Sender.ID),
+			rateLimitMessageMember(msg, now),
+			now,
+			time.Minute,
+		)
 		if err != nil {
-			return FilterResult{}, fmt.Errorf("new user rate limit counter: %w", err)
+			if s.logger != nil {
+				s.logger.Warn("new user rate limit unavailable, fail open", zap.Error(err), zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID))
+			}
+			return FilterResult{}, nil
 		}
 		if count > int64(policy.MaxMessagesPerMinute) {
 			return FilterResult{
@@ -680,9 +752,19 @@ func (s *Service) checkRateLimitFilter(ctx context.Context, msg *tele.Message, p
 	if !policy.Enabled || policy.MessagesPer10s <= 0 || msg == nil || msg.Chat == nil || msg.Sender == nil {
 		return FilterResult{}, nil
 	}
-	count, err := s.bumpWindowCounter(ctx, fmt.Sprintf("ratelimit:%d:%d", msg.Chat.ID, msg.Sender.ID), 10*time.Second)
+	now := time.Now()
+	count, err := s.bumpSlidingWindowCounter(
+		ctx,
+		fmt.Sprintf("clawguard:ratelimit:v2:%d:%d", msg.Chat.ID, msg.Sender.ID),
+		rateLimitMessageMember(msg, now),
+		now,
+		10*time.Second,
+	)
 	if err != nil {
-		return FilterResult{}, fmt.Errorf("rate limit counter: %w", err)
+		if s.logger != nil {
+			s.logger.Warn("rate limit unavailable, fail open", zap.Error(err), zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID))
+		}
+		return FilterResult{}, nil
 	}
 	if count <= int64(policy.MessagesPer10s) {
 		return FilterResult{}, nil
@@ -693,19 +775,6 @@ func (s *Service) checkRateLimitFilter(ctx context.Context, msg *tele.Message, p
 		MatchedRule: strconv.FormatInt(count, 10),
 		Action:      policy.Action,
 	}, nil
-}
-
-func (s *Service) bumpWindowCounter(ctx context.Context, key string, ttl time.Duration) (int64, error) {
-	if s.redis == nil {
-		return 0, nil
-	}
-	pipe := s.redis.TxPipeline()
-	countCmd := pipe.Incr(ctx, key)
-	pipe.Expire(ctx, key, ttl)
-	if _, err := pipe.Exec(ctx); err != nil {
-		return 0, err
-	}
-	return countCmd.Val(), nil
 }
 
 func isRestrictedNewUser(trust store.UserTrust, _ int) bool {
@@ -793,94 +862,139 @@ func messageMediaKind(msg *tele.Message) string {
 }
 
 func (s *Service) applyFilterAction(ctx context.Context, msg *tele.Message, policy config.GuardPolicy, result FilterResult) error {
-	action := result.Action
+	action := strings.TrimSpace(strings.ToLower(result.Action))
 	if action == "" {
 		action = config.DefaultPolicy.Filter.Keywords.Action
 	}
-
-	actionForViolation := action
-	messageText := truncateString(collectMessageContent(msg), 1000)
-	matched := truncateString(result.MatchedRule, 200)
-
-	switch action {
-	case "delete":
-		if err := s.deleteMessage(msg); err != nil {
-			return err
+	if !config.IsFilterAction(action) {
+		if s.logger != nil {
+			s.logger.Warn("unknown filter action, fallback to delete_warn", zap.String("action", action), zap.Int64("chat_id", msg.Chat.ID))
 		}
-	case "delete_warn":
-		actionForViolation = "delete_warn"
-		if err := s.deleteMessage(msg); err != nil {
-			return err
-		}
-		if _, _, err := s.IncrWarning(ctx, msg.Chat, msg.Sender, result.Reason, policy, true, false); err != nil {
-			return err
-		}
-	case "delete_mute":
-		actionForViolation = "delete_mute"
-		if err := s.deleteMessage(msg); err != nil {
-			return err
-		}
-		if err := s.muteUser(msg.Chat, msg.Sender, 600); err != nil {
-			return err
-		}
-	case "delete_ban":
-		actionForViolation = "delete_ban"
-		if err := s.deleteMessage(msg); err != nil {
-			return err
-		}
-		if err := s.banUser(msg.Chat, msg.Sender); err != nil {
-			return err
-		}
-	case "warn":
-		actionForViolation = "warn"
-		if _, _, err := s.IncrWarning(ctx, msg.Chat, msg.Sender, result.Reason, policy, true, false); err != nil {
-			return err
-		}
-	case "delete_and_warn":
-		actionForViolation = "delete_warn"
-		if err := s.deleteMessage(msg); err != nil {
-			return err
-		}
-		if _, _, err := s.IncrWarning(ctx, msg.Chat, msg.Sender, result.Reason, policy, true, false); err != nil {
-			return err
-		}
-	case "mute":
-		actionForViolation = "mute"
-		if err := s.deleteMessage(msg); err != nil {
-			return err
-		}
-		if err := s.muteUser(msg.Chat, msg.Sender, 600); err != nil {
-			return err
-		}
-	default:
-		s.logger.Warn("unknown filter action, fallback to delete_warn", zap.String("action", action), zap.Int64("chat_id", msg.Chat.ID))
-		actionForViolation = "delete_warn"
-		if err := s.deleteMessage(msg); err != nil {
-			return err
-		}
-		if _, _, err := s.IncrWarning(ctx, msg.Chat, msg.Sender, result.Reason, policy, true, false); err != nil {
-			return err
-		}
+		action = "delete_warn"
 	}
 
-	if _, err := s.queries.InsertViolation(ctx, store.InsertViolationParams{
-		ChatID:      msg.Chat.ID,
-		UserID:      msg.Sender.ID,
-		Username:    stringPtr(msg.Sender.Username),
-		Rule:        result.Reason,
-		Matched:     stringPtr(matched),
-		Action:      actionForViolation,
-		MessageText: stringPtr(messageText),
-	}); err != nil {
-		return fmt.Errorf("insert filter violation: %w", err)
+	actionForViolation := config.NormalizeFilterAction(action)
+	eventKey := moderationEventKey(msg, "filter", result.Reason, actionForViolation)
+	eventState := s.moderationEventState(ctx, eventKey)
+	if eventState == "completed" {
+		if s.logger != nil {
+			s.logger.Info("skip completed filter moderation event", zap.Int64("chat_id", msg.Chat.ID), zap.Int("message_id", msg.ID), zap.String("rule", result.Reason))
+		}
+		return nil
+	}
+	messageDeleted := eventState == "message_deleted"
+	deleteForEvent := func() error {
+		if messageDeleted {
+			return nil
+		}
+		if err := s.deleteMessage(msg); err != nil {
+			return err
+		}
+		messageDeleted = true
+		s.setModerationEventState(ctx, eventKey, "message_deleted")
+		return nil
+	}
+
+	actionExecuted := eventState == "executed" || eventState == "persisted"
+	if !actionExecuted {
+		switch action {
+		case "delete":
+			if err := deleteForEvent(); err != nil {
+				return err
+			}
+		case "delete_warn":
+			if err := deleteForEvent(); err != nil {
+				return err
+			}
+			if _, _, err := s.incrWarningForEvent(ctx, msg.Chat, msg.Sender, result.Reason, policy, true, false, eventKey); err != nil {
+				return err
+			}
+		case "delete_mute":
+			if err := deleteForEvent(); err != nil {
+				return err
+			}
+			if err := s.muteUser(msg.Chat, msg.Sender, 600); err != nil {
+				return err
+			}
+		case "delete_ban":
+			if err := deleteForEvent(); err != nil {
+				return err
+			}
+			if err := s.banUser(msg.Chat, msg.Sender); err != nil {
+				return err
+			}
+		case "warn":
+			if _, _, err := s.incrWarningForEvent(ctx, msg.Chat, msg.Sender, result.Reason, policy, true, false, eventKey); err != nil {
+				return err
+			}
+		case "delete_and_warn":
+			if err := deleteForEvent(); err != nil {
+				return err
+			}
+			if _, _, err := s.incrWarningForEvent(ctx, msg.Chat, msg.Sender, result.Reason, policy, true, false, eventKey); err != nil {
+				return err
+			}
+		case "mute":
+			if err := deleteForEvent(); err != nil {
+				return err
+			}
+			if err := s.muteUser(msg.Chat, msg.Sender, 600); err != nil {
+				return err
+			}
+		case "mute_5m":
+			if err := deleteForEvent(); err != nil {
+				return err
+			}
+			if err := s.muteUser(msg.Chat, msg.Sender, 300); err != nil {
+				return err
+			}
+		case "mute_1h":
+			if err := deleteForEvent(); err != nil {
+				return err
+			}
+			if err := s.muteUser(msg.Chat, msg.Sender, 3600); err != nil {
+				return err
+			}
+		}
+		s.setModerationEventState(ctx, eventKey, "executed")
+		eventState = "executed"
+	}
+
+	if eventState != "persisted" {
+		if err := s.recordFilterViolation(ctx, msg, result, actionForViolation); err != nil {
+			return err
+		}
+		s.setModerationEventState(ctx, eventKey, "persisted")
 	}
 
 	s.maybeBanBotInviterAfterViolation(ctx, msg, policy, actionForViolation, result.Reason)
 	s.resetTrustAfterViolation(ctx, msg, actionForViolation, stringPtr(result.Reason))
 
 	// 动作反馈（根据 action 派发到不同模板）
+	matched := truncateString(result.MatchedRule, 200)
 	s.dispatchActionFeedback(msg, policy, actionForViolation, humanReason(result.Reason, matched), matched)
+	s.setModerationEventState(ctx, eventKey, "completed")
 
+	return nil
+}
+
+func (s *Service) recordFilterViolation(ctx context.Context, msg *tele.Message, result FilterResult, action string) error {
+	if msg == nil || msg.Chat == nil || msg.Sender == nil || s.queries == nil {
+		return nil
+	}
+	messageText := truncateString(collectMessageContent(msg), 1000)
+	matched := truncateString(result.MatchedRule, 200)
+	if _, err := s.queries.InsertViolation(ctx, store.InsertViolationParams{
+		ChatID:      msg.Chat.ID,
+		UserID:      msg.Sender.ID,
+		Username:    stringPtr(msg.Sender.Username),
+		Rule:        result.Reason,
+		Matched:     stringPtr(matched),
+		Action:      action,
+		MessageText: stringPtr(messageText),
+	}); err != nil {
+		return fmt.Errorf("insert filter violation: %w", err)
+	}
 	return nil
 }
 
@@ -982,6 +1096,16 @@ func (s *Service) dispatchActionFeedback(
 		vars["user_mention"] = feedbackUserMention(msg.Sender, fb.Mute.ParseMode)
 		vars["duration"] = "10分钟"
 		s.sendActionFeedback(msg.Chat, nil, fb.Mute, vars)
+	case "mute_5m":
+		vars["user"] = feedbackUserLabel(msg.Sender, fb.Mute.ParseMode)
+		vars["user_mention"] = feedbackUserMention(msg.Sender, fb.Mute.ParseMode)
+		vars["duration"] = "5分钟"
+		s.sendActionFeedback(msg.Chat, nil, fb.Mute, vars)
+	case "mute_1h":
+		vars["user"] = feedbackUserLabel(msg.Sender, fb.Mute.ParseMode)
+		vars["user_mention"] = feedbackUserMention(msg.Sender, fb.Mute.ParseMode)
+		vars["duration"] = "1小时"
+		s.sendActionFeedback(msg.Chat, nil, fb.Mute, vars)
 	case "delete_ban", "ban":
 		vars["user"] = feedbackUserLabel(msg.Sender, fb.Ban.ParseMode)
 		vars["user_mention"] = feedbackUserMention(msg.Sender, fb.Ban.ParseMode)
@@ -1016,7 +1140,11 @@ func (s *Service) ensureUserTrust(ctx context.Context, msg *tele.Message) (store
 				}
 				trust = updated
 			}
-			if trust.Status == "trusted" && !s.isBotWhitelistedForChat(ctx, msg.Chat.ID, msg.Sender) {
+			whitelisted, whitelistErr := s.isBotWhitelistedForChat(ctx, msg.Chat.ID, msg.Sender)
+			if whitelistErr != nil {
+				return store.UserTrust{}, whitelistErr
+			}
+			if trust.Status == "trusted" && !whitelisted {
 				updated, updateErr := s.queries.UpdateUserTrustStatus(ctx, store.UpdateUserTrustStatusParams{
 					ChatID: msg.Chat.ID,
 					UserID: msg.Sender.ID,
@@ -1079,13 +1207,13 @@ func isOtherBot(user *tele.User, bot *tele.Bot) bool {
 	return bot == nil || bot.Me == nil || user.ID != bot.Me.ID
 }
 
-func (s *Service) isBotWhitelistedForChat(ctx context.Context, chatID int64, user *tele.User) bool {
-	policy, err := config.LoadPolicy(ctx, s.queries, chatID)
+func (s *Service) isBotWhitelistedForChat(ctx context.Context, chatID int64, user *tele.User) (bool, error) {
+	policy, err := s.LoadGuardPolicy(ctx, chatID)
 	if err != nil {
 		s.logger.Warn("load policy for bot whitelist failed", zap.Error(err), zap.Int64("chat_id", chatID))
-		policy = config.DefaultPolicy
+		return false, err
 	}
-	return isBotWhitelisted(user, policy.Filter.BotWhitelist)
+	return isBotWhitelisted(user, policy.Filter.BotWhitelist), nil
 }
 
 func isBotWhitelisted(user *tele.User, whitelist []string) bool {
@@ -1210,7 +1338,7 @@ func normalizeAIAction(action string) string {
 		return "warn"
 	case "delete_ban", "ban":
 		return "ban"
-	case "delete_mute", "mute":
+	case "delete_mute", "mute", "mute_5m", "mute_1h":
 		return "mute"
 	case "delete":
 		return "delete"
@@ -2294,6 +2422,18 @@ func (s *Service) applyAIAction(ctx context.Context, msg *tele.Message, policy c
 			"edited":     isEdited,
 		})
 	}()
+	if action != "none" {
+		paused, stateErr := s.actionsPaused(ctx)
+		if stateErr != nil {
+			auditOutcome = "skipped_state_unavailable"
+			auditError = redact.ErrorString(stateErr)
+			return nil
+		}
+		if paused {
+			auditOutcome = "skipped_paused"
+			return nil
+		}
+	}
 
 	checkedDelta := int32(1)
 	cleanDelta := int32(0)
@@ -2808,7 +2948,7 @@ func normalizeTrustPenaltyAction(action string) string {
 	switch strings.TrimSpace(strings.ToLower(action)) {
 	case "delete_warn", "delete_and_warn", "warn":
 		return "warn"
-	case "delete_mute", "mute":
+	case "delete_mute", "mute", "mute_5m", "mute_1h":
 		return "mute"
 	case "delete_ban", "ban":
 		return "ban"
@@ -2840,7 +2980,7 @@ func (s *Service) maybeGraduateUser(ctx context.Context, trust store.UserTrust, 
 	})
 	if err == nil {
 		s.restoreTrustedUserPermissions(updated, "ai_graduation")
-		if pol, e := config.LoadPolicy(ctx, s.queries, trust.ChatID); e == nil {
+		if pol, e := s.LoadGuardPolicy(ctx, trust.ChatID); e == nil {
 			chat := &tele.Chat{ID: trust.ChatID}
 			user := userFromTrust(trust)
 			days := int(time.Since(trust.JoinedAt).Hours() / 24)
@@ -2886,22 +3026,36 @@ func maxFloat64(a, b float64) float64 {
 }
 
 func (s *Service) IncrWarning(ctx context.Context, chat *tele.Chat, user *tele.User, reason string, policy config.GuardPolicy, sendFeedback bool, userActionLocked bool) (int, bool, error) {
+	return s.incrWarningForEvent(ctx, chat, user, reason, policy, sendFeedback, userActionLocked, "")
+}
+
+func (s *Service) incrWarningForEvent(ctx context.Context, chat *tele.Chat, user *tele.User, reason string, policy config.GuardPolicy, sendFeedback bool, userActionLocked bool, moderationEventKey string) (int, bool, error) {
 	if chat == nil || user == nil {
 		return 0, false, nil
 	}
 	if paused, err := s.actionsPaused(ctx); err == nil && paused {
 		s.logger.Info("skip warning because actions are paused", zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID), zap.String("reason", reason))
-		return 0, false, nil
+		return 0, false, errActionsPaused
 	} else if err != nil {
-		s.logger.Warn("load system state failed before warning", zap.Error(err), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
+		return 0, false, fmt.Errorf("load system state before warning: %w", err)
+	}
+	warningEventKey := ""
+	if moderationEventKey != "" {
+		warningEventKey = moderationEventKey + ":warning"
+		if s.moderationEventState(ctx, warningEventKey) == "completed" {
+			return 0, false, nil
+		}
 	}
 
-	if _, err := s.queries.InsertWarning(ctx, store.InsertWarningParams{
-		ChatID: chat.ID,
-		UserID: user.ID,
-		Reason: stringPtr(truncateString(reason, 200)),
-	}); err != nil {
-		return 0, false, fmt.Errorf("insert warning: %w", err)
+	if s.moderationEventState(ctx, warningEventKey) != "inserted" {
+		if _, err := s.queries.InsertWarning(ctx, store.InsertWarningParams{
+			ChatID: chat.ID,
+			UserID: user.ID,
+			Reason: stringPtr(truncateString(reason, 200)),
+		}); err != nil {
+			return 0, false, fmt.Errorf("insert warning: %w", err)
+		}
+		s.setModerationEventState(ctx, warningEventKey, "inserted")
 	}
 
 	activeWarnings, err := s.queries.GetActiveWarnings(ctx, store.GetActiveWarningsParams{
@@ -2926,6 +3080,7 @@ func (s *Service) IncrWarning(ctx context.Context, chat *tele.Chat, user *tele.U
 	}
 
 	if !policy.Warnings.Enabled || count < policy.Warnings.MaxWarns {
+		s.setModerationEventState(ctx, warningEventKey, "completed")
 		return count, false, nil
 	}
 
@@ -2941,6 +3096,7 @@ func (s *Service) IncrWarning(ctx context.Context, chat *tele.Chat, user *tele.U
 		return count, false, fmt.Errorf("consume warnings: %w", err)
 	}
 
+	s.setModerationEventState(ctx, warningEventKey, "completed")
 	return count, true, nil
 }
 
@@ -3057,36 +3213,63 @@ func (s *Service) escalateWarnings(ctx context.Context, chat *tele.Chat, user *t
 	return nil
 }
 
+const chatAdminCacheTTL = 30 * time.Second
+
+type chatAdminCacheEntry struct {
+	IsAdmin  bool
+	ExpireAt time.Time
+}
+
 func (s *Service) isChatAdmin(ctx context.Context, chatID, userID int64) (bool, error) {
 	cacheKey := "chat_admin:" + strconv.FormatInt(chatID, 10) + ":" + strconv.FormatInt(userID, 10)
+	if cached, ok := s.chatAdmins.Load(cacheKey); ok {
+		entry := cached.(chatAdminCacheEntry)
+		if time.Now().Before(entry.ExpireAt) {
+			return entry.IsAdmin, nil
+		}
+		s.chatAdmins.Delete(cacheKey)
+	}
 	if s.redis != nil {
 		cached, err := s.redis.Get(ctx, cacheKey).Result()
-		if err == nil && cached == "0" {
-			return false, nil
-		}
-		if err == nil && cached == "1" {
-			_ = s.redis.Del(ctx, cacheKey).Err()
+		if err == nil && (cached == "0" || cached == "1") {
+			isAdmin := cached == "1"
+			s.chatAdmins.Store(cacheKey, chatAdminCacheEntry{IsAdmin: isAdmin, ExpireAt: time.Now().Add(chatAdminCacheTTL)})
+			return isAdmin, nil
 		}
 		if err != nil && !errors.Is(err, redis.Nil) {
-			s.logger.Debug("load admin cache failed", zap.Error(err), zap.String("key", cacheKey))
+			if s.logger != nil {
+				s.logger.Debug("load admin cache failed", zap.Error(err), zap.String("key", cacheKey))
+			}
 		}
 	}
 
+	if s.bot == nil {
+		return false, fmt.Errorf("telegram bot unavailable")
+	}
 	member, err := s.bot.ChatMemberOf(&tele.Chat{ID: chatID}, &tele.User{ID: userID})
 	if err != nil {
 		return false, err
 	}
 
 	isAdmin := member != nil && (member.Role == tele.Creator || member.Role == tele.Administrator)
+	s.chatAdmins.Store(cacheKey, chatAdminCacheEntry{IsAdmin: isAdmin, ExpireAt: time.Now().Add(chatAdminCacheTTL)})
 	if s.redis != nil {
+		value := "0"
 		if isAdmin {
-			_ = s.redis.Del(ctx, cacheKey).Err()
-		} else {
-			_ = s.redis.Set(ctx, cacheKey, "0", 10*time.Second).Err()
+			value = "1"
 		}
+		_ = s.redis.Set(ctx, cacheKey, value, chatAdminCacheTTL).Err()
 	}
 
 	return isAdmin, nil
+}
+
+func (s *Service) invalidateChatAdminCache(ctx context.Context, chatID, userID int64) {
+	cacheKey := "chat_admin:" + strconv.FormatInt(chatID, 10) + ":" + strconv.FormatInt(userID, 10)
+	s.chatAdmins.Delete(cacheKey)
+	if s.redis != nil {
+		_ = s.redis.Del(ctx, cacheKey).Err()
+	}
 }
 
 func (s *Service) deleteMessage(msg *tele.Message) error {
@@ -3095,9 +3278,9 @@ func (s *Service) deleteMessage(msg *tele.Message) error {
 	}
 	if paused, err := s.actionsPaused(context.Background()); err == nil && paused {
 		s.logger.Info("skip delete because actions are paused", zap.Int64("chat_id", msg.Chat.ID), zap.Int64("sender_id", messageSenderID(msg)), zap.Int("message_id", msg.ID))
-		return nil
+		return errActionsPaused
 	} else if err != nil {
-		s.logger.Warn("load system state failed before delete", zap.Error(err))
+		return fmt.Errorf("load system state before delete: %w", err)
 	}
 	if err := s.bot.Delete(msg); err != nil {
 		return normalizeTelegramActionError("delete", err)
@@ -3111,9 +3294,9 @@ func (s *Service) muteUser(chat *tele.Chat, user *tele.User, seconds int) error 
 	}
 	if paused, err := s.actionsPaused(context.Background()); err == nil && paused {
 		s.logger.Info("skip mute because actions are paused", zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
-		return nil
+		return errActionsPaused
 	} else if err != nil {
-		s.logger.Warn("load system state failed before mute", zap.Error(err))
+		return fmt.Errorf("load system state before mute: %w", err)
 	}
 	if seconds <= 0 {
 		seconds = 600
@@ -3135,9 +3318,9 @@ func (s *Service) kickUser(chat *tele.Chat, user *tele.User) error {
 	}
 	if paused, err := s.actionsPaused(context.Background()); err == nil && paused {
 		s.logger.Info("skip kick because actions are paused", zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
-		return nil
+		return errActionsPaused
 	} else if err != nil {
-		s.logger.Warn("load system state failed before kick", zap.Error(err))
+		return fmt.Errorf("load system state before kick: %w", err)
 	}
 	member := &tele.ChatMember{User: user}
 	return runVerificationKick(
@@ -3162,9 +3345,9 @@ func (s *Service) banUser(chat *tele.Chat, user *tele.User) error {
 	}
 	if paused, err := s.actionsPaused(context.Background()); err == nil && paused {
 		s.logger.Info("skip ban because actions are paused", zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
-		return nil
+		return errActionsPaused
 	} else if err != nil {
-		s.logger.Warn("load system state failed before ban", zap.Error(err))
+		return fmt.Errorf("load system state before ban: %w", err)
 	}
 	// Telegram Bot API does not expose an official "report spam" method to bots.
 	// We can only ban and ask Telegram to revoke the user's recent chat messages.
@@ -3180,9 +3363,9 @@ func (s *Service) banSenderChat(chat *tele.Chat, senderChat *tele.Chat) error {
 	}
 	if paused, err := s.actionsPaused(context.Background()); err == nil && paused {
 		s.logger.Info("skip sender_chat ban because actions are paused", zap.Int64("chat_id", chat.ID), zap.Int64("sender_chat_id", senderChat.ID))
-		return nil
+		return errActionsPaused
 	} else if err != nil {
-		s.logger.Warn("load system state failed before sender_chat ban", zap.Error(err))
+		return fmt.Errorf("load system state before sender_chat ban: %w", err)
 	}
 	if err := s.bot.BanSenderChat(chat, senderChat); err != nil {
 		return normalizeTelegramActionError("ban_sender_chat", err)
@@ -3199,6 +3382,9 @@ func normalizeTelegramActionError(action string, err error) error {
 	var tgErr *tele.Error
 	if errors.As(err, &tgErr) {
 		message = strings.ToLower(tgErr.Description + " " + tgErr.Message)
+	}
+	if action == "delete" && strings.Contains(message, "message to delete not found") {
+		return nil
 	}
 	if strings.Contains(message, "not enough rights") || strings.Contains(message, "administrator rights") || strings.Contains(message, "can't restrict") || strings.Contains(message, "can't remove") || strings.Contains(message, "have no rights") {
 		switch action {
@@ -3629,6 +3815,25 @@ func (s *Service) handleProfileOnMessageViolation(
 	if msg == nil || msg.Chat == nil || msg.Sender == nil {
 		return nil
 	}
+	paused, stateErr := s.actionsPaused(ctx)
+	if stateErr != nil || paused {
+		action := "skipped_paused:ban"
+		if stateErr != nil {
+			action = "skipped_state_unavailable:ban"
+		}
+		if _, err := s.queries.InsertViolation(ctx, store.InsertViolationParams{
+			ChatID:      msg.Chat.ID,
+			UserID:      msg.Sender.ID,
+			Username:    stringPtr(msg.Sender.Username),
+			Rule:        "profile_match_on_message",
+			Matched:     stringPtr(matched),
+			Action:      action,
+			MessageText: stringPtr(truncateString(msg.Text, 2000)),
+		}); err != nil {
+			s.logger.Warn("record skipped on-message profile violation failed", zap.Error(err))
+		}
+		return nil
+	}
 
 	actionRelease, actionOK := s.acquireUserActionLock(msg.Chat.ID, msg.Sender.ID)
 	if actionOK {
@@ -3748,7 +3953,7 @@ func (s *Service) sendWelcomeMessage(ctx context.Context, chat *tele.Chat, user 
 		return
 	}
 
-	policy, err := config.LoadPolicy(ctx, s.queries, chat.ID)
+	policy, err := s.LoadGuardPolicy(ctx, chat.ID)
 	if err != nil {
 		s.logger.Warn("load guard policy failed for welcome message", zap.Error(err), zap.Int64("chat_id", chat.ID))
 		return

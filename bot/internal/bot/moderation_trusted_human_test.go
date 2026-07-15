@@ -12,7 +12,7 @@ import (
 )
 
 func TestResetTrustAfterViolationKeepsTrustedHumanTrusted(t *testing.T) {
-	actions := []string{"delete", "delete_warn", "warn", "delete_mute", "mute"}
+	actions := []string{"delete", "delete_warn", "warn", "delete_mute", "mute", "mute_5m", "mute_1h"}
 	for _, action := range actions {
 		t.Run(action, func(t *testing.T) {
 			const chatID = int64(-100123)
@@ -103,9 +103,12 @@ func TestResetTrustAfterViolationStillPenalizesUngraduatedHumansAndBots(t *testi
 		name        string
 		status      string
 		telegramBot bool
+		action      string
 	}{
-		{name: "ungraduated human", status: "new"},
-		{name: "trusted bot", status: "trusted", telegramBot: true},
+		{name: "ungraduated human warning", status: "new", action: "delete_warn"},
+		{name: "ungraduated human five minute mute", status: "new", action: "mute_5m"},
+		{name: "ungraduated human one hour mute", status: "new", action: "mute_1h"},
+		{name: "trusted bot", status: "trusted", telegramBot: true, action: "delete_warn"},
 	}
 
 	for _, tt := range tests {
@@ -122,7 +125,7 @@ func TestResetTrustAfterViolationStillPenalizesUngraduatedHumansAndBots(t *testi
 			svc.resetTrustAfterViolation(context.Background(), &tele.Message{
 				Chat:   &tele.Chat{ID: chatID},
 				Sender: &tele.User{ID: userID, IsBot: tt.telegramBot},
-			}, "delete_warn", stringPtr("test violation"))
+			}, tt.action, stringPtr("test violation"))
 
 			got := db.currentTrust()
 			if got.Status != "suspicious" || got.Score > 0.3 || got.MessagesClean != 0 {

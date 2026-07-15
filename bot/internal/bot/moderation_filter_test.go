@@ -2,6 +2,8 @@ package bot
 
 import (
 	"context"
+	"encoding/json"
+	"strconv"
 	"testing"
 	"time"
 
@@ -10,6 +12,36 @@ import (
 	"go.uber.org/zap"
 	tele "gopkg.in/telebot.v3"
 )
+
+func telegramRequestInt64(t *testing.T, transport *telegramMockTransport, method, key string) int64 {
+	t.Helper()
+	methods := transport.Methods()
+	bodies := transport.RequestBodies()
+	for index, gotMethod := range methods {
+		if gotMethod != method || index >= len(bodies) {
+			continue
+		}
+		var values map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(bodies[index]), &values); err != nil {
+			t.Fatalf("decode %s request: %v", method, err)
+		}
+		var stringValue string
+		if err := json.Unmarshal(values[key], &stringValue); err == nil {
+			value, parseErr := strconv.ParseInt(stringValue, 10, 64)
+			if parseErr != nil {
+				t.Fatalf("parse %s.%s: %v", method, key, parseErr)
+			}
+			return value
+		}
+		var numberValue int64
+		if err := json.Unmarshal(values[key], &numberValue); err != nil {
+			t.Fatalf("decode %s.%s: %v", method, key, err)
+		}
+		return numberValue
+	}
+	t.Fatalf("telegram method %s not found", method)
+	return 0
+}
 
 func TestApplyFilterChecksHandledFlag(t *testing.T) {
 	svc := &Service{}
@@ -23,12 +55,217 @@ func TestApplyFilterChecksHandledFlag(t *testing.T) {
 	policy.Filter.Keywords.Enabled = true
 	policy.Filter.Keywords.List = []string{"blocked"}
 
-	handled, err := svc.applyFilterChecks(context.Background(), msg, policy, false)
+	handled, err := svc.applyFilterChecks(context.Background(), msg, policy, false, false, false)
 	if err != nil {
 		t.Fatalf("unexpected error on non-hit filter: %v", err)
 	}
 	if handled {
 		t.Fatalf("handled = true, want false when filter does not hit")
+	}
+}
+
+func TestApplyFilterChecksWhilePausedRecordsHitWithoutSideEffects(t *testing.T) {
+	chatID := int64(-100123)
+	userID := int64(777)
+	db := newModerationProfileMatchMockDB(chatID, userID)
+	db.userTrust.Status = "trusted"
+	botClient, transport := newMockTelegramBot(t, "")
+	svc := &Service{logger: zap.NewNop(), queries: store.New(db), bot: botClient}
+
+	policy := config.DefaultPolicy
+	policy.Filter.Keywords.Enabled = true
+	policy.Filter.Keywords.List = []string{"blocked"}
+	policy.Filter.Keywords.Action = "delete_ban"
+	msg := &tele.Message{
+		ID:     9001,
+		Text:   "blocked content",
+		Chat:   &tele.Chat{ID: chatID, Type: tele.ChatSuperGroup},
+		Sender: &tele.User{ID: userID, FirstName: "Alice"},
+	}
+
+	handled, err := svc.applyFilterChecks(context.Background(), msg, policy, false, false, true)
+	if err != nil || !handled {
+		t.Fatalf("handled=%t err=%v; want handled paused hit", handled, err)
+	}
+	if methods := transport.Methods(); containsString(methods, "deleteMessage") || containsString(methods, "kickChatMember") || containsString(methods, "restrictChatMember") {
+		t.Fatalf("telegram methods = %v, want no moderation action while paused", methods)
+	}
+	if got := db.currentTrust().Status; got != "trusted" {
+		t.Fatalf("trust status = %q, want trusted", got)
+	}
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	if len(db.violations) != 1 || db.violations[0].Action != "skipped_paused:delete_ban" {
+		t.Fatalf("violations = %+v, want one skipped_paused record", db.violations)
+	}
+}
+
+func TestApplyFilterChecksWhilePausedDoesNotRestrictUngraduatedPermissions(t *testing.T) {
+	chatID := int64(-100123)
+	userID := int64(781)
+	db := newModerationProfileMatchMockDB(chatID, userID)
+	db.userTrust.Status = "new"
+	botClient, transport := newMockTelegramBot(t, "")
+	svc := &Service{logger: zap.NewNop(), queries: store.New(db), bot: botClient}
+
+	policy := config.DefaultPolicy
+	policy.Filter.NewUser.Enabled = true
+	policy.Filter.NewUser.NoMedia = true
+	policy.Filter.NonTextMessages = "off"
+	msg := &tele.Message{
+		ID:     9005,
+		Photo:  &tele.Photo{},
+		Chat:   &tele.Chat{ID: chatID, Type: tele.ChatSuperGroup},
+		Sender: &tele.User{ID: userID, FirstName: "Alice"},
+	}
+
+	handled, err := svc.applyFilterChecks(context.Background(), msg, policy, false, false, true)
+	if err != nil || !handled {
+		t.Fatalf("handled=%t err=%v; want handled paused new-user hit", handled, err)
+	}
+	if methods := transport.Methods(); containsString(methods, "restrictChatMember") || containsString(methods, "deleteMessage") {
+		t.Fatalf("telegram methods = %v, want no permission or delete action while paused", methods)
+	}
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	if len(db.violations) != 1 || db.violations[0].Action != "skipped_paused:delete" {
+		t.Fatalf("violations = %+v, want one skipped_paused delete", db.violations)
+	}
+}
+
+func TestApplyFilterActionUsesConfiguredMuteDurations(t *testing.T) {
+	tests := []struct {
+		action  string
+		seconds int64
+	}{
+		{action: "mute_5m", seconds: 300},
+		{action: "mute_1h", seconds: 3600},
+	}
+	for _, tt := range tests {
+		t.Run(tt.action, func(t *testing.T) {
+			chatID := int64(-100123)
+			userID := int64(800)
+			db := newModerationProfileMatchMockDB(chatID, userID)
+			db.userTrust.Status = "trusted"
+			botClient, transport := newMockTelegramBot(t, "")
+			svc := &Service{logger: zap.NewNop(), queries: store.New(db), bot: botClient}
+			policy := config.DefaultPolicy
+			policy.Feedback.Mute.Enabled = false
+			msg := &tele.Message{ID: 9100, Text: "too fast", Chat: &tele.Chat{ID: chatID, Type: tele.ChatSuperGroup}, Sender: &tele.User{ID: userID}}
+
+			startedAt := time.Now().Unix()
+			if err := svc.applyFilterAction(context.Background(), msg, policy, FilterResult{Hit: true, Reason: "filter_rate_limit", Action: tt.action}); err != nil {
+				t.Fatal(err)
+			}
+			finishedAt := time.Now().Unix()
+			deadline := telegramRequestInt64(t, transport, "restrictChatMember", "until_date")
+			if deadline < startedAt+tt.seconds-2 || deadline > finishedAt+tt.seconds+2 {
+				t.Fatalf("restricted until %d, want approximately now+%ds", deadline, tt.seconds)
+			}
+		})
+	}
+}
+
+func TestApplyFilterActionIsIdempotentAcrossWebhookRetry(t *testing.T) {
+	chatID := int64(-100123)
+	userID := int64(778)
+	db := newModerationProfileMatchMockDB(chatID, userID)
+	db.userTrust.Status = "trusted"
+	botClient, transport := newMockTelegramBot(t, "")
+	_, client := newJoinProtectionTestRedis(t)
+	svc := &Service{logger: zap.NewNop(), queries: store.New(db), redis: client, bot: botClient}
+
+	policy := config.DefaultPolicy
+	policy.Feedback.DeleteMsg.Enabled = false
+	policy.Feedback.Warn.Enabled = false
+	msg := &tele.Message{
+		ID:     9002,
+		Text:   "blocked content",
+		Chat:   &tele.Chat{ID: chatID, Type: tele.ChatSuperGroup},
+		Sender: &tele.User{ID: userID},
+	}
+	result := FilterResult{Hit: true, Reason: "filter_keyword", MatchedRule: "blocked", Action: "delete_warn"}
+
+	if err := svc.applyFilterAction(context.Background(), msg, policy, result); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.applyFilterAction(context.Background(), msg, policy, result); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := countString(transport.Methods(), "deleteMessage"); got != 1 {
+		t.Fatalf("deleteMessage calls = %d, want 1", got)
+	}
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	if len(db.warnings) != 1 || len(db.violations) != 1 {
+		t.Fatalf("warnings=%d violations=%d, want one of each", len(db.warnings), len(db.violations))
+	}
+}
+
+func TestApplyFilterActionRetryDoesNotRepeatExecutedAction(t *testing.T) {
+	chatID := int64(-100123)
+	userID := int64(779)
+	db := newModerationProfileMatchMockDB(chatID, userID)
+	db.userTrust.Status = "trusted"
+	db.failViolationInserts = 1
+	botClient, transport := newMockTelegramBot(t, "")
+	_, client := newJoinProtectionTestRedis(t)
+	svc := &Service{logger: zap.NewNop(), queries: store.New(db), redis: client, bot: botClient}
+
+	policy := config.DefaultPolicy
+	policy.Feedback.DeleteMsg.Enabled = false
+	policy.Feedback.Warn.Enabled = false
+	msg := &tele.Message{ID: 9003, Text: "blocked", Chat: &tele.Chat{ID: chatID, Type: tele.ChatSuperGroup}, Sender: &tele.User{ID: userID}}
+	result := FilterResult{Hit: true, Reason: "filter_keyword", MatchedRule: "blocked", Action: "delete_warn"}
+
+	if err := svc.applyFilterAction(context.Background(), msg, policy, result); err == nil {
+		t.Fatal("first action succeeded, want injected violation insert failure")
+	}
+	if err := svc.applyFilterAction(context.Background(), msg, policy, result); err != nil {
+		t.Fatalf("retry failed: %v", err)
+	}
+
+	if got := countString(transport.Methods(), "deleteMessage"); got != 1 {
+		t.Fatalf("deleteMessage calls = %d, want 1 across retry", got)
+	}
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	if len(db.warnings) != 1 || len(db.violations) != 1 {
+		t.Fatalf("warnings=%d violations=%d, want one of each across retry", len(db.warnings), len(db.violations))
+	}
+}
+
+func TestApplyFilterActionRetryResumesAfterWarningInsert(t *testing.T) {
+	chatID := int64(-100123)
+	userID := int64(780)
+	db := newModerationProfileMatchMockDB(chatID, userID)
+	db.userTrust.Status = "trusted"
+	db.failWarningQueries = 1
+	botClient, transport := newMockTelegramBot(t, "")
+	_, client := newJoinProtectionTestRedis(t)
+	svc := &Service{logger: zap.NewNop(), queries: store.New(db), redis: client, bot: botClient}
+
+	policy := config.DefaultPolicy
+	policy.Feedback.DeleteMsg.Enabled = false
+	policy.Feedback.Warn.Enabled = false
+	msg := &tele.Message{ID: 9004, Text: "blocked", Chat: &tele.Chat{ID: chatID, Type: tele.ChatSuperGroup}, Sender: &tele.User{ID: userID}}
+	result := FilterResult{Hit: true, Reason: "filter_keyword", MatchedRule: "blocked", Action: "delete_warn"}
+
+	if err := svc.applyFilterAction(context.Background(), msg, policy, result); err == nil {
+		t.Fatal("first action succeeded, want injected warning query failure")
+	}
+	if err := svc.applyFilterAction(context.Background(), msg, policy, result); err != nil {
+		t.Fatalf("retry failed: %v", err)
+	}
+
+	if got := countString(transport.Methods(), "deleteMessage"); got != 1 {
+		t.Fatalf("deleteMessage calls = %d, want 1 across partial warning retry", got)
+	}
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	if len(db.warnings) != 1 || len(db.violations) != 1 {
+		t.Fatalf("warnings=%d violations=%d, want one of each across partial warning retry", len(db.warnings), len(db.violations))
 	}
 }
 
@@ -112,7 +349,7 @@ func TestCheckNewUserFilterFallbacksUseDeleteAction(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result, err := svc.checkNewUserFilter(context.Background(), tt.msg, trust, policy)
+			result, err := svc.checkNewUserFilter(context.Background(), tt.msg, trust, policy, true)
 			if err != nil {
 				t.Fatalf("checkNewUserFilter returned error: %v", err)
 			}
@@ -149,7 +386,7 @@ func TestApplyFilterChecksSyncsUngraduatedPermissionsOnNewUserMediaHit(t *testin
 		Photo:  &tele.Photo{},
 	}
 
-	handled, err := svc.applyFilterChecks(context.Background(), msg, policy, false)
+	handled, err := svc.applyFilterChecks(context.Background(), msg, policy, false, false, false)
 	if err != nil {
 		t.Fatalf("applyFilterChecks returned error: %v", err)
 	}
@@ -186,7 +423,7 @@ func TestApplyFilterChecksSkipsUngraduatedFiltersForAdmin(t *testing.T) {
 		Photo:  &tele.Photo{},
 	}
 
-	handled, err := svc.applyFilterChecks(context.Background(), msg, policy, true)
+	handled, err := svc.applyFilterChecks(context.Background(), msg, policy, true, false, false)
 	if err != nil {
 		t.Fatalf("applyFilterChecks returned error: %v", err)
 	}

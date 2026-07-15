@@ -425,20 +425,14 @@ var DefaultPolicy = GuardPolicy{
 }
 
 func LoadPolicy(ctx context.Context, queries *store.Queries, chatID int64) (GuardPolicy, error) {
-	merged := map[string]any{}
-
-	if err := mergeJSONBytesIntoMap(merged, mustJSON(DefaultPolicy)); err != nil {
-		return GuardPolicy{}, err
-	}
+	documents := make([][]byte, 0, 2)
 
 	globalConfig, err := queries.GetGlobalConfig(ctx)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return GuardPolicy{}, fmt.Errorf("get global config: %w", err)
 	}
 	if err == nil {
-		if err := mergeJSONBytesIntoMap(merged, globalConfig.Config); err != nil {
-			return GuardPolicy{}, fmt.Errorf("merge global config: %w", err)
-		}
+		documents = append(documents, globalConfig.Config)
 	}
 
 	group, err := queries.GetGroupByChatID(ctx, chatID)
@@ -446,8 +440,27 @@ func LoadPolicy(ctx context.Context, queries *store.Queries, chatID int64) (Guar
 		return GuardPolicy{}, fmt.Errorf("get group config: %w", err)
 	}
 	if err == nil {
-		if err := mergeJSONBytesIntoMap(merged, group.Config); err != nil {
-			return GuardPolicy{}, fmt.Errorf("merge group config: %w", err)
+		documents = append(documents, group.Config)
+	}
+
+	policy, err := MergePolicyDocuments(documents...)
+	if err != nil {
+		return GuardPolicy{}, fmt.Errorf("merge guard policy: %w", err)
+	}
+	return policy, nil
+}
+
+// MergePolicyDocuments overlays partial JSON policy documents on the built-in
+// defaults in the supplied order. It is shared by runtime loading and config
+// write validation so both paths use identical merge semantics.
+func MergePolicyDocuments(documents ...[]byte) (GuardPolicy, error) {
+	merged := map[string]any{}
+	if err := mergeJSONBytesIntoMap(merged, mustJSON(DefaultPolicy)); err != nil {
+		return GuardPolicy{}, err
+	}
+	for index, document := range documents {
+		if err := mergeJSONBytesIntoMap(merged, document); err != nil {
+			return GuardPolicy{}, fmt.Errorf("merge policy document %d: %w", index+1, err)
 		}
 	}
 
@@ -456,7 +469,7 @@ func LoadPolicy(ctx context.Context, queries *store.Queries, chatID int64) (Guar
 		return GuardPolicy{}, fmt.Errorf("marshal merged policy: %w", err)
 	}
 
-	policy := DefaultPolicy
+	var policy GuardPolicy
 	if err := json.Unmarshal(raw, &policy); err != nil {
 		return GuardPolicy{}, fmt.Errorf("decode merged policy: %w", err)
 	}
@@ -490,9 +503,6 @@ func applyVerifyDefaults(policy *VerifyPolicy) {
 	if policy.ProfileCheckMode == "" {
 		policy.ProfileCheckMode = DefaultPolicy.Verify.ProfileCheckMode
 	}
-	if len(policy.ProfileBlacklist) == 0 {
-		policy.ProfileBlacklist = append([]string(nil), DefaultPolicy.Verify.ProfileBlacklist...)
-	}
 }
 
 func applyWelcomeDefaults(policy *WelcomeMessageConfig) {
@@ -502,7 +512,7 @@ func applyWelcomeDefaults(policy *WelcomeMessageConfig) {
 	if policy.Template == nil || strings.TrimSpace(*policy.Template) == "" {
 		policy.Template = DefaultPolicy.Verify.WelcomeMessage.Template
 	}
-	if policy.DeleteAfterSeconds <= 0 {
+	if policy.DeleteAfterSeconds < 0 {
 		policy.DeleteAfterSeconds = DefaultPolicy.Verify.WelcomeMessage.DeleteAfterSeconds
 	}
 }
@@ -527,13 +537,10 @@ func applyFilterDefaults(policy *FilterConfig) {
 	if policy.Links.Action == "" {
 		policy.Links.Action = DefaultPolicy.Filter.Links.Action
 	}
-	if len(policy.Links.Whitelist) == 0 {
-		policy.Links.Whitelist = append([]string(nil), DefaultPolicy.Filter.Links.Whitelist...)
-	}
 	if policy.NewUser.DurationHours <= 0 {
 		policy.NewUser.DurationHours = DefaultPolicy.Filter.NewUser.DurationHours
 	}
-	if policy.NewUser.MaxMessagesPerMinute <= 0 {
+	if policy.NewUser.MaxMessagesPerMinute < 0 {
 		policy.NewUser.MaxMessagesPerMinute = DefaultPolicy.Filter.NewUser.MaxMessagesPerMinute
 	}
 }
@@ -592,12 +599,6 @@ func applyAIDefaults(policy *AIPolicy) {
 	if strings.TrimSpace(policy.PrimaryModel) == "" {
 		policy.PrimaryModel = DefaultPolicy.AI.PrimaryModel
 	}
-	if len(policy.FallbackChain) == 0 {
-		policy.FallbackChain = append([]string(nil), DefaultPolicy.AI.FallbackChain...)
-	}
-	if len(policy.CapabilityRequirements) == 0 {
-		policy.CapabilityRequirements = append([]string(nil), DefaultPolicy.AI.CapabilityRequirements...)
-	}
 	if policy.ProbeIntervalSeconds <= 0 {
 		policy.ProbeIntervalSeconds = DefaultPolicy.AI.ProbeIntervalSeconds
 	}
@@ -638,9 +639,6 @@ func applyAIDefaults(policy *AIPolicy) {
 		policy.VideoConcurrency = DefaultPolicy.AI.VideoConcurrency
 	}
 	applyAIThresholdDefaults(&policy.Thresholds)
-	if len(policy.ActionsByCategory) == 0 {
-		policy.ActionsByCategory = cloneStringMap(DefaultPolicy.AI.ActionsByCategory)
-	}
 	if strings.TrimSpace(policy.MessageRules) == "" && strings.TrimSpace(policy.CustomRules) != "" {
 		policy.MessageRules = policy.CustomRules
 	}
@@ -653,29 +651,18 @@ func applyAIThresholdDefaults(policy *AIThresholds) {
 	if policy == nil {
 		return
 	}
-	if policy.Ban <= 0 {
+	if policy.Ban < 0 {
 		policy.Ban = DefaultPolicy.AI.Thresholds.Ban
 	}
-	if policy.Mute <= 0 {
+	if policy.Mute < 0 {
 		policy.Mute = DefaultPolicy.AI.Thresholds.Mute
 	}
-	if policy.Warn <= 0 {
+	if policy.Warn < 0 {
 		policy.Warn = DefaultPolicy.AI.Thresholds.Warn
 	}
-	if policy.Flag <= 0 {
+	if policy.Flag < 0 {
 		policy.Flag = DefaultPolicy.AI.Thresholds.Flag
 	}
-}
-
-func cloneStringMap(src map[string]string) map[string]string {
-	if len(src) == 0 {
-		return map[string]string{}
-	}
-	dst := make(map[string]string, len(src))
-	for key, value := range src {
-		dst[key] = value
-	}
-	return dst
 }
 
 func mustJSON(v any) []byte {
@@ -717,6 +704,12 @@ func deepMerge(dst, src map[string]any) {
 		srcMap, srcIsMap := value.(map[string]any)
 		dstMap, dstIsMap := dst[key].(map[string]any)
 		if srcIsMap && dstIsMap {
+			// actions_by_category is a user-owned map rather than a nested policy
+			// section. An explicit empty object must therefore clear defaults.
+			if key == "actions_by_category" && len(srcMap) == 0 {
+				dst[key] = srcMap
+				continue
+			}
 			deepMerge(dstMap, srcMap)
 			continue
 		}

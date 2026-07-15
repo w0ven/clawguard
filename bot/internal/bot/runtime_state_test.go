@@ -68,3 +68,28 @@ func TestVerificationFailActionSnapshotIsStable(t *testing.T) {
 		t.Fatalf("legacy fallback action = %q, want mute_permanent", got)
 	}
 }
+
+func TestChatAdminPositiveResultIsCachedAndInvalidated(t *testing.T) {
+	_, client := newJoinProtectionTestRedis(t)
+	botClient, transport := newMockTelegramBot(t, "")
+	svc := &Service{bot: botClient, redis: client, logger: zap.NewNop()}
+	ctx := context.Background()
+
+	for index := 0; index < 2; index++ {
+		isAdmin, err := svc.isChatAdmin(ctx, -100123, 42)
+		if err != nil || !isAdmin {
+			t.Fatalf("isAdmin=%t err=%v, want true", isAdmin, err)
+		}
+	}
+	if got := countString(transport.Methods(), "getChatMember"); got != 1 {
+		t.Fatalf("getChatMember calls = %d, want 1 with positive cache", got)
+	}
+
+	svc.invalidateChatAdminCache(ctx, -100123, 42)
+	if _, err := svc.isChatAdmin(ctx, -100123, 42); err != nil {
+		t.Fatal(err)
+	}
+	if got := countString(transport.Methods(), "getChatMember"); got != 2 {
+		t.Fatalf("getChatMember calls = %d, want 2 after invalidation", got)
+	}
+}

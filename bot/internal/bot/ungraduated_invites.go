@@ -3,6 +3,7 @@ package bot
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strconv"
 	"strings"
 
@@ -57,22 +58,57 @@ func (s *Service) handleUngraduatedInvite(ctx context.Context, chat *tele.Chat, 
 		return false
 	}
 
-	action := "kick"
+	plannedAction := "kick"
 	if serviceMessage != nil && serviceMessage.ID != 0 {
-		action = "delete_kick"
-		if err := s.deleteMessage(serviceMessage); err != nil && s.logger != nil {
-			s.logger.Warn("delete ungraduated invite service message failed", zap.Error(err), zap.Int64("chat_id", chat.ID), zap.Int64("inviter_user_id", inviter.ID), zap.Int("message_id", serviceMessage.ID))
+		plannedAction = "delete_kick"
+	}
+	paused, stateErr := s.actionsPaused(ctx)
+	if stateErr != nil || paused {
+		action := "skipped_paused:" + plannedAction
+		if stateErr != nil {
+			action = "skipped_state_unavailable:" + plannedAction
+			if s.logger != nil {
+				s.logger.Warn("load system state for ungraduated invite restriction failed", zap.Error(stateErr), zap.Int64("chat_id", chat.ID), zap.Int64("inviter_user_id", inviter.ID))
+			}
+		}
+		s.recordUngraduatedInviteViolation(ctx, chat, inviter, blockedTargets, action, source, trust)
+		return false
+	}
+
+	action := plannedAction
+	serviceMessageDeleted := false
+	if serviceMessage != nil && serviceMessage.ID != 0 {
+		if err := s.deleteMessage(serviceMessage); err != nil {
+			if errors.Is(err, errActionsPaused) {
+				s.recordUngraduatedInviteViolation(ctx, chat, inviter, blockedTargets, "skipped_paused:"+plannedAction, source, trust)
+				return false
+			}
+			action = "kick"
+			if s.logger != nil {
+				s.logger.Warn("delete ungraduated invite service message failed", zap.Error(err), zap.Int64("chat_id", chat.ID), zap.Int64("inviter_user_id", inviter.ID), zap.Int("message_id", serviceMessage.ID))
+			}
+		} else {
+			serviceMessageDeleted = true
 		}
 	}
 
+	successfulKicks := 0
+	pausedDuringAction := false
 	for i := range blockedTargets {
 		target := blockedTargets[i]
 		if err := s.kickUser(chat, &target); err != nil {
+			if errors.Is(err, errActionsPaused) {
+				pausedDuringAction = true
+			}
 			if s.logger != nil {
 				s.logger.Warn("kick user invited by ungraduated inviter failed", zap.Error(err), zap.Int64("chat_id", chat.ID), zap.Int64("inviter_user_id", inviter.ID), zap.Int64("target_user_id", target.ID), zap.Bool("target_is_bot", target.IsBot))
 			}
+			if pausedDuringAction {
+				break
+			}
 			continue
 		}
+		successfulKicks++
 		if s.logger != nil {
 			s.logger.Info("kicked user invited by ungraduated inviter", zap.Int64("chat_id", chat.ID), zap.Int64("inviter_user_id", inviter.ID), zap.Int64("target_user_id", target.ID), zap.Bool("target_is_bot", target.IsBot), zap.String("trust_status", trust.Status), zap.String("source", source))
 		}
@@ -84,8 +120,21 @@ func (s *Service) handleUngraduatedInvite(ctx context.Context, chat *tele.Chat, 
 		}
 	}
 
+	if successfulKicks != len(blockedTargets) {
+		prefix := "failed:"
+		if successfulKicks > 0 || serviceMessageDeleted {
+			prefix = "partial_failed:"
+		}
+		if pausedDuringAction {
+			prefix = "skipped_paused:"
+			if successfulKicks > 0 || serviceMessageDeleted {
+				prefix = "partial_paused:"
+			}
+		}
+		action = prefix + plannedAction
+	}
 	s.recordUngraduatedInviteViolation(ctx, chat, inviter, blockedTargets, action, source, trust)
-	return true
+	return successfulKicks == len(blockedTargets)
 }
 
 func (s *Service) inviteTargetsForRestriction(inviter *tele.User, targets []tele.User) []tele.User {

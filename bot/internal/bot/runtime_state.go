@@ -15,8 +15,11 @@ import (
 )
 
 const (
-	authorizedGroupCacheTTL = 60 * time.Second
-	systemStateCacheTTL     = 5 * time.Second
+	authorizedGroupCacheTTL      = 60 * time.Second
+	authorizedGroupLocalCacheTTL = 5 * time.Second
+	systemStateCacheTTL          = 5 * time.Second
+	systemStateLocalCacheTTL     = time.Second
+	guardPolicySnapshotTTL       = 30 * time.Second
 )
 
 type authorizedGroupCacheEntry struct {
@@ -35,12 +38,18 @@ func (s *Service) IsAuthorizedGroup(ctx context.Context, chatID int64) (bool, er
 	if chatID == 0 {
 		return false, nil
 	}
+	if cached, ok := s.authorizedGroups.Load(chatID); ok {
+		if cachedAt, timeOK := s.authorizedGroupAt.Load(chatID); timeOK && time.Since(cachedAt.(time.Time)) < authorizedGroupLocalCacheTTL {
+			return cached.(bool), nil
+		}
+	}
 	if s.redis != nil {
 		raw, err := s.redis.Get(ctx, s.authorizedGroupCacheKey(chatID)).Result()
 		if err == nil {
 			var cached authorizedGroupCacheEntry
 			if jsonErr := json.Unmarshal([]byte(raw), &cached); jsonErr == nil {
 				s.authorizedGroups.Store(chatID, cached.Authorized)
+				s.authorizedGroupAt.Store(chatID, time.Now())
 				return cached.Authorized, nil
 			}
 		}
@@ -54,6 +63,7 @@ func (s *Service) IsAuthorizedGroup(ctx context.Context, chatID int64) (bool, er
 		}
 		if cached, ok := s.authorizedGroups.Load(chatID); ok {
 			s.warnRuntimeSnapshotFallback("authorized_group", chatID, err)
+			s.authorizedGroupAt.Store(chatID, time.Now())
 			return cached.(bool), nil
 		}
 		return false, err
@@ -66,6 +76,7 @@ func (s *Service) IsAuthorizedGroup(ctx context.Context, chatID int64) (bool, er
 
 func (s *Service) cacheAuthorizedGroup(ctx context.Context, chatID int64, authorized bool) {
 	s.authorizedGroups.Store(chatID, authorized)
+	s.authorizedGroupAt.Store(chatID, time.Now())
 	if s.redis == nil {
 		return
 	}
@@ -88,18 +99,26 @@ func (s *Service) InvalidateAuthorizedGroupCache(ctx context.Context, chatID int
 		return
 	}
 	s.authorizedGroups.Delete(chatID)
+	s.authorizedGroupAt.Delete(chatID)
 	if s.redis != nil {
 		_ = s.redis.Del(ctx, s.authorizedGroupCacheKey(chatID)).Err()
 	}
 }
 
 func (s *Service) GetSystemState(ctx context.Context) (store.SystemState, error) {
+	if cached := s.systemState.Load(); cached != nil {
+		cachedAt := s.systemStateAt.Load()
+		if cachedAt > 0 && time.Since(time.Unix(0, cachedAt)) < systemStateLocalCacheTTL {
+			return cached.(store.SystemState), nil
+		}
+	}
 	if s.redis != nil {
 		raw, err := s.redis.Get(ctx, s.systemStateCacheKey()).Result()
 		if err == nil {
 			var cached store.SystemState
 			if jsonErr := json.Unmarshal([]byte(raw), &cached); jsonErr == nil {
 				s.systemState.Store(cached)
+				s.systemStateAt.Store(time.Now().UnixNano())
 				return cached, nil
 			}
 		}
@@ -109,6 +128,7 @@ func (s *Service) GetSystemState(ctx context.Context) (store.SystemState, error)
 	if err != nil {
 		if cached := s.systemState.Load(); cached != nil {
 			s.warnRuntimeSnapshotFallback("system_state", 0, err)
+			s.systemStateAt.Store(time.Now().UnixNano())
 			return cached.(store.SystemState), nil
 		}
 		return store.SystemState{}, err
@@ -119,6 +139,7 @@ func (s *Service) GetSystemState(ctx context.Context) (store.SystemState, error)
 
 func (s *Service) cacheSystemState(ctx context.Context, state store.SystemState) {
 	s.systemState.Store(state)
+	s.systemStateAt.Store(time.Now().UnixNano())
 	if s.redis == nil {
 		return
 	}
@@ -130,13 +151,20 @@ func (s *Service) cacheSystemState(ctx context.Context, state store.SystemState)
 }
 
 func (s *Service) LoadGuardPolicy(ctx context.Context, chatID int64) (config.GuardPolicy, error) {
+	if cached, ok := s.policySnapshots.Load(chatID); ok {
+		if cachedAt, timeOK := s.policySnapshotAt.Load(chatID); timeOK && time.Since(cachedAt.(time.Time)) < guardPolicySnapshotTTL {
+			return cached.(config.GuardPolicy), nil
+		}
+	}
 	policy, err := config.LoadPolicy(ctx, s.queries, chatID)
 	if err == nil {
 		s.policySnapshots.Store(chatID, policy)
+		s.policySnapshotAt.Store(chatID, time.Now())
 		return policy, nil
 	}
 	if cached, ok := s.policySnapshots.Load(chatID); ok {
 		s.warnRuntimeSnapshotFallback("guard_policy", chatID, err)
+		s.policySnapshotAt.Store(chatID, time.Now())
 		return cached.(config.GuardPolicy), nil
 	}
 	return config.GuardPolicy{}, err
@@ -148,6 +176,7 @@ func (s *Service) RefreshGuardPolicySnapshot(ctx context.Context, chatID int64) 
 		return config.GuardPolicy{}, err
 	}
 	s.policySnapshots.Store(chatID, policy)
+	s.policySnapshotAt.Store(chatID, time.Now())
 	return policy, nil
 }
 
