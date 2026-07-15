@@ -1,309 +1,334 @@
 # ClawGuard
 
-**Enterprise-grade Telegram Group Management Bot** — Verification · Anti-Spam · AI Moderation · Web Console
+ClawGuard is a Telegram group-management system with join verification, join-flood protection, rule-based filtering, CAS integration, AI moderation, a user-trust state machine, scheduled messages, and a Web administration console.
 
-ClawGuard provides a complete management suite for Telegram groups (currently serving the RFC IDC group with ~5k members): from join verification and keyword/link filtering to LLM-powered intelligent moderation, all configurable through a visual web panel.
+> [Chinese documentation](./README.md)
 
-> 🇨🇳 [中文版本](./README.md)
+## Current Status
 
----
+This document reflects the `main` branch as of **2026-07-16**.
 
-## ✨ Core Features
+| Area | Status |
+|---|---|
+| Database schema | goose migration `00028` |
+| Production topology | One bot, one web service, PostgreSQL 16, Redis 7 AOF, and Caddy 2 |
+| Delivery | GitHub Actions tests and publishes bot/web images; production is upgraded in place with Docker Compose |
+| Backend CI | `go test ./...`, `go vet ./...`, and race tests for critical packages |
+| Frontend CI | TypeScript checking and a Next.js production build |
+| Join-flood protection | Enabled by default, Redis atomic state, leased database jobs, and a Redis cleanup fallback |
+| AI moderation | Feature-complete but disabled by default until providers and models are configured |
 
-### 🛡️ Join Verification
-- **Multiple methods**: Button tap, math captcha, Cloudflare Turnstile
-- Per-group configuration for verification method, timeout, and failure action (kick/ban/mute)
-- Auto-kick on timeout with Redis-managed TTL countdowns
+The current deployment is designed for **one bot replica**. Join-protection state is shared through Redis, but scheduled messages, daily reports, and some periodic jobs do not yet use distributed leader election. Do not scale the bot horizontally without adding that coordination.
 
-### 🔍 Anti-Spam Filtering
-- **Keyword filtering** with case-sensitivity toggle
-- **Regex matching** for flexible pattern detection
-- **Link filtering** with whitelist support and stricter rules for new members
-- **Rate limiting** with configurable message frequency thresholds
-- **CAS sync**: Periodic Combot Anti-Spam blacklist fetch, auto-check on join
+## Main Features
 
-### 🤖 AI-Powered Moderation
-- **User trust state machine**: `new → trusted / suspicious / banned` — new members' messages are reviewed by AI during observation period
-- **Multi-model support**: Connect multiple LLM providers (OpenAI-compatible API) with primary + fallback chains
-- **Flexible policies**: Configure different actions per message category (recruitment, dating, crypto, scam, etc.)
-- **Cost control**: Daily budget caps, per-user limits, message caching, short-message skip, batch merging
-- **Human review loop**: Confirm or flag false positives from the web panel to continuously improve accuracy
-- **Prompt editor**: Visual system prompt and custom rule editing with version management and live testing
+### Join Verification
 
-### ⚠️ Warning System
-- Configurable max warnings, action at limit, and decay period
-- Persistent warning records with group and user-level queries
+- Button, arithmetic, image arithmetic, emoji-choice, and Cloudflare Turnstile challenges.
+- Per-group timeout, failure action, join-message cleanup, and welcome-message settings.
+- Optional CAS and Bio keyword/AI checks before verification.
+- PostgreSQL-backed verification jobs with due times, leases, retries, and last-error tracking.
+- Pending verification and cleanup jobs survive service restarts.
+- The bot automatically rejects unauthorized groups; owners manage authorization in the Web console.
 
-### 🌐 Web Admin Panel
-- **Telegram Login** authentication + JWT authorization
-- **Dashboard**: Group count, today's violations, AI calls, trusted user overview
-- **Group management**: Group list, per-group config editing (verification/filtering/AI policies, etc.)
-- **Violation logs**: Traditional violations + AI decision review queue
-- **Trust management**: Filter and manually tag user trust statuses
-- **AI call analytics**: Call breakdown by day/group/model
-- **Prompt editor**: Visual editing + live testing sandbox
-- **Audit trail**: Configuration change history
-- **Admin management**: Role-based permissions (owner/admin)
+### Join-Flood Protection
 
----
+The flood guard handles bursts of incoming accounts. It does not perform bulk actions against existing group members.
 
-## 🏗️ Architecture
+| Setting | Default | Meaning |
+|---|---:|---|
+| `join_threshold` | 20 | Joins required to trigger protection |
+| `join_window_seconds` | 60 seconds | Sliding join window |
+| `protection_duration_seconds` | 900 seconds | Protection remains active for 15 minutes |
+| `temporary_ban_seconds` | 3600 seconds | New accounts are temporarily banned for 60 minutes |
+| `admin_notify_interval_seconds` | 300 seconds | Admin summary notification throttle |
+| `max_pending_verifications` | 30 | Protect before verification work reaches this limit |
+| `telegram_failure_cooldown_seconds` | 300 seconds | Base cooldown after Telegram cleanup failures |
 
-```
-┌─────────────────────────────────────────────────────┐
-│                  Cloudflare Tunnel                   │
-│               guard.misaka.si → :8090                │
-└──────────────────────┬──────────────────────────────┘
-                       │
-┌──────────────────────▼──────────────────────────────┐
-│                    Caddy 2 (:80)                     │
-│    /webhook/*, /api/* → bot:8080                     │
-│    /verify/*, /*      → web:3000                     │
-└────────┬──────────────────────────────┬─────────────┘
-         │                              │
-┌────────▼────────┐           ┌────────▼────────┐
-│   Bot + API     │           │   Next.js Web   │
-│   Go (Echo v4)  │◄─────────│   (App Router)   │
-│   telebot.v3    │  INTERNAL │   shadcn/ui      │
-└──┬─────────┬────┘   API     └─────────────────┘
-   │         │
-┌──▼───┐ ┌───▼───┐
-│ Pg16 │ │ Redis │
-└──────┘ └───────┘
-```
+Normal joins follow the configured verification flow. Once a threshold is reached, incoming accounts are handled temporarily without generating challenges, calling CAS/Bio/AI, or posting one notification per user. Normal verification resumes automatically when the protection interval ends.
 
----
+Operational behavior:
 
-## 📁 Project Structure
+- Redis Lua scripts atomically trim the window, count joins, trigger protection, increment intercepted totals, and throttle notifications.
+- Redis stores the active deadline, trigger, counters, notification timestamps, and Telegram cleanup breaker state.
+- If Redis is unavailable, the bot falls back to single-process memory state. A database count failure enters protection fail-safe.
+- Failed Telegram actions are persisted to leased PostgreSQL jobs; if PostgreSQL also fails, a persistent Redis cleanup queue is used.
+- A 15-second worker handles recovery notifications, database cleanup jobs, and Redis fallback tasks.
+- The Web status card exposes protection, pending verification, cooldown, error, and deferred-task state.
 
-```
-clawguard/
-├── docker-compose.yml           # Container orchestration
-├── Caddyfile                    # Reverse proxy rules
-├── .env.example                 # Environment variable template
-├── bot/                         # Go backend
-│   ├── cmd/
-│   │   ├── clawguard/main.go    # Main entry point
-│   │   └── migrate/main.go      # Migration tool
-│   ├── internal/
-│   │   ├── ai/                  # LLM multi-model registry/parsing/encryption
-│   │   ├── api/                 # REST API (Echo v4)
-│   │   ├── auth/                # JWT authentication
-│   │   ├── bot/                 # telebot handlers (verification/filtering/moderation)
-│   │   ├── casclient/           # CAS blacklist client
-│   │   ├── config/              # Configuration loading
-│   │   ├── store/               # sqlc-generated data access layer
-│   │   └── worker/              # Background tasks (expiry/budget/probe/reports, etc.)
-│   ├── migrations/              # Database migrations (goose, 16 versions)
-│   └── sqlc.yaml
-├── web/                         # Next.js frontend
-│   ├── app/                     # App Router pages
-│   │   ├── dashboard/           # Dashboard
-│   │   ├── groups/              # Group management
-│   │   ├── violations/          # Violation logs
-│   │   ├── ai-review/           # AI review queue
-│   │   ├── ai-calls/            # AI call analytics
-│   │   ├── trust/               # Trust management
-│   │   ├── prompt-editor/       # Prompt editor
-│   │   ├── admins/              # Admin management
-│   │   ├── audit/               # Audit logs
-│   │   └── verify/[token]/      # Turnstile verification page
-│   └── components/              # UI components (shadcn/ui)
-└── docs/
-    ├── DESIGN.md                # Full design document
-    └── M5_AI_TRUST.md           # AI moderation + trust system design
+A first-time joiner cannot already be trusted. The backend only retains an anti-false-positive bypass for users who previously graduated in the same group and later rejoin.
+
+### Rules and Anti-Spam
+
+- Keyword, regex, username, and link filtering with configurable actions and allowlists.
+- Restrictions for ungraduated users: links, forwards, media, invitations, and message rate.
+- Configurable handling for non-text messages, sender chats, other bots, and bot inviters.
+- CAS synchronization and join checks.
+- Warning accumulation, decay, and escalation.
+- Edited messages, via-bot content, external replies, and t.me preview context.
+- Keyword replies with fuzzy, exact, or regex matching, cooldowns, parse modes, and auto-delete.
+
+### AI Moderation and Trust
+
+- OpenAI Chat Completions, OpenAI Responses, and Anthropic Messages compatible providers.
+- Provider/model registry, encrypted API keys, capability tags, priority, probes, fallback chains, and automatic degradation.
+- Text, image, video-frame, VideoNote, sticker, animation, voice/audio placeholder, document, contact, poll, location, venue, game, Invoice, Story, and Giveaway content.
+- Bio checks before a message is processed, preventing post-join profile changes from bypassing review.
+- Scene/category/confidence-based decisions with human review in the Web console.
+
+Trust states:
+
+```text
+new -> suspicious -> trusted
+  \         |          |
+   +-------> banned <---+
+
+new (long-term inactive) -> archived
 ```
 
----
+`new` and `suspicious` users graduate after the configured number of AI-approved clean messages, five by default. `graduate_after_days` is retained only for configuration compatibility. A trusted human is not automatically downgraded to `suspicious` by later ordinary moderation, while content filters and explicit ban actions still apply. Zombie retention only archives inactive `new` users with no checked messages; it does not delete trusted graduates.
 
-## 🛠️ Tech Stack
+### Feedback, Scheduling, and Web Administration
+
+- Configurable feedback for delete, mute, kick, ban, warning, verification, CAS, graduation, and admin actions.
+- MarkdownV2/HTML templates, mentions, variables, and auto-delete.
+- Up to 20 scheduled messages per group with interval or multiple daily schedules, buttons, variables, manual run, auto-delete, and 50 recent run records.
+- Dashboard health and system controls: pause AI, pause Telegram actions, or freeze the system.
+- Group authorization, global and per-group policy, violations, warnings, AI review, AI usage, trust management, prompts, model management, audit, and scoped administrators.
+
+## Telegram Commands
+
+| Command | Purpose |
+|---|---|
+| `/start`, `/help` | Introduction and command list |
+| `/status` | Group daily statistics or private service status |
+| `/trust` | Inspect a user's trust state |
+| `/warn` | Warn a user and apply escalation rules |
+| `/unban` | Unban a user and clear local ban state |
+| `/spam` | Quickly ban by reply, username, or user ID |
+| `/cas` | Query CAS status |
+| `/warn_status` | Inspect warning history |
+| `/config` | Issue a one-time Web admin login link |
+
+## Architecture
+
+```text
+Telegram / Browser
+        |
+Cloudflare Tunnel
+        |
+Caddy :80
+  |             |
+  |             +--> Next.js 15 Web :3000
+  |
+  +--> Go Bot + Echo API :8080
+             |          |
+       PostgreSQL 16   Redis 7 AOF
+```
 
 | Layer | Technology |
 |---|---|
-| Bot Core | Go 1.22 + [telebot.v3](https://github.com/go-telegram-bot-api/telebot) |
-| Web API | Go [Echo v4](https://github.com/labstack/echo) (same process as Bot) |
-| Web Panel | [Next.js 15](https://nextjs.org) (App Router) + [shadcn/ui](https://ui.shadcn.com) + Tailwind CSS |
-| Database | PostgreSQL 16 |
-| Cache / Rate Limiting | Redis 7 |
-| Data Layer | [sqlc](https://sqlc.dev) + [pgx/v5](https://github.com/jackc/pgx) |
-| Database Migration | [goose](https://github.com/pressly/goose) |
-| Reverse Proxy | Caddy 2 |
-| Public Endpoint | Cloudflare Tunnel |
-| Deployment | Docker Compose |
+| Bot/API | Go 1.22, telebot.v3, Echo v4 |
+| Web | Node.js 22, Next.js 15 App Router, React 19, Tailwind CSS |
+| Data | PostgreSQL 16, pgx/v5, sqlc, goose |
+| State and rate limits | Redis 7 with AOF `everysec` |
+| Media | ffmpeg, DejaVu fonts, Go image rendering |
+| Edge | Caddy 2 and Cloudflare Tunnel |
+| Delivery | Docker Compose, Docker Hub, GitHub Actions |
 
----
+## Repository Layout
 
-## 🚀 Quick Start
+```text
+clawguard/
+├── .github/workflows/          # CI and image publishing
+├── bot/
+│   ├── cmd/clawguard/          # Main bot/API process
+│   ├── cmd/migrate/            # goose migration entry point
+│   ├── internal/ai/            # Providers, models, calls, encryption
+│   ├── internal/api/           # REST API, auth, rate limits, CSRF
+│   ├── internal/bot/           # Telegram handlers and moderation
+│   ├── internal/scheduler/     # Scheduled group messages
+│   ├── internal/store/         # sqlc data layer
+│   ├── internal/worker/        # Background workers
+│   └── migrations/             # Database migrations through 00028
+├── web/                        # Next.js administration console
+├── scripts/                    # Production smoke and restore rehearsal
+├── docs/                       # Design and restore documentation
+├── Caddyfile
+├── docker-compose.yml
+└── .env.example
+```
 
-### Prerequisites
+## Configuration Model
 
-- Docker + Docker Compose
-- A Telegram Bot Token (obtain from [@BotFather](https://t.me/BotFather))
+Policies merge in this order, with later documents overriding earlier ones:
 
-### 1. Configure Environment
+```text
+built-in defaults -> global_config -> group.config
+```
+
+Writes use the same merge, defaulting, and validation behavior as runtime loading. Per-group documents may contain only overrides, while dangerous or apparently truncated global updates are rejected.
+
+## Quick Start
+
+Requirements:
+
+- Linux with Docker Engine and Docker Compose v2
+- A Telegram Bot Token
+- An HTTPS domain or Cloudflare Tunnel
+
+Create the environment file and generate independent secrets:
 
 ```bash
 cp .env.example .env
+openssl rand -hex 32
 ```
 
-Edit `.env` and fill in at least these variables:
+Required baseline values:
 
 ```env
-BOT_TOKEN=your_telegram_bot_token
-BOT_USERNAME=your_bot_username
-WEBHOOK_SECRET=custom_webhook_secret
-SUPER_ADMIN_IDS=your_telegram_user_id
-POSTGRES_PASSWORD=database_password
-REDIS_PASSWORD=redis_password
-JWT_SECRET=jwt_signing_key
+BOT_TOKEN=...
+BOT_USERNAME=...
+TELEGRAM_LOGIN_BOT_USERNAME=...
+WEBHOOK_SECRET=...
+SUPER_ADMIN_IDS=...
+POSTGRES_PASSWORD=...
+REDIS_PASSWORD=...
+JWT_SECRET=...
+PUBLIC_BASE_URL=https://your-domain.example
 ```
 
-### 2. Start Services
+Set a stable `ENCRYPTION_KEY` in production if provider API keys are stored through the Web console. Leaving it empty creates a temporary key, so stored keys cannot be decrypted after a restart.
+
+Start the published images:
 
 ```bash
-docker compose up -d --build
+docker compose pull
+docker compose up -d
+docker compose ps
+curl -fsS http://127.0.0.1:8080/readyz
 ```
 
-Database migrations run automatically on first startup. Once ready:
+At startup, the bot applies goose migrations, registers its Telegram webhook, loads the model registry, and starts background workers. `/readyz` reports ready only when PostgreSQL and Redis are available.
 
-- Bot receives Telegram messages via webhook
-- Web panel accessible at `http://127.0.0.1:3000`
-- API accessible at `http://127.0.0.1:8080`
+## Environment Variables
 
-### 3. Set Webhook (if manual setup needed)
+See [`.env.example`](./.env.example) for the deployment template.
 
-The bot auto-registers its webhook on startup. For manual setup:
+| Group | Variables |
+|---|---|
+| Telegram | `BOT_TOKEN`, `BOT_USERNAME`, `TELEGRAM_LOGIN_BOT_USERNAME` |
+| Webhook and URLs | `WEBHOOK_SECRET`, `PUBLIC_BASE_URL`, `WEB_BASE_URL` |
+| Admin bootstrap | `SUPER_ADMIN_IDS`, `ADMIN_TELEGRAM_IDS` |
+| PostgreSQL | `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD` |
+| Redis | `REDIS_HOST`, `REDIS_PORT`, `REDIS_PASSWORD` |
+| Auth and encryption | `JWT_SECRET`, `ENCRYPTION_KEY` |
+| Turnstile | `TURNSTILE_SITE_KEY`, `TURNSTILE_SECRET_KEY` |
+| LLM bootstrap | `LLM_PROVIDERS` and provider-key environment variables |
+| Runtime | `APP_ENV`, `HTTP_PORT`, `DAILY_REPORT_ENABLED`, `CLAWGUARD_LOG_RAW_UPDATES` |
+| Retention | `RETENTION_EVENTS_DAYS`, `RETENTION_PROFILE_CHECK_LOGS_DAYS`, `RETENTION_ZOMBIE_DAYS`, `RETENTION_BANNED_DAYS` |
+| Web build | `NEXT_PUBLIC_BOT_USERNAME`, `NEXT_PUBLIC_TURNSTILE_SITE_KEY` |
+
+`NEXT_PUBLIC_*` values must be configured as GitHub Repository Variables because Next.js embeds them into the browser bundle at build time.
+
+## Background Tasks
+
+| Task | Responsibility |
+|---|---|
+| VerificationExpiry | Claim due verification jobs and apply failure actions |
+| JoinProtectionRecovery | Recovery notifications, database cleanup jobs, and Redis fallback tasks every 15 seconds |
+| Healthcheck | Detect consecutive AI moderation failures and send throttled owner alerts |
+| LLMProber | Model probes, health state, and owner alerts |
+| LLMStatsAggregator | AI usage aggregation |
+| DailyReport | Daily owner report |
+| RetentionCleanup | Event cleanup, zombie archiving, and old banned-record cleanup |
+| ProfileCheckLogsRetention | Bio-check log retention |
+| ScheduledMessages | Cron dispatch and execution history |
+
+## Security
+
+| Area | Current implementation |
+|---|---|
+| Webhook | URL secret plus `X-Telegram-Bot-Api-Secret-Token` validation |
+| Login | Telegram Login or one-time magic links, restricted to database administrators |
+| Session | 24-hour HS256 JWT in a `Secure`, `HttpOnly`, `SameSite=Strict` cookie |
+| CSRF | Cookie write requests require a double-submit `X-CSRF-Token` |
+| Authorization | owner/admin roles with SQL-enforced group scopes |
+| Rate limits | Redis limits on login, logout, Turnstile, admin writes, and Telegram sends |
+| LLM keys | Encrypted in PostgreSQL using `ENCRYPTION_KEY` |
+| HTTP | Server timeouts, Caddy security headers, loopback-only host ports |
+| Logging | Error redaction and raw Telegram update logging disabled by default |
+
+## CI/CD and Production Upgrades
+
+Pull Requests run backend tests/vet/race and frontend type/build checks. A `main` push publishes `latest` and `sha-<commit>` tags for both images. Images include the `org.opencontainers.image.revision` label.
+
+Before upgrading production, tag the currently running images for rollback, pull the new images, then update bot and web separately:
 
 ```bash
-curl -F "url=https://your-domain.com/webhook/YOUR_SECRET" \
-     -F "secret_token=YOUR_WEBHOOK_SECRET" \
-     "https://api.telegram.org/bot<BOT_TOKEN>/setWebhook"
+cd /root/clawguard
+docker compose pull bot web
+docker compose up -d --no-deps bot
+curl -fsS http://127.0.0.1:8080/readyz
+docker compose up -d --no-deps web
 ```
 
----
-
-## 🚢 Deployment
-
-### Deploy to Production
-
-This project has migrated to **CI/CD-built images** — rsync-based source sync is no longer used:
+Run the production smoke suite afterward:
 
 ```bash
-# 1. Commit and push to main
-git push origin main
-
-# 2. GitHub Actions builds bot/web images and pushes to Docker Hub
-#    - kelework/clawguard-bot:latest
-#    - kelework/clawguard-web:latest
-gh run watch --repo <owner>/<repo> --exit-status
-
-# 3. Pull new images on the production host and restart only the touched services
-ssh root@YOUR_SERVER "cd /root/clawguard && docker compose pull bot web && docker compose up -d --no-deps bot web"
+bash scripts/prod-smoke.sh \
+  --since 5m \
+  --url https://your-domain.example \
+  --compose docker-compose.yml
 ```
 
-**Frontend env vars** (`NEXT_PUBLIC_*`) must be set as GitHub Repository Variables — Next.js inlines them into the bundle at build time; the remote `.env` only affects backend runtime.
-
-### Cloudflare Tunnel Configuration
-
-Point the tunnel ingress to the host machine at `127.0.0.1:8090`:
+Cloudflare Tunnel should target the loopback HTTP entry:
 
 ```yaml
-- hostname: guard.misaka.si
-  service: tcp://23.80.90.86:8090
+ingress:
+  - hostname: your-domain.example
+    service: http://127.0.0.1:8090
+  - service: http_status:404
 ```
 
----
+Documentation-only changes do not require a production restart.
 
-## 🔒 Security Design
+## Backup Restore Rehearsal
 
-| Aspect | Measure |
-|---|---|
-| Webhook Verification | Telegram `secret_token` validates `X-Telegram-Bot-Api-Secret-Token` header |
-| Web Login | Telegram Login Widget + hash verification + user allowlist |
-| API Auth | JWT (HS256), 48h expiry, Bearer Token |
-| SQL Safety | sqlc generates parameterized queries |
-| Secret Management | All secrets injected via `.env`, git-ignored |
-| CSRF Protection | API uses Bearer Tokens, no cookie dependency |
-| Public Exposure | Cloudflare Tunnel hides real server IP |
+The rehearsal restores an existing backup into a temporary PostgreSQL container and never touches production:
 
----
+```bash
+bash scripts/restore-rehearsal.sh
+BACKUP_PATH=/path/to/clawguard.sql.gz bash scripts/restore-rehearsal.sh
+```
 
-## ⚙️ Environment Variables
+The script validates backups but does not create them. Production still needs a cron/systemd timer or an external backup system for regular `pg_dump` creation and off-host retention.
 
-See `.env.example` for the full list. Key groups:
+## Test Status and Known Boundaries
 
-| Group | Variables | Description |
-|---|---|---|
-| Bot | `BOT_TOKEN`, `BOT_USERNAME` | Telegram Bot credentials |
-| Auth | `WEBHOOK_SECRET`, `JWT_SECRET`, `SUPER_ADMIN_IDS`, `ADMIN_TELEGRAM_IDS` | Authentication |
-| Database | `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD` | PostgreSQL connection |
-| Redis | `REDIS_HOST`, `REDIS_PORT`, `REDIS_PASSWORD` | Redis connection |
-| AI | `LLM_PROVIDERS`, `NEWAPI_KEY`, `CCPROXY_KEY` | LLM Provider configuration |
-| Turnstile | `TURNSTILE_SITE_KEY`, `TURNSTILE_SECRET_KEY` | Cloudflare Turnstile |
-| Misc | `PUBLIC_BASE_URL`, `DAILY_REPORT_ENABLED`, `RETENTION_ZOMBIE_DAYS` | General settings |
+Baseline measured on 2026-07-16:
 
----
+- 53 Go test files and about 30.3% total statement coverage.
+- Package coverage: bot 39.0%, AI 49.4%, config 55.2%, API 13.9%, scheduler 22.4%, worker 2.7%.
+- The Web project has type/build checks but no unit tests or Playwright E2E yet.
+- Production Compose still consumes `latest`; verify the image revision on every rollout.
+- Horizontal bot scaling requires leader election or distributed locking for periodic jobs.
+- Restore rehearsal exists, but the repository does not install a production backup timer.
 
-## 📊 Background Workers
+## Recent Changes
 
-The bot runs multiple background tasks after startup:
+- Redis-backed atomic join-flood state with restart recovery and shared counters.
+- PostgreSQL leased cleanup jobs, Redis persistent fallback queue, and Telegram failure backoff.
+- Join-protection runtime status, simulation, and throttled admin summaries.
+- Trusted-human status preservation without bypassing content filters.
+- Global-config truncation guards and stricter Telegram action-pause checks.
+- A simpler operator flow: threshold reached, incoming accounts handled temporarily, automatic recovery.
 
-| Worker | Responsibility |
-|---|---|
-| VerificationExpiry | Auto-kick on verification timeout |
-| Healthcheck | Service health monitoring |
-| LLMProber | Periodic LLM Provider availability probing |
-| LLMStatsAggregator | AI call statistics aggregation |
-| DailyReport | Daily management report push |
-| RetentionCleanup | Expired data cleanup |
+## Additional Documentation
 
----
+- [System design](./docs/DESIGN.md)
+- [Database restore rehearsal](./docs/restore-rehearsal.md)
 
-## 📈 Performance
+## License
 
-- Bot startup < 100ms (Go static binary)
-- Single message processing < 5ms (filter hit)
-- 5k-member group throughput: > 1000 msg/s
-- Total memory footprint < 500MB (Bot ~50MB + Web ~150MB + PG ~100MB + Redis ~30MB)
-
----
-
-## 📝 Development Progress
-
-| Milestone | Content | Status |
-|---|---|---|
-| M1 | Project skeleton + Docker Compose + Database Schema | ✅ |
-| M2 | Bot core: Webhook + command routing + join verification | ✅ |
-| M3 | Anti-spam filters + warning system + CAS sync | ✅ |
-| M4 | REST API + Telegram Login + web panel skeleton | ✅ |
-| M5 | AI moderation + trust system + multi-model + prompt editor | ✅ |
-| M6 | Turnstile verification flow | ✅ |
-| M7 | AI moderation enhancements: cross-chat quotes, t.me previews, pre-message bio review | ✅ |
-| M8 | Production deployment: RFC / TOP groups officially onboarded | ✅ |
-
-### Recent Updates
-
-- **2026-04-24** Fixed math image challenge infinite loop + refactored fallback strategy
-  - Root cause: `sendMathImageChallenge`'s `for answer < 0` loop only re-rolls `a` while `b/c/op1/op2` stay fixed. When `op1='-' op2='-' b+c>29`, any `a` in `[10,29]` yields a negative answer forever. Two joiners pinned the bot at 220% CPU.
-  - Fix: whole-tuple re-roll + 50-attempt cap + 3s context timeout + 1000-seed regression test
-  - Degradation changed to **same-form fallback**: anomalies still produce an image challenge (fallback expression `5 + 3 + 2`) instead of dropping to a weaker text challenge
-  - When image render truly fails: Error log + @user notice ("verification system temporarily unavailable", auto-deleted after 30s) + user stays restricted
-- **2026-04** Feedback templates added clickable `{user_mention}` / `{admin_mention}` variables
-- **2026-04** Banned terminal-state protection + banned metadata (banned_at/banned_reason) + admin UI display
-- **2026-04** CPU hot path optimization: 30s flushBatch timeout, async bio review, t.me preview rate limiting
-- **2026-04** Welcome messages switched to MarkdownV2, fixing mention link failures caused by nested formatting
-- **2026-04** CI/CD: GitHub Actions → Docker Hub → remote pull, replacing the previous rsync flow
-
----
-
-## 📄 License
-
-Private project. Unauthorized use prohibited.
-
-## Group Scheduled Messages
-
-- Open the web admin panel, go to Group Management → select a group → Scheduled Messages to create up to 20 scheduled messages per group.
-- Supports interval triggers every N minutes and multiple daily HH:MM times shown in Asia/Shanghai; times are stored in UTC and reloaded when the bot process starts.
-- Message bodies are sent as MarkdownV2 as written and support `{group_title}` `{member_count}` `{date}` `{time}` `{weekday}`; unknown variables are preserved.
-- Optional URL inline buttons and 0-3600 second auto-delete are supported; if the previous message is still within its auto-delete window, the next run is skipped and recorded.
-- The latest 50 send attempts are retained for history, and admins can use Run Now from the group page to test a template immediately.
+Private project. Unauthorized use is prohibited.
