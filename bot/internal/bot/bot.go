@@ -59,8 +59,12 @@ type Service struct {
 	updateExecutions   sync.Map
 	membershipSessions sync.Map
 	authorizedGroups   sync.Map
+	authorizedGroupAt  sync.Map
 	policySnapshots    sync.Map
+	policySnapshotAt   sync.Map
+	chatAdmins         sync.Map
 	systemState        atomic.Value
+	systemStateAt      atomic.Int64
 	runtimeGuardsOnce  sync.Once
 	joinProtector      *joinProtector
 	cleanupBreaker     *telegramCleanupBreaker
@@ -601,6 +605,7 @@ func (s *Service) handleChatMemberUpdate(c tele.Context) error {
 	if member.User == nil {
 		return nil
 	}
+	s.invalidateChatAdminCache(context.Background(), update.Chat.ID, member.User.ID)
 
 	if s.bot.Me != nil && member.User.ID == s.bot.Me.ID {
 		return s.handleBotChatMemberUpdate(update)
@@ -948,7 +953,7 @@ func (s *Service) startVerification(chat *tele.Chat, user *tele.User, joinEventM
 		s.joinProtector.ReleasePending(chat.ID)
 		trust, trustOK := s.upsertJoinSideEffects(ctx, chat, user)
 		s.logger.Info("verification disabled by policy, skip flow", zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
-		if trustOK {
+		if trustOK && !actionsPaused {
 			s.applyUngraduatedPermissionRestriction(chat, user, policy, trust, "join_without_verification")
 		}
 		return nil
@@ -1742,7 +1747,7 @@ func (s *Service) handleVerifyMath(c tele.Context) error {
 		return c.Respond(&tele.CallbackResponse{Text: "当前验证方式不是数学题", ShowAlert: true})
 	}
 
-	policy, err := config.LoadPolicy(context.Background(), s.queries, chat.ID)
+	policy, err := s.LoadGuardPolicy(context.Background(), chat.ID)
 	if err != nil {
 		s.logger.Warn("load policy for verification", zap.Error(err), zap.Int64("chat_id", chat.ID))
 		policy = config.DefaultPolicy
@@ -1810,7 +1815,7 @@ func (s *Service) handleVerifyRandom(c tele.Context) error {
 		return c.Respond(&tele.CallbackResponse{Text: "当前验证方式不是随机题", ShowAlert: true})
 	}
 
-	policy, err := config.LoadPolicy(context.Background(), s.queries, chat.ID)
+	policy, err := s.LoadGuardPolicy(context.Background(), chat.ID)
 	if err != nil {
 		s.logger.Warn("load policy for verification", zap.Error(err), zap.Int64("chat_id", chat.ID))
 		policy = config.DefaultPolicy
@@ -1855,7 +1860,7 @@ func (s *Service) completeVerification(ctx context.Context, chat *tele.Chat, use
 	if deleted == 0 {
 		return pgx.ErrNoRows
 	}
-	policy, polErr := config.LoadPolicy(ctx, s.queries, chat.ID)
+	policy, polErr := s.LoadGuardPolicy(ctx, chat.ID)
 	if polErr != nil {
 		s.logger.Warn("load guard policy before verification permission sync failed, using defaults", zap.Error(polErr), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
 		policy = config.DefaultPolicy
@@ -2327,7 +2332,7 @@ func (s *Service) handleWarnStatusCommand(c tele.Context) error {
 	lines := []string{fmt.Sprintf("<code>%d</code> 的 active warnings:", userID)}
 	total := 0
 	for _, chatID := range chatIDs {
-		policy, err := config.LoadPolicy(ctx, s.queries, chatID)
+		policy, err := s.LoadGuardPolicy(ctx, chatID)
 		if err != nil {
 			policy = config.DefaultPolicy
 		}
@@ -2414,7 +2419,7 @@ func (s *Service) handleWarnCommand(c tele.Context) error {
 		return c.Send(redact.ErrorString(err), &tele.SendOptions{ParseMode: tele.ModeHTML})
 	}
 
-	policy, err := config.LoadPolicy(context.Background(), s.queries, chat.ID)
+	policy, err := s.LoadGuardPolicy(context.Background(), chat.ID)
 	if err != nil {
 		policy = config.DefaultPolicy
 	}
@@ -2595,7 +2600,7 @@ func (s *Service) handleSpamCommand(c tele.Context) error {
 	s.writeCommandModerationAudit(ctx, "spam", c.Sender(), chat, targetUser, "ban", "spam", target.MessageID, msg.ID, "success", "")
 
 	// 5. Send exactly one user-visible result: configured ban feedback, or a fallback confirmation.
-	policy, _ := config.LoadPolicy(ctx, s.queries, chat.ID)
+	policy, _ := s.LoadGuardPolicy(ctx, chat.ID)
 	sentFeedback := false
 	if policy.Feedback.Ban.Enabled {
 		s.sendActionFeedback(chat, nil, policy.Feedback.Ban, map[string]string{

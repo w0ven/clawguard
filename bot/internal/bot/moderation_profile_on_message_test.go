@@ -497,6 +497,8 @@ type moderationProfileMatchMockDB struct {
 
 	failTrustSideEffects bool
 	trustSideEffects     int
+	failViolationInserts int
+	failWarningQueries   int
 }
 
 func newModerationProfileMatchMockDB(chatID, userID int64) *moderationProfileMatchMockDB {
@@ -557,6 +559,11 @@ func (db *moderationProfileMatchMockDB) Exec(_ context.Context, query string, ar
 func (db *moderationProfileMatchMockDB) Query(_ context.Context, query string, args ...any) (pgx.Rows, error) {
 	if strings.Contains(query, "FROM warnings") {
 		db.mu.Lock()
+		if db.failWarningQueries > 0 {
+			db.failWarningQueries--
+			db.mu.Unlock()
+			return nil, fmt.Errorf("mock warning query failed")
+		}
 		items := make([]store.Warning, 0, len(db.warnings))
 		for _, warning := range db.warnings {
 			if warning.ChatID == args[0].(int64) && warning.UserID == args[1].(int64) && warning.ConsumedAt == nil {
@@ -660,6 +667,13 @@ func (db *moderationProfileMatchMockDB) QueryRow(_ context.Context, query string
 			createdAt,
 		)
 	case strings.Contains(query, "INSERT INTO violations"):
+		db.mu.Lock()
+		if db.failViolationInserts > 0 {
+			db.failViolationInserts--
+			db.mu.Unlock()
+			return mockErrorRow{err: fmt.Errorf("mock violation insert failed")}
+		}
+		db.mu.Unlock()
 		params := store.InsertViolationParams{
 			ChatID:      args[0].(int64),
 			UserID:      args[1].(int64),

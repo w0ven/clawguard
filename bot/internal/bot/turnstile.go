@@ -142,7 +142,7 @@ func (s *Service) VerifyTurnstileToken(ctx context.Context, token, cfResponse, r
 		FirstName: derefString(pending.FirstName),
 	}
 
-	policy, polErr := config.LoadPolicy(ctx, s.queries, chat.ID)
+	policy, polErr := s.LoadGuardPolicy(ctx, chat.ID)
 	if polErr != nil {
 		s.logger.Warn("load guard policy before turnstile permission sync failed, using defaults", zap.Error(polErr), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
 		policy = config.DefaultPolicy

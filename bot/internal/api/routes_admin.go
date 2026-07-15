@@ -164,6 +164,9 @@ func (s *Server) handlePutGroupConfig(c echo.Context) error {
 	if err := validateJoinProtectionConfigDocument(nextConfig); err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": redact.ErrorString(err)})
 	}
+	if err := validateGroupPolicyUpdate(c.Request().Context(), s.botService.Queries(), nextConfig); err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": redact.ErrorString(err)})
+	}
 
 	updated, err := s.botService.Queries().UpdateGroupConfig(c.Request().Context(), store.UpdateGroupConfigParams{
 		ChatID: chatID,
@@ -515,6 +518,9 @@ func (s *Server) handlePutGlobalConfig(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": redact.ErrorString(err)})
 	}
 	if err := rejectDangerousGlobalConfigTruncation(before.Config, nextConfig); err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": redact.ErrorString(err)})
+	}
+	if err := validateGlobalPolicyUpdate(c.Request().Context(), queries, nextConfig); err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": redact.ErrorString(err)})
 	}
 
@@ -1650,6 +1656,54 @@ func normalizeJSONBody(c echo.Context) ([]byte, error) {
 		return nil, fmt.Errorf("marshal json body")
 	}
 	return raw, nil
+}
+
+func validateGroupPolicyUpdate(ctx context.Context, queries *store.Queries, groupConfig []byte) error {
+	if err := config.ValidatePolicyDocument(groupConfig); err != nil {
+		return err
+	}
+	documents := make([][]byte, 0, 2)
+	globalConfig, err := queries.GetGlobalConfig(ctx)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("load global config for validation: %w", err)
+	}
+	if err == nil {
+		documents = append(documents, globalConfig.Config)
+	}
+	documents = append(documents, groupConfig)
+	policy, err := config.MergePolicyDocuments(documents...)
+	if err != nil {
+		return err
+	}
+	return config.ValidateGuardPolicy(policy)
+}
+
+func validateGlobalPolicyUpdate(ctx context.Context, queries *store.Queries, globalConfig []byte) error {
+	if err := config.ValidatePolicyDocument(globalConfig); err != nil {
+		return err
+	}
+	policy, err := config.MergePolicyDocuments(globalConfig)
+	if err != nil {
+		return err
+	}
+	if err := config.ValidateGuardPolicy(policy); err != nil {
+		return err
+	}
+
+	groups, err := queries.ListGroups(ctx)
+	if err != nil {
+		return fmt.Errorf("list groups for config validation: %w", err)
+	}
+	for _, group := range groups {
+		policy, err := config.MergePolicyDocuments(globalConfig, group.Config)
+		if err != nil {
+			return fmt.Errorf("group %d config merge failed: %w", group.ChatID, err)
+		}
+		if err := config.ValidateGuardPolicy(policy); err != nil {
+			return fmt.Errorf("group %d effective config is invalid: %w", group.ChatID, err)
+		}
+	}
+	return nil
 }
 
 func validateJoinProtectionConfigDocument(raw []byte) error {

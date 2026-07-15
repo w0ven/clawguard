@@ -442,8 +442,15 @@ export const fieldDescriptors: FieldDescriptor[] = [
     tab: "anti-spam",
     path: ["anti_spam", "rate_limit", "action"],
     label: "超速动作",
-    description: "例如 mute_5m",
-    kind: "text",
+    description: "达到限速阈值后执行",
+    kind: "select",
+    options: [
+      { label: "删除", value: "delete" },
+      { label: "删除 + 警告", value: "delete_warn" },
+      { label: "删除 + 禁言 5 分钟", value: "mute_5m" },
+      { label: "删除 + 禁言 1 小时", value: "mute_1h" },
+      { label: "删除 + 封禁", value: "delete_ban" },
+    ],
   },
 
   // ===== Logging =====

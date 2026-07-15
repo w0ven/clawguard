@@ -20,14 +20,15 @@ import (
 )
 
 type otherBotMockDB struct {
-	mu         sync.Mutex
-	now        time.Time
-	policy     config.GuardPolicy
-	trust      *store.UserTrust
-	audits     int
-	auditLog   []store.InsertAuditEntryParams
-	violations []store.InsertViolationParams
-	noTrust    bool
+	mu            sync.Mutex
+	now           time.Time
+	policy        config.GuardPolicy
+	trust         *store.UserTrust
+	audits        int
+	auditLog      []store.InsertAuditEntryParams
+	violations    []store.InsertViolationParams
+	noTrust       bool
+	actionsPaused bool
 }
 
 func newOtherBotMockDB(policy config.GuardPolicy) *otherBotMockDB {
@@ -60,7 +61,7 @@ func (db *otherBotMockDB) QueryRow(_ context.Context, query string, args ...any)
 	case strings.Contains(query, "FROM admins"):
 		return mockErrorRow{err: pgx.ErrNoRows}
 	case strings.Contains(query, "FROM system_state"):
-		return mockScanRow(int32(1), false, false, false, "", db.now, (*int64)(nil))
+		return mockScanRow(int32(1), false, db.actionsPaused, false, "", db.now, (*int64)(nil))
 	case strings.Contains(query, "FROM user_trust"):
 		db.mu.Lock()
 		defer db.mu.Unlock()
@@ -393,6 +394,75 @@ func TestHandleUngraduatedInviteServiceMessageDeletesAndKicks(t *testing.T) {
 	}
 }
 
+func TestHandleUngraduatedInviteSkipsAndContinuesWhenActionsPaused(t *testing.T) {
+	policy := config.DefaultPolicy
+	policy.Filter.NewUser.NoInvites = true
+	db := newOtherBotMockDB(policy)
+	db.actionsPaused = true
+	db.trust = &store.UserTrust{
+		ChatID:          -1001,
+		UserID:          66,
+		JoinedAt:        db.now,
+		UpdatedAt:       db.now,
+		StatusChangedAt: db.now,
+		Status:          "new",
+		Score:           0.5,
+	}
+	botClient, transport := newMockTelegramBot(t, "")
+	svc := &Service{logger: zap.NewNop(), queries: store.New(db), bot: botClient, sender: botClient, sendLimiter: NewSendLimiter()}
+	msg := &tele.Message{
+		ID:          124,
+		Chat:        &tele.Chat{ID: -1001, Title: "group", Type: tele.ChatSuperGroup},
+		Sender:      &tele.User{ID: 66, FirstName: "Alice"},
+		UsersJoined: []tele.User{{ID: 77, IsBot: true, Username: "badbot"}},
+	}
+
+	if svc.handleUngraduatedInviteServiceMessage(context.Background(), msg, policy) {
+		t.Fatal("paused invite restriction handled the join, want normal join flow to continue")
+	}
+	if methods := transport.Methods(); containsString(methods, "deleteMessage") || containsString(methods, "kickChatMember") || containsString(methods, "unbanChatMember") {
+		t.Fatalf("methods = %v, want no Telegram actions while paused", methods)
+	}
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	if len(db.violations) != 1 || db.violations[0].Action != "skipped_paused:delete_kick" {
+		t.Fatalf("violations = %+v, want one skipped_paused result", db.violations)
+	}
+}
+
+func TestHandleUngraduatedInviteKickFailureContinuesJoinFlow(t *testing.T) {
+	policy := config.DefaultPolicy
+	policy.Filter.NewUser.NoInvites = true
+	db := newOtherBotMockDB(policy)
+	db.trust = &store.UserTrust{
+		ChatID:          -1001,
+		UserID:          66,
+		JoinedAt:        db.now,
+		UpdatedAt:       db.now,
+		StatusChangedAt: db.now,
+		Status:          "new",
+		Score:           0.5,
+	}
+	botClient, transport := newMockTelegramBot(t, "")
+	transport.failBanUserID = 77
+	svc := &Service{logger: zap.NewNop(), queries: store.New(db), bot: botClient, sender: botClient, sendLimiter: NewSendLimiter()}
+	update := &tele.ChatMemberUpdate{
+		Chat:          &tele.Chat{ID: -1001, Title: "group", Type: tele.ChatSuperGroup},
+		Sender:        &tele.User{ID: 66, FirstName: "Alice"},
+		OldChatMember: &tele.ChatMember{User: &tele.User{ID: 77, Username: "target"}, Role: tele.Left},
+		NewChatMember: &tele.ChatMember{User: &tele.User{ID: 77, Username: "target"}, Role: tele.Member},
+	}
+
+	if svc.handleUngraduatedInviteChatMember(context.Background(), update, update.NewChatMember.User, policy) {
+		t.Fatal("failed kick handled the join, want normal join flow to continue")
+	}
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	if len(db.violations) != 1 || db.violations[0].Action != "failed:kick" {
+		t.Fatalf("violations = %+v, want one failed kick result", db.violations)
+	}
+}
+
 func TestHandleUngraduatedInviteReactivatesArchivedInviter(t *testing.T) {
 	policy := config.DefaultPolicy
 	policy.Filter.NewUser.NoInvites = true
@@ -463,7 +533,7 @@ func TestHandleSenderChatMessageRespectsDisabledPolicy(t *testing.T) {
 		SenderChat: &tele.Chat{ID: -2002, Title: "Spam Channel", Username: "spam_channel", Type: tele.ChatChannel},
 	}
 
-	handled, err := svc.handleSenderChatMessage(context.Background(), msg, policy)
+	handled, err := svc.handleSenderChatMessage(context.Background(), msg, policy, false)
 	if err != nil {
 		t.Fatalf("handleSenderChatMessage() error = %v", err)
 	}
@@ -492,7 +562,7 @@ func TestHandleSenderChatMessageDeletesBansAndRecords(t *testing.T) {
 		SenderChat: &tele.Chat{ID: -2002, Title: "Spam Channel", Username: "spam_channel", Type: tele.ChatChannel},
 	}
 
-	handled, err := svc.handleSenderChatMessage(context.Background(), msg, policy)
+	handled, err := svc.handleSenderChatMessage(context.Background(), msg, policy, false)
 	if err != nil {
 		t.Fatalf("handleSenderChatMessage() error = %v", err)
 	}
@@ -541,7 +611,7 @@ func TestHandleSenderChatMessageBansEvenWhenFakeSenderPresent(t *testing.T) {
 		SenderChat: &tele.Chat{ID: -2002, Title: "Spam Channel", Username: "spam_channel", Type: tele.ChatChannel},
 	}
 
-	handled, err := svc.handleSenderChatMessage(context.Background(), msg, policy)
+	handled, err := svc.handleSenderChatMessage(context.Background(), msg, policy, false)
 	if err != nil {
 		t.Fatalf("handleSenderChatMessage() error = %v", err)
 	}
@@ -573,7 +643,7 @@ func TestHandleSenderChatMessageSkipsAutomaticForward(t *testing.T) {
 		AutomaticForward: true,
 	}
 
-	handled, err := svc.handleSenderChatMessage(context.Background(), msg, policy)
+	handled, err := svc.handleSenderChatMessage(context.Background(), msg, policy, false)
 	if err != nil {
 		t.Fatalf("handleSenderChatMessage() error = %v", err)
 	}
