@@ -164,6 +164,7 @@ jobs:
           file: ${{ matrix.context }}/Dockerfile
           platforms: linux/amd64
           push: true
+          no-cache: ${{ matrix.service == 'bot' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=${{ matrix.service }}

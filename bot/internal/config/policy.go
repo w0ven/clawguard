@@ -104,16 +104,23 @@ func (w WelcomeMessageConfig) MarshalJSON() ([]byte, error) {
 }
 
 type FilterConfig struct {
-	Keywords                 FilterKeywordPolicy  `json:"keywords"`
-	Regex                    FilterRegexPolicy    `json:"regex"`
-	Links                    FilterLinksPolicy    `json:"links"`
-	Usernames                FilterUsernamePolicy `json:"usernames"`
-	NewUser                  FilterNewUserPolicy  `json:"new_user"`
-	NonTextMessages          string               `json:"non_text_messages"`
-	OtherBotsAction          string               `json:"other_bots_action"` // "audit" | "kick" | "ban" | "off"
-	BotWhitelist             []string             `json:"bot_whitelist"`     // username (without @)
-	BanBotInviterOnViolation bool                 `json:"ban_bot_inviter_on_violation"`
-	BanSenderChats           bool                 `json:"ban_sender_chats"`
+	Keywords                 FilterKeywordPolicy        `json:"keywords"`
+	Regex                    FilterRegexPolicy          `json:"regex"`
+	Links                    FilterLinksPolicy          `json:"links"`
+	Usernames                FilterUsernamePolicy       `json:"usernames"`
+	DeletedAccount           FilterDeletedAccountPolicy `json:"deleted_account"`
+	NewUser                  FilterNewUserPolicy        `json:"new_user"`
+	NonTextMessages          string                     `json:"non_text_messages"`
+	OtherBotsAction          string                     `json:"other_bots_action"` // "audit" | "kick" | "ban" | "off"
+	BotWhitelist             []string                   `json:"bot_whitelist"`     // username (without @)
+	BanBotInviterOnViolation bool                       `json:"ban_bot_inviter_on_violation"`
+	BanSenderChats           bool                       `json:"ban_sender_chats"`
+}
+
+// FilterDeletedAccountPolicy permanently bans users whose display name or
+// username contains "Deleted Account" after Unicode/punctuation normalization.
+type FilterDeletedAccountPolicy struct {
+	Enabled bool `json:"enabled"`
 }
 
 type FilterKeywordPolicy struct {
@@ -281,6 +288,9 @@ var DefaultPolicy = GuardPolicy{
 		},
 		Usernames: FilterUsernamePolicy{
 			Enabled: false,
+		},
+		DeletedAccount: FilterDeletedAccountPolicy{
+			Enabled: true,
 		},
 		NewUser: FilterNewUserPolicy{
 			Enabled:              true,

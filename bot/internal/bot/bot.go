@@ -889,6 +889,12 @@ func (s *Service) startVerification(chat *tele.Chat, user *tele.User, joinEventM
 		zap.Duration("elapsed", time.Since(policyStartedAt)),
 	)
 
+	if handled, err := s.handleDeletedAccountJoin(ctx, chat, user, policy, actionsPaused); err != nil {
+		return err
+	} else if handled {
+		return nil
+	}
+
 	if s.handleUngraduatedInviteServiceMessage(ctx, joinEventMessage, policy) {
 		return nil
 	}

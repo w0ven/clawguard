@@ -41,6 +41,9 @@ export type GuardPolicy = {
       enabled: boolean;
       blacklist: string[];
     };
+    deleted_account: {
+      enabled: boolean;
+    };
     new_user: {
       enabled: boolean;
       duration_hours: number;

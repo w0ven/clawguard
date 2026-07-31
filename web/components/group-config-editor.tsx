@@ -336,6 +336,14 @@ export const fieldDescriptors: FieldDescriptor[] = [
   },
   {
     tab: "filter",
+    path: ["filter", "deleted_account", "enabled"],
+    label: "封禁 Deleted Account",
+    description:
+      "显示名或用户名标准化后包含 Deleted Account 时，立即删除消息并永久封禁；管理员不豁免。",
+    kind: "switch",
+  },
+  {
+    tab: "filter",
     path: ["filter", "new_user", "enabled"],
     label: "未毕业用户限制",
     description:
@@ -774,6 +782,14 @@ const configFieldGroups: ConfigFieldGroupDescriptor[] = [
     title: "用户名黑名单",
     parentPath: "filter.usernames.enabled",
     childPaths: ["filter.usernames.blacklist"],
+  },
+  {
+    key: "filter.deleted_account",
+    tab: "filter",
+    title: "Deleted Account 防护",
+    parentPath: "filter.deleted_account.enabled",
+    childPaths: [],
+    description: "命中显示名或用户名后立即清理消息并永久封禁，且不豁免管理员。",
   },
   {
     key: "filter.new_user",
