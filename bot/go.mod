@@ -15,7 +15,8 @@ require (
 	github.com/redis/go-redis/v9 v9.7.3
 	github.com/robfig/cron/v3 v3.0.1
 	go.uber.org/zap v1.27.0
-	golang.org/x/sync v0.20.0
+	golang.org/x/sync v0.21.0
+	golang.org/x/text v0.39.0
 	golang.org/x/time v0.8.0
 	gopkg.in/telebot.v3 v3.3.8
 )
@@ -40,5 +41,4 @@ require (
 	golang.org/x/image v0.0.0-20190802002840-cff245a6509b // indirect
 	golang.org/x/net v0.53.0 // indirect
 	golang.org/x/sys v0.43.0 // indirect
-	golang.org/x/text v0.36.0 // indirect
 )

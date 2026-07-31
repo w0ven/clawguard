@@ -61,6 +61,7 @@ func parseUserTrustBanMeta(notes *string, fallbackSource string) (string, string
 		rule   string
 		source string
 	}{
+		{rule: deletedAccountRule, source: "deleted_account_filter"},
 		{rule: "profile_match_on_message", source: "bio_on_message"},
 		{rule: "profile_match", source: "profile_match"},
 		{rule: "cas_banned", source: "cas"},
@@ -206,6 +207,12 @@ func (s *Service) handleIncomingMessageWithOptions(c tele.Context, isEdited bool
 		return nil
 	}
 	if isSenderChatPersona(msg) {
+		return nil
+	}
+
+	if handled, err := s.applyDeletedAccountMessageFilter(ctx, msg, policy, state.ActionsPaused); err != nil {
+		return err
+	} else if handled {
 		return nil
 	}
 
@@ -968,7 +975,11 @@ func (s *Service) applyFilterAction(ctx context.Context, msg *tele.Message, poli
 	}
 
 	s.maybeBanBotInviterAfterViolation(ctx, msg, policy, actionForViolation, result.Reason)
-	s.resetTrustAfterViolation(ctx, msg, actionForViolation, stringPtr(result.Reason))
+	trustNote := result.Reason
+	if result.Reason == deletedAccountRule && strings.TrimSpace(result.MatchedRule) != "" {
+		trustNote += ": " + result.MatchedRule
+	}
+	s.resetTrustAfterViolation(ctx, msg, actionForViolation, stringPtr(trustNote))
 
 	// 动作反馈（根据 action 派发到不同模板）
 	matched := truncateString(result.MatchedRule, 200)
@@ -1010,6 +1021,8 @@ func humanReason(rawReason, matched string) string {
 			return "发了不允许的链接 " + matched
 		case "filter_username":
 			return "用户名触发黑名单 " + matched
+		case deletedAccountRule:
+			return "显示名或用户名命中 Deleted Account " + matched
 		case "filter_rate_limit":
 			return "发言过快"
 		case "filter_newuser_no_links":
@@ -1033,6 +1046,8 @@ func humanReason(rawReason, matched string) string {
 		return "链接过滤"
 	case "filter_username":
 		return "用户名过滤"
+	case deletedAccountRule:
+		return "显示名或用户名命中 Deleted Account"
 	case "filter_rate_limit":
 		return "发言频率限制"
 	case "filter_non_text_message":

@@ -68,6 +68,22 @@ func TestDefaultPolicyNewUserNoInvitesDisabled(t *testing.T) {
 	}
 }
 
+func TestDefaultPolicyDeletedAccountFilterEnabled(t *testing.T) {
+	if !DefaultPolicy.Filter.DeletedAccount.Enabled {
+		t.Fatal("expected filter.deleted_account.enabled to default to true")
+	}
+}
+
+func TestMergePolicyDocumentsCanDisableDeletedAccountFilter(t *testing.T) {
+	policy, err := MergePolicyDocuments([]byte(`{"filter":{"deleted_account":{"enabled":false}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if policy.Filter.DeletedAccount.Enabled {
+		t.Fatal("explicit filter.deleted_account.enabled=false was not preserved")
+	}
+}
+
 func TestMergePolicyDocumentsPreservesExplicitZeroAndEmptyValues(t *testing.T) {
 	policy, err := MergePolicyDocuments([]byte(`{
 		"verify": {
