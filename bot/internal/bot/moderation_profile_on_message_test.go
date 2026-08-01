@@ -387,10 +387,8 @@ func TestModerationDedupe_RedisUnavailableFallsBackToLocalLocks(t *testing.T) {
 		}
 	})
 
-	if release, ok := svc.acquireUserActionLock(-100123, 42); !ok {
+	if _, ok := svc.acquireUserActionLock(-100123, 42); !ok {
 		t.Fatal("first user action lock acquisition failed")
-	} else {
-		release()
 	}
 	if _, ok := svc.acquireUserActionLock(-100123, 42); ok {
 		t.Fatal("second user action lock acquisition succeeded, want local fallback dedupe")
