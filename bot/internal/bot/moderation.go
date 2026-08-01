@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -413,13 +414,13 @@ func (s *Service) applyAIModeration(ctx context.Context, msg *tele.Message, poli
 		} else {
 			s.logger.Info("skip duplicate banned user message delete", zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID), zap.Int("message_id", msg.ID))
 		}
-		actionRelease, actionOK := s.acquireUserActionLock(msg.Chat.ID, msg.Sender.ID)
+		actionRollback, actionOK := s.acquireUserActionLock(msg.Chat.ID, msg.Sender.ID)
 		if !actionOK {
 			s.logger.Info("skip duplicate banned user action", zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID), zap.Int("message_id", msg.ID))
 			return nil
 		}
-		defer actionRelease()
 		if err := s.banUser(msg.Chat, msg.Sender); err != nil {
+			actionRollback()
 			return err
 		}
 		s.sendActionFeedback(msg.Chat, nil, policy.Feedback.Ban, map[string]string{
@@ -2467,10 +2468,10 @@ func (s *Service) applyAIAction(ctx context.Context, msg *tele.Message, policy c
 		} else {
 			s.logger.Info("skip duplicate ai ban message delete", zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID), zap.Int("message_id", msg.ID))
 		}
-		actionRelease, actionOK := s.acquireUserActionLock(msg.Chat.ID, msg.Sender.ID)
+		actionRollback, actionOK := s.acquireUserActionLock(msg.Chat.ID, msg.Sender.ID)
 		if actionOK {
-			defer actionRelease()
 			if err := s.banUser(msg.Chat, msg.Sender); err != nil {
+				actionRollback()
 				auditOutcome = "failed"
 				auditError = redact.ErrorString(err)
 				return err
@@ -2492,10 +2493,10 @@ func (s *Service) applyAIAction(ctx context.Context, msg *tele.Message, policy c
 		} else {
 			s.logger.Info("skip duplicate ai mute message delete", zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID), zap.Int("message_id", msg.ID))
 		}
-		actionRelease, actionOK := s.acquireUserActionLock(msg.Chat.ID, msg.Sender.ID)
+		actionRollback, actionOK := s.acquireUserActionLock(msg.Chat.ID, msg.Sender.ID)
 		if actionOK {
-			defer actionRelease()
 			if err := s.muteUser(msg.Chat, msg.Sender, 600); err != nil {
+				actionRollback()
 				auditOutcome = "failed"
 				auditError = redact.ErrorString(err)
 				return err
@@ -2517,10 +2518,10 @@ func (s *Service) applyAIAction(ctx context.Context, msg *tele.Message, policy c
 		} else {
 			s.logger.Info("skip duplicate ai warn message delete", zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID), zap.Int("message_id", msg.ID))
 		}
-		actionRelease, actionOK := s.acquireUserActionLock(msg.Chat.ID, msg.Sender.ID)
+		actionRollback, actionOK := s.acquireUserActionLock(msg.Chat.ID, msg.Sender.ID)
 		if actionOK {
-			defer actionRelease()
 			if _, _, err := s.IncrWarning(ctx, msg.Chat, msg.Sender, "ai_"+output.Verdict.Verdict, policy, true, true); err != nil {
+				actionRollback()
 				auditOutcome = "failed"
 				auditError = redact.ErrorString(err)
 				return err
@@ -2545,10 +2546,8 @@ func (s *Service) applyAIAction(ctx context.Context, msg *tele.Message, policy c
 		} else {
 			s.logger.Info("skip duplicate ai delete message delete", zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID), zap.Int("message_id", msg.ID))
 		}
-		actionRelease, actionOK := s.acquireUserActionLock(msg.Chat.ID, msg.Sender.ID)
-		if actionOK {
-			defer actionRelease()
-		} else {
+		_, actionOK := s.acquireUserActionLock(msg.Chat.ID, msg.Sender.ID)
+		if !actionOK {
 			s.logger.Info("skip duplicate ai delete user action", zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID), zap.Int("message_id", msg.ID))
 			auditOutcome = "deduped"
 			return nil
@@ -3129,14 +3128,15 @@ func (s *Service) escalateWarnings(ctx context.Context, chat *tele.Chat, user *t
 			"error":    auditError,
 		})
 	}()
+	actionRollback := func() {}
 	if !userActionLocked {
-		actionRelease, actionOK := s.acquireUserActionLock(chat.ID, user.ID)
+		var actionOK bool
+		actionRollback, actionOK = s.acquireUserActionLock(chat.ID, user.ID)
 		if !actionOK {
 			s.logger.Info("skip duplicate warnings escalation user action", zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
 			auditOutcome = "skipped"
 			return nil
 		}
-		defer actionRelease()
 	}
 
 	action := policy.Warnings.ActionAtMax
@@ -3147,35 +3147,41 @@ func (s *Service) escalateWarnings(ctx context.Context, chat *tele.Chat, user *t
 	switch action {
 	case "mute":
 		if err := s.muteUser(chat, user, 3600); err != nil {
+			actionRollback()
 			auditOutcome = "failed"
 			auditError = redact.ErrorString(err)
 			return fmt.Errorf("mute warned user: %w", err)
 		}
 	case "mute_5m":
 		if err := s.muteUser(chat, user, 300); err != nil {
+			actionRollback()
 			auditOutcome = "failed"
 			auditError = redact.ErrorString(err)
 			return fmt.Errorf("mute warned user: %w", err)
 		}
 	case "mute_1h":
 		if err := s.muteUser(chat, user, 3600); err != nil {
+			actionRollback()
 			auditOutcome = "failed"
 			auditError = redact.ErrorString(err)
 			return fmt.Errorf("mute warned user: %w", err)
 		}
 	case "kick":
 		if err := s.kickUser(chat, user); err != nil {
+			actionRollback()
 			auditOutcome = "failed"
 			auditError = redact.ErrorString(err)
 			return fmt.Errorf("kick warned user: %w", err)
 		}
 	case "ban":
 		if err := s.banUser(chat, user); err != nil {
+			actionRollback()
 			auditOutcome = "failed"
 			auditError = redact.ErrorString(err)
 			return fmt.Errorf("ban warned user: %w", err)
 		}
 	default:
+		actionRollback()
 		auditOutcome = "failed"
 		auditError = fmt.Sprintf("unknown warnings escalate action %q", action)
 		return fmt.Errorf("unknown warnings escalate action %q", action)
@@ -3773,12 +3779,76 @@ func (s *Service) acquireProfileCheckInFlight(userID int64) (func(), bool) {
 
 var bioCheckInFlightLocalTTL = 60 * time.Second
 
+var userActionLockSequence atomic.Uint64
+
+type rollbackableActionLock struct {
+	timer *time.Timer
+	token string
+}
+
 func (s *Service) acquireUserActionLock(chatID, userID int64) (func(), bool) {
 	if chatID == 0 || userID <= 0 {
 		return func() {}, false
 	}
 	key := "user_action:" + strconv.FormatInt(chatID, 10) + ":" + strconv.FormatInt(userID, 10)
-	return s.acquireActionDedupeLock(key, userActionLockTTL, &s.userActionLocks, "user action", zap.Int64("chat_id", chatID), zap.Int64("user_id", userID))
+	return s.acquireRollbackableActionDedupeLock(
+		key,
+		userActionLockTTL,
+		&s.userActionLocks,
+		"user action",
+		zap.Int64("chat_id", chatID),
+		zap.Int64("user_id", userID),
+	)
+}
+
+// acquireRollbackableActionDedupeLock keeps the lock until its TTL after a
+// successful action. The returned function is a rollback hook: callers must
+// invoke it only when the protected action fails, so an immediate retry can
+// acquire both the Redis and process-local ownership again.
+func (s *Service) acquireRollbackableActionDedupeLock(key string, ttl time.Duration, local *sync.Map, label string, fields ...zap.Field) (func(), bool) {
+	if key == "" || ttl <= 0 || local == nil {
+		return func() {}, false
+	}
+
+	token := strconv.FormatInt(time.Now().UnixNano(), 36) + ":" + strconv.FormatUint(userActionLockSequence.Add(1), 36)
+	owner := &rollbackableActionLock{token: token}
+	if _, loaded := local.LoadOrStore(key, owner); loaded {
+		return func() {}, false
+	}
+
+	redisOwned := false
+	if s.redis != nil {
+		ok, err := s.redis.SetNX(context.Background(), key, token, ttl).Result()
+		if err == nil {
+			if !ok {
+				local.CompareAndDelete(key, owner)
+				return func() {}, false
+			}
+			redisOwned = true
+		} else if s.logger != nil {
+			logFields := append([]zap.Field{zap.Error(err), zap.String("key", key)}, fields...)
+			s.logger.Warn("acquire "+label+" lock via redis failed", logFields...)
+		}
+	}
+
+	owner.timer = time.AfterFunc(ttl, func() {
+		local.CompareAndDelete(key, owner)
+	})
+	var rollbackOnce sync.Once
+	rollback := func() {
+		rollbackOnce.Do(func() {
+			owner.timer.Stop()
+			local.CompareAndDelete(key, owner)
+			if !redisOwned {
+				return
+			}
+			if err := s.redis.Eval(context.Background(), redisCompareAndDeleteScript, []string{key}, token).Err(); err != nil && s.logger != nil {
+				logFields := append([]zap.Field{zap.Error(err), zap.String("key", key)}, fields...)
+				s.logger.Warn("rollback "+label+" lock via redis failed", logFields...)
+			}
+		})
+	}
+	return rollback, true
 }
 
 func (s *Service) acquireMessageDeleteLock(chatID int64, msgID int) (func(), bool) {
@@ -3850,10 +3920,10 @@ func (s *Service) handleProfileOnMessageViolation(
 		return nil
 	}
 
-	actionRelease, actionOK := s.acquireUserActionLock(msg.Chat.ID, msg.Sender.ID)
+	actionRollback, actionOK := s.acquireUserActionLock(msg.Chat.ID, msg.Sender.ID)
 	if actionOK {
-		defer actionRelease()
 		if err := s.banUser(msg.Chat, msg.Sender); err != nil {
+			actionRollback()
 			return err
 		}
 	} else {

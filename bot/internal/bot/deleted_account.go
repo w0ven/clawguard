@@ -94,8 +94,10 @@ func (s *Service) applyDeletedAccountMessageFilter(
 		return false, nil
 	}
 
+	actionRollback := func() {}
 	if !actionsPaused {
-		_, actionOK := s.acquireUserActionLock(msg.Chat.ID, msg.Sender.ID)
+		var actionOK bool
+		actionRollback, actionOK = s.acquireUserActionLock(msg.Chat.ID, msg.Sender.ID)
 		if !actionOK {
 			if s.logger != nil {
 				s.logger.Info("skip duplicate deleted-account message action", zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID), zap.Int("message_id", msg.ID))
@@ -105,6 +107,7 @@ func (s *Service) applyDeletedAccountMessageFilter(
 		s.reactivateArchivedDeletedAccountTrust(ctx, msg.Chat.ID, msg.Sender.ID)
 	}
 	if err := s.applyFilterResult(ctx, msg, policy, result, actionsPaused); err != nil {
+		actionRollback()
 		return true, err
 	}
 	return true, nil
@@ -133,7 +136,7 @@ func (s *Service) handleDeletedAccountJoin(
 		return true, nil
 	}
 
-	_, actionOK := s.acquireUserActionLock(chat.ID, user.ID)
+	actionRollback, actionOK := s.acquireUserActionLock(chat.ID, user.ID)
 	if !actionOK {
 		if s.logger != nil {
 			s.logger.Info("skip duplicate deleted-account join action", zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
@@ -142,6 +145,7 @@ func (s *Service) handleDeletedAccountJoin(
 	}
 
 	if err := s.banUser(chat, user); err != nil {
+		actionRollback()
 		if errors.Is(err, errActionsPaused) {
 			s.recordDeletedAccountJoinViolation(ctx, chat, user, result.MatchedRule, "skipped_paused:ban")
 			return true, nil

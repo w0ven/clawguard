@@ -524,15 +524,18 @@ func (s *Service) runHandler(name string, c tele.Context, handler func(tele.Cont
 
 func (s *Service) runCommandHandler(name string, c tele.Context, handler func(tele.Context) error) error {
 	return s.runHandler(name, c, func(c tele.Context) error {
-		ignored, err := s.ignoreUnauthorizedGroupCommand(c)
-		if err != nil || ignored {
+		handled, err := s.preprocessGroupCommand(c)
+		if err != nil || handled {
 			return err
 		}
 		return handler(c)
 	})
 }
 
-func (s *Service) ignoreUnauthorizedGroupCommand(c tele.Context) (bool, error) {
+// preprocessGroupCommand applies the same authorization, runtime-state, and
+// Deleted Account checks that ordinary group messages pass before Telebot's
+// dedicated command handlers can run. Private-chat commands remain unchanged.
+func (s *Service) preprocessGroupCommand(c tele.Context) (bool, error) {
 	if c == nil || c.Chat() == nil {
 		return true, nil
 	}
@@ -552,9 +555,22 @@ func (s *Service) ignoreUnauthorizedGroupCommand(c tele.Context) (bool, error) {
 	state, err := s.GetSystemState(ctx)
 	if err != nil {
 		s.logger.Warn("load system state failed for command", zap.Error(err), zap.Int64("chat_id", chat.ID))
+		return true, nil
+	}
+	if state.Frozen {
+		return true, nil
+	}
+
+	msg := c.Message()
+	if msg == nil || msg.Sender == nil || isSenderChatPersona(msg) {
 		return false, nil
 	}
-	return state.Frozen, nil
+	policy, err := s.LoadGuardPolicy(ctx, chat.ID)
+	if err != nil {
+		s.logger.Warn("load guard policy failed for command", zap.Error(err), zap.Int64("chat_id", chat.ID))
+		return true, nil
+	}
+	return s.applyDeletedAccountMessageFilter(ctx, msg, policy, state.ActionsPaused)
 }
 
 func (s *Service) handleUserJoined(c tele.Context) error {
@@ -625,14 +641,29 @@ func (s *Service) handleChatMemberUpdate(c tele.Context) error {
 	generation := membershipGenerationForUpdate(c.Update().ID, update)
 
 	ctx := context.Background()
-	policy := config.DefaultPolicy
-	if s.queries != nil {
-		loaded, err := s.LoadGuardPolicy(ctx, update.Chat.ID)
-		if err != nil {
-			s.logger.Warn("load policy for ungraduated invite restriction failed", zap.Error(err), zap.Int64("chat_id", update.Chat.ID), zap.Int64("user_id", member.User.ID))
-		} else {
-			policy = loaded
-		}
+	authorized, err := s.IsAuthorizedGroup(ctx, update.Chat.ID)
+	if err != nil {
+		s.logger.Warn("authorized group check failed for chat-member join", zap.Error(err), zap.Int64("chat_id", update.Chat.ID), zap.Int64("user_id", member.User.ID))
+		return err
+	}
+	if !authorized {
+		return nil
+	}
+	policy, err := s.LoadGuardPolicy(ctx, update.Chat.ID)
+	if err != nil {
+		s.logger.Warn("load policy for chat-member join failed", zap.Error(err), zap.Int64("chat_id", update.Chat.ID), zap.Int64("user_id", member.User.ID))
+		return err
+	}
+	state, err := s.GetSystemState(ctx)
+	if err != nil {
+		s.logger.Warn("load system state for chat-member join failed", zap.Error(err), zap.Int64("chat_id", update.Chat.ID), zap.Int64("user_id", member.User.ID))
+		return err
+	}
+	actionsPaused := state.ActionsPaused
+	if handled, err := s.handleDeletedAccountJoin(ctx, update.Chat, member.User, policy, actionsPaused); err != nil {
+		return err
+	} else if handled {
+		return nil
 	}
 	if s.handleUngraduatedInviteChatMember(ctx, update, member.User, policy) {
 		return nil
