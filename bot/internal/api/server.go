@@ -145,6 +145,14 @@ func (s *Server) handleWebhook(c echo.Context) error {
 	}
 
 	if err := s.botService.ProcessUpdate(update); err != nil {
+		// Telegram redelivers an update whenever the webhook answers 5xx. For a
+		// deterministic client error that retry can never succeed, so the same
+		// update would be replayed forever and block every update queued behind
+		// it. Acknowledge those and alert operators instead.
+		if bot.IsNonRetryableUpdateError(err) {
+			s.botService.ReportNonRetryableUpdate(update.ID, err)
+			return c.NoContent(http.StatusOK)
+		}
 		s.logger.Error("process webhook update", zap.Error(err))
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "update failed"})
 	}

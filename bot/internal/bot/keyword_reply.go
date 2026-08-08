@@ -16,6 +16,10 @@ import (
 	"github.com/openclaw/clawguard/internal/messagefmt"
 )
 
+// keywordReplyCooldownReleaseTimeout bounds the rollback of a cooldown lock so
+// a slow Redis cannot block the moderation path after a failed send.
+const keywordReplyCooldownReleaseTimeout = 3 * time.Second
+
 func (s *Service) tryKeywordReply(ctx context.Context, msg *tele.Message, policy config.GuardPolicy) (matched bool, err error) {
 	if msg == nil || msg.Chat == nil || msg.Sender == nil {
 		return false, nil
@@ -66,6 +70,12 @@ func (s *Service) tryKeywordReply(ctx context.Context, msg *tele.Message, policy
 			continue
 		}
 
+		// The cooldown lock is claimed before sending, so every failed send must
+		// release it again. Otherwise one rejected message silently swallows a
+		// full cooldown window: later matches hit the `!ok` branch below and
+		// return without any reply and without any log line, which makes the rule
+		// look dead even after the underlying problem is fixed.
+		var releaseCooldown func()
 		if rule.CooldownSeconds > 0 && s.redis != nil {
 			cdKey := fmt.Sprintf("kwreply:cd:%d:%s", msg.Chat.ID, ruleID)
 			ok, redisErr := s.redis.SetNX(ctx, cdKey, "1", time.Duration(rule.CooldownSeconds)*time.Second).Result()
@@ -75,6 +85,15 @@ func (s *Service) tryKeywordReply(ctx context.Context, msg *tele.Message, policy
 			}
 			if !ok {
 				return true, nil
+			}
+			releaseCooldown = func() {
+				// ctx may already be cancelled by the caller's moderation timeout,
+				// so the rollback needs its own short-lived context.
+				releaseCtx, cancel := context.WithTimeout(context.Background(), keywordReplyCooldownReleaseTimeout)
+				defer cancel()
+				if delErr := s.redis.Del(releaseCtx, cdKey).Err(); delErr != nil {
+					s.logger.Warn("release keyword reply cooldown after failed send", zap.Error(delErr), zap.Int64("chat_id", msg.Chat.ID), zap.String("rule_id", ruleID))
+				}
 			}
 		}
 
@@ -86,6 +105,9 @@ func (s *Service) tryKeywordReply(ctx context.Context, msg *tele.Message, policy
 			ReplyTo:               msg,
 		})
 		if sendErr != nil {
+			if releaseCooldown != nil {
+				releaseCooldown()
+			}
 			return false, fmt.Errorf("send keyword reply: %w", sendErr)
 		}
 
