@@ -6,6 +6,8 @@ import (
 	"reflect"
 	"regexp"
 	"strings"
+
+	"github.com/openclaw/clawguard/internal/messagefmt"
 )
 
 var (
@@ -270,6 +272,13 @@ func ValidateGuardPolicy(policy GuardPolicy) error {
 		}
 		if err := validateParseMode(fmt.Sprintf("messages.keyword_replies[%d].parse_mode", index), rule.ParseMode); err != nil {
 			return err
+		}
+		// Reject templates Telegram would refuse to parse. Without this a single
+		// bad rule keeps failing at send time, and because the send happens after
+		// the cooldown lock is taken it silently mutes the rule for a full
+		// cooldown window on every trigger.
+		if err := messagefmt.ValidateTemplate(rule.ReplyText, rule.ParseMode); err != nil {
+			return fmt.Errorf("messages.keyword_replies[%d].reply_text is not valid for parse_mode %q: %w", index, messagefmt.ResolveParseMode(rule.ParseMode), err)
 		}
 	}
 
