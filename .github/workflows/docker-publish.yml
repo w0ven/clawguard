@@ -112,9 +112,19 @@ jobs:
         working-directory: web
         run: npm run test:e2e
 
+  test-runtime:
+    name: Test runtime hardening
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+      - name: Redis legacy persistence and privilege smoke test
+        run: bash scripts/redis-hardening-smoke.sh
+
   build-and-push:
     name: Build ${{ matrix.service }}
-    needs: [test-bot, test-web]
+    needs: [test-bot, test-web, test-runtime]
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
