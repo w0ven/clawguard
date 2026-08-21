@@ -386,7 +386,7 @@ systemctl start clawguard-backup.service
 
 备份使用 PostgreSQL custom archive、SHA-256 校验和、原子落盘与 14 天默认保留；配置 `BACKUP_OFFSITE_DIR` 后会额外复制到异地挂载目录。成功时间写入 Redis，并显示在后台运行状态卡。
 
-恢复演练脚本会把已有备份恢复到临时 PostgreSQL 容器，不会触碰生产数据库：
+恢复演练脚本默认从 `/var/backups/clawguard` 选择最新备份并恢复到临时 PostgreSQL 容器，不会触碰生产数据库：
 
 ```bash
 cd /root/clawguard
