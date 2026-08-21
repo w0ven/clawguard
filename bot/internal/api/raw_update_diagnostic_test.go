@@ -1,6 +1,13 @@
 package api
 
-import "testing"
+import (
+	"testing"
+
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
+
+	"github.com/openclaw/clawguard/internal/config"
+)
 
 func TestRawTelegramUpdateDiagnosticSummaryTargetsForwardRing(t *testing.T) {
 	raw := []byte(`{"update_id":7,"message":{"message_id":42,"text":"💍","forward_origin":{"type":"user","sender_user":{"id":1,"first_name":"Dexter"},"date":1710000000},"photo":[{"file_id":"p"}]}}`)
@@ -47,5 +54,28 @@ func TestRawTelegramUpdateDiagnosticSummarySkipsOrdinaryMessage(t *testing.T) {
 
 	if _, ok := rawTelegramUpdateDiagnosticSummary(raw); ok {
 		t.Fatal("summary ok = true, want false")
+	}
+}
+
+func TestLogRawTelegramUpdateStoresSummaryOnly(t *testing.T) {
+	core, logs := observer.New(zap.InfoLevel)
+	server := &Server{
+		cfg:    config.Config{LogRawUpdates: true},
+		logger: zap.New(core),
+	}
+	raw := []byte(`{"update_id":10,"message":{"message_id":45,"text":"💍 private message","forward_sender_name":"Private Sender"}}`)
+
+	server.logRawTelegramUpdateIfTarget(raw)
+
+	entries := logs.All()
+	if len(entries) != 1 {
+		t.Fatalf("log entry count = %d, want 1", len(entries))
+	}
+	fields := entries[0].ContextMap()
+	if _, ok := fields["summary"]; !ok {
+		t.Fatal("summary field missing")
+	}
+	if _, ok := fields["raw_update_json"]; ok {
+		t.Fatal("raw_update_json must not be logged")
 	}
 }

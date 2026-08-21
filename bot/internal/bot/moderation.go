@@ -2908,7 +2908,7 @@ func (s *Service) resetTrustAfterViolation(ctx context.Context, msg *tele.Messag
 		ChatID: msg.Chat.ID,
 		UserID: msg.Sender.ID,
 		Score:  score,
-	}); err != nil {
+	}); err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		s.logger.Warn("reset user trust clean count failed", zap.Error(err), zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID), zap.String("action", action))
 	}
 

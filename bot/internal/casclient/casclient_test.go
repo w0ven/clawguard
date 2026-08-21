@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"testing"
 )
 
@@ -33,23 +34,31 @@ func newTestHTTPClient(t *testing.T, serverURL string) *http.Client {
 }
 
 func TestIsBannedRecordNotFoundReturnsClean(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"ok":false,"description":"Record not found"}`))
-	}))
-	defer server.Close()
+	for _, description := range []string{
+		"Record not found",
+		"Record not found.",
+		"  record NOT found.  ",
+	} {
+		t.Run(description, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"ok":false,"description":` + strconv.Quote(description) + `}`))
+			}))
+			defer server.Close()
 
-	client := New(newTestHTTPClient(t, server.URL), nil)
+			client := New(newTestHTTPClient(t, server.URL), nil)
 
-	banned, result, err := client.IsBanned(context.Background(), 12345)
-	if err != nil {
-		t.Fatalf("IsBanned returned error: %v", err)
-	}
-	if banned {
-		t.Fatalf("IsBanned returned banned=true, want false")
-	}
-	if result != nil {
-		t.Fatalf("IsBanned returned result=%+v, want nil", result)
+			banned, result, err := client.IsBanned(context.Background(), 12345)
+			if err != nil {
+				t.Fatalf("IsBanned returned error: %v", err)
+			}
+			if banned {
+				t.Fatalf("IsBanned returned banned=true, want false")
+			}
+			if result != nil {
+				t.Fatalf("IsBanned returned result=%+v, want nil", result)
+			}
+		})
 	}
 }
 
