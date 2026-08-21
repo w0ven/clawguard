@@ -304,7 +304,7 @@ Documentation-only changes do not require a production restart.
 
 ## Backup Restore Rehearsal
 
-The rehearsal restores an existing backup into a temporary PostgreSQL container and never touches production:
+The rehearsal selects the latest backup from `/var/backups/clawguard` by default, restores it into a temporary PostgreSQL container, and never touches production:
 
 ```bash
 bash scripts/restore-rehearsal.sh

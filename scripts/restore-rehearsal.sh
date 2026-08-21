@@ -2,7 +2,7 @@
 set -euo pipefail
 
 POSTGRES_IMAGE="${POSTGRES_IMAGE:-postgres:16-alpine}"
-BACKUP_DIR="${BACKUP_DIR:-./backups}"
+BACKUP_DIR="${BACKUP_DIR:-/var/backups/clawguard}"
 BACKUP_PATH="${BACKUP_PATH:-${1:-}}"
 KEEP="${KEEP:-0}"
 

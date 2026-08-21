@@ -2,14 +2,14 @@
 
 生产目录 `/root/clawguard` 可定期运行恢复演练，确认最近 PostgreSQL 备份能恢复到临时库并完成基础校验。
 
-脚本默认从 `./backups` 查找最新的 `.sql`、`.sql.gz`、`.dump`、`.dump.gz` 文件；也可以显式指定备份路径。
+脚本默认从生产备份目录 `/var/backups/clawguard` 查找最新的 `.sql`、`.sql.gz`、`.dump`、`.dump.gz` 文件；也可以显式指定备份路径。
 
 ```bash
 cd /root/clawguard
 bash scripts/restore-rehearsal.sh
 
 # 或指定备份文件
-BACKUP_PATH=/root/clawguard/backups/clawguard-20260521.sql.gz bash scripts/restore-rehearsal.sh
+BACKUP_PATH=/var/backups/clawguard/clawguard-20260521.dump bash scripts/restore-rehearsal.sh
 ```
 
 脚本会启动独立的临时 PostgreSQL 容器，容器名和库名都带 `restore_rehearsal_` 前缀，不连接 Compose 中的生产 `postgres` 服务，也不会 drop/truncate 生产库。
@@ -28,8 +28,8 @@ BACKUP_PATH=/root/clawguard/backups/clawguard-20260521.sql.gz bash scripts/resto
 KEEP=1 BACKUP_PATH=/path/to/backup.dump bash scripts/restore-rehearsal.sh
 ```
 
-如果远程备份目录不是 `./backups`，可以指定搜索目录：
+如果远程备份目录不是 `/var/backups/clawguard`，可以指定搜索目录：
 
 ```bash
-BACKUP_DIR=/root/backups bash scripts/restore-rehearsal.sh
+BACKUP_DIR=/mnt/offsite/clawguard bash scripts/restore-rehearsal.sh
 ```
