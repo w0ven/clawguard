@@ -1141,7 +1141,7 @@ func (s *Service) startAsyncVerificationChecks(chat *tele.Chat, user *tele.User,
 			zap.Duration("elapsed", time.Since(profileStartedAt)),
 		)
 		if err != nil {
-			s.logger.Warn("profile check failed, skip", zap.Error(err), zap.Int64("user_id", user.ID))
+			s.holdProfileReviewAfterError(chat, user, policy, err, "join")
 		} else if matched != "" {
 			payload, _ := json.Marshal(map[string]string{"matched": matched})
 			decisionMode := "join_keyword"
