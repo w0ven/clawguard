@@ -30,13 +30,13 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
-    user: redis
     env_file:
       - .env
     command:
       - sh
       - -ec
       - |
+        cat >/tmp/redis-start.sh <<'REDIS_START'
         if [ -f /data/appendonlydir/appendonly.aof.manifest ]; then
           exec redis-server --requirepass "$${REDIS_PASSWORD}" --appendonly yes --appendfsync everysec
         fi
@@ -62,6 +62,10 @@ services:
 
         trap - EXIT
         wait "$${redis_pid}"
+        REDIS_START
+        chmod 0555 /tmp/redis-start.sh
+        find /data ! -user redis -exec chown redis:redis '{}' +
+        exec setpriv --reuid redis --regid redis --clear-groups sh /tmp/redis-start.sh
     volumes:
       - redisdata:/data
     healthcheck:
@@ -73,6 +77,11 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - SETGID
+      - SETUID
     read_only: true
     tmpfs:
       - /tmp:mode=1777
