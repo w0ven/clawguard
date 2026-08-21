@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -90,7 +91,7 @@ func (c *Client) IsBanned(ctx context.Context, userID int64) (bool, *CASResult, 
 		return false, nil, fmt.Errorf("decode cas response: %w", err)
 	}
 	if !decoded.OK {
-		if decoded.Description == "Record not found" {
+		if isRecordNotFound(decoded.Description) {
 			decoded.Result = nil
 		} else {
 			return false, nil, fmt.Errorf("cas api error: %s", decoded.Description)
@@ -110,4 +111,10 @@ func (c *Client) IsBanned(ctx context.Context, userID int64) (bool, *CASResult, 
 	}
 
 	return banned, decoded.Result, nil
+}
+
+func isRecordNotFound(description string) bool {
+	normalized := strings.TrimSpace(description)
+	normalized = strings.TrimRight(normalized, ".!。！")
+	return strings.EqualFold(strings.TrimSpace(normalized), "record not found")
 }

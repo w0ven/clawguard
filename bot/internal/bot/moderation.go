@@ -2908,7 +2908,7 @@ func (s *Service) resetTrustAfterViolation(ctx context.Context, msg *tele.Messag
 		ChatID: msg.Chat.ID,
 		UserID: msg.Sender.ID,
 		Score:  score,
-	}); err != nil {
+	}); err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		s.logger.Warn("reset user trust clean count failed", zap.Error(err), zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID), zap.String("action", action))
 	}
 
@@ -3556,9 +3556,8 @@ func (s *Service) checkProfile(ctx context.Context, chat *tele.Chat, user *tele.
 	// ai mode: call ai moderator to check a constructed profile text
 	if mode == "ai" {
 		if s.aiModerator == nil {
-			s.logger.Warn("ai moderator not available, allow profile", zap.Int64("user_id", user.ID))
 			s.enqueueProfileCheckLog(chatID, user, bio, "ai", "error", nil, nil, nil)
-			return "", nil, nil
+			return "", nil, errors.New("ai moderator not available for profile check")
 		}
 
 		text := "[新用户简介审核] 简介=" + strings.TrimSpace(privateChat.Bio)
@@ -3573,13 +3572,12 @@ func (s *Service) checkProfile(ctx context.Context, chat *tele.Chat, user *tele.
 			SkipCache:  true,
 		})
 		if err != nil {
-			s.logger.Warn("ai profile check failed, allow profile", zap.Error(err), zap.Int64("user_id", user.ID))
 			s.enqueueProfileCheckLog(chatID, user, bio, "ai", "error", nil, nil, nil)
-			return "", nil, nil
+			return "", nil, fmt.Errorf("ai profile check: %w", err)
 		}
 		if output.Skipped {
-			s.enqueueProfileCheckLog(chatID, user, bio, "ai", "skip", nil, nil, nil)
-			return "", nil, nil
+			s.enqueueProfileCheckLog(chatID, user, bio, "ai", "error", nil, nil, nil)
+			return "", nil, errors.New("ai profile check skipped without a verdict")
 		}
 		verdict := strings.TrimSpace(strings.ToLower(output.Verdict.Verdict))
 		conf := output.Verdict.Confidence
@@ -3636,7 +3634,7 @@ func (s *Service) checkProfileOnMessage(ctx context.Context, chat *tele.Chat, us
 	// 读 bio（带缓存）
 	bio, fromCache, err := s.fetchUserBioCached(ctx, user.ID, policy.AI.BioCacheTTLMinutes)
 	if err != nil {
-		return "", nil, nil
+		return "", nil, fmt.Errorf("load user bio: %w", err)
 	}
 	if strings.TrimSpace(bio) == "" {
 		s.enqueueProfileCheckLog(chatID, user, "", "on_message_"+mode, "skip", nil, nil, nil)
@@ -3663,7 +3661,7 @@ func (s *Service) checkProfileOnMessage(ctx context.Context, chat *tele.Chat, us
 	// AI 模式
 	if s.aiModerator == nil {
 		s.enqueueProfileCheckLog(chatID, user, bio, "on_message_ai", "error", nil, nil, nil)
-		return "", nil, nil
+		return "", nil, errors.New("ai moderator not available for on-message profile check")
 	}
 	text := "[未毕业用户发言前 bio 审核] 简介=" + bio
 	output, err := s.aiModerator.CheckMessage(ctx, ai.CheckInput{
@@ -3676,11 +3674,11 @@ func (s *Service) checkProfileOnMessage(ctx context.Context, chat *tele.Chat, us
 	})
 	if err != nil {
 		s.enqueueProfileCheckLog(chatID, user, bio, "on_message_ai", "error", nil, nil, nil)
-		return "", nil, nil
+		return "", nil, fmt.Errorf("ai on-message profile check: %w", err)
 	}
 	if output.Skipped {
-		s.enqueueProfileCheckLog(chatID, user, bio, "on_message_ai", "skip", nil, nil, nil)
-		return "", nil, nil
+		s.enqueueProfileCheckLog(chatID, user, bio, "on_message_ai", "error", nil, nil, nil)
+		return "", nil, errors.New("ai on-message profile check skipped without a verdict")
 	}
 	verdict := strings.TrimSpace(strings.ToLower(output.Verdict.Verdict))
 	conf := output.Verdict.Confidence
@@ -3719,11 +3717,7 @@ func (s *Service) asyncProfileCheck(msg *tele.Message, policy config.GuardPolicy
 
 		matched, output, err := s.checkProfileOnMessage(ctx, msg.Chat, msg.Sender, policy)
 		if err != nil {
-			s.logger.Warn("async on-message profile check failed",
-				zap.Error(err),
-				zap.Int64("chat_id", msg.Chat.ID),
-				zap.Int64("user_id", msg.Sender.ID),
-				zap.Int("message_id", msg.ID))
+			s.holdProfileReviewAfterError(msg.Chat, msg.Sender, policy, err, "on_message")
 			return
 		}
 		if matched == "" {
@@ -3738,6 +3732,60 @@ func (s *Service) asyncProfileCheck(msg *tele.Message, policy config.GuardPolicy
 				zap.Int("message_id", msg.ID))
 		}
 	}()
+}
+
+func (s *Service) holdProfileReviewAfterError(chat *tele.Chat, user *tele.User, policy config.GuardPolicy, cause error, source string) {
+	if s == nil || s.queries == nil || chat == nil || user == nil {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	trust, err := s.queries.GetUserTrust(ctx, chat.ID, user.ID)
+	if err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			s.logger.Warn("load user trust for failed profile review", zap.Error(err), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID), zap.String("source", source))
+		}
+		return
+	}
+	if !isUngraduatedTrustStatus(trust.Status) {
+		return
+	}
+
+	score := minFloat64(trust.Score, 0.3)
+	updated, err := s.queries.UpdateUserTrustStatus(ctx, store.UpdateUserTrustStatusParams{
+		ChatID:       chat.ID,
+		UserID:       user.ID,
+		Status:       "suspicious",
+		Score:        score,
+		GraduatedAt:  nil,
+		BannedAt:     trust.BannedAt,
+		BannedReason: trust.BannedReason,
+		Notes:        trust.Notes,
+	})
+	if err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			s.logger.Warn("hold user after failed profile review", zap.Error(err), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID), zap.String("source", source))
+		}
+		return
+	}
+	resetTrust, resetErr := s.queries.ResetUserTrustClean(ctx, store.ResetUserTrustCleanParams{
+		ChatID: chat.ID,
+		UserID: user.ID,
+		Score:  score,
+	})
+	if resetErr == nil {
+		updated = resetTrust
+	} else if !errors.Is(resetErr, pgx.ErrNoRows) {
+		s.logger.Warn("reset clean count after failed profile review", zap.Error(resetErr), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID), zap.String("source", source))
+	}
+	s.applyUngraduatedPermissionRestriction(chat, user, policy, updated, "profile_review_pending")
+	s.logger.Warn("profile check failed, user held for review",
+		zap.Error(cause),
+		zap.Int64("chat_id", chat.ID),
+		zap.Int64("user_id", user.ID),
+		zap.String("source", source))
 }
 
 func (s *Service) acquireProfileCheckInFlight(userID int64) (func(), bool) {
