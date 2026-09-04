@@ -153,8 +153,9 @@ func (s *Service) VerifyTurnstileToken(ctx context.Context, token, cfResponse, r
 	s.ensureRuntimeGuards()
 	s.joinProtector.ReleasePending(pending.ChatID)
 
-	s.finalizeVerificationPrompt(chat, pending, verificationResultHTML(user, "passed"))
-	s.sendWelcomeMessage(ctx, chat, user)
+	if !s.sendWelcomeMessage(ctx, chat, user, &pending) {
+		s.finalizeVerificationPrompt(chat, pending, verificationResultHTML(user, "passed"))
+	}
 
 	s.logger.Info("user verified via turnstile", zap.Int64("chat_id", pending.ChatID), zap.Int64("user_id", pending.UserID))
 	return nil

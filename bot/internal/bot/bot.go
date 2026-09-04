@@ -1921,8 +1921,9 @@ func (s *Service) completeVerification(ctx context.Context, chat *tele.Chat, use
 	if len(resultKind) > 0 && strings.TrimSpace(resultKind[0]) != "" {
 		kind = strings.TrimSpace(resultKind[0])
 	}
-	s.finalizeVerificationPrompt(chat, pending, verificationResultHTML(user, kind))
-	s.sendWelcomeMessage(context.Background(), chat, user)
+	if !s.sendWelcomeMessage(context.Background(), chat, user, &pending) {
+		s.finalizeVerificationPrompt(chat, pending, verificationResultHTML(user, kind))
+	}
 
 	// 验证通过反馈（默认关）
 	if polErr == nil {

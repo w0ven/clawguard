@@ -4122,19 +4122,19 @@ func (s *Service) fetchUserBioCached(ctx context.Context, userID int64, ttlMinut
 	return bio, false, nil
 }
 
-func (s *Service) sendWelcomeMessage(ctx context.Context, chat *tele.Chat, user *tele.User) {
+func (s *Service) sendWelcomeMessage(ctx context.Context, chat *tele.Chat, user *tele.User, pending *store.PendingVerification) bool {
 	if chat == nil || user == nil {
-		return
+		return false
 	}
 
 	policy, err := s.LoadGuardPolicy(ctx, chat.ID)
 	if err != nil {
 		s.logger.Warn("load guard policy failed for welcome message", zap.Error(err), zap.Int64("chat_id", chat.ID))
-		return
+		return false
 	}
 	welcome := policy.Verify.WelcomeMessage
 	if !welcome.Enabled || welcome.Template == nil || strings.TrimSpace(*welcome.Template) == "" {
-		return
+		return false
 	}
 
 	group, err := s.queries.GetGroupByChatID(ctx, chat.ID)
@@ -4158,22 +4158,53 @@ func (s *Service) sendWelcomeMessage(ctx context.Context, chat *tele.Chat, user 
 	}, welcome.ParseMode)
 
 	if strings.TrimSpace(text) == "" {
-		return
+		return false
 	}
 
 	parseMode := resolveParseMode(welcome.ParseMode)
-
-	message, err := s.sendThrottled(ctx, chat, text, &tele.SendOptions{
+	opts := &tele.SendOptions{
 		ParseMode:             parseMode,
 		DisableWebPagePreview: true,
-	})
-	if err != nil {
-		s.logger.Warn("send welcome message failed", zap.Error(err), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
-		return
+		ReplyMarkup:           &tele.ReplyMarkup{},
 	}
 
-	if welcome.DeleteAfterSeconds <= 0 {
-		return
+	var existingID int64
+	if pending != nil && pending.JoinMessageID != nil && *pending.JoinMessageID > 0 {
+		existingID = *pending.JoinMessageID
+	}
+
+	var message *tele.Message
+	replaced := false
+	// Telegram cannot turn a photo message into a text message. Arithmetic-image
+	// prompts have to be deleted, otherwise the puzzle stays above the welcome.
+	if existingID > 0 && (pending == nil || pending.Method != "math_image") {
+		msg := s.verificationMessageRef(chat, int(existingID))
+		edited, editErr := s.bot.Edit(msg, text, opts)
+		if editErr == nil {
+			if edited != nil {
+				message = edited
+			} else {
+				message = msg
+			}
+			replaced = true
+		} else if s.logger != nil {
+			s.logger.Warn("edit verification message into welcome failed", zap.Error(editErr), zap.Int64("chat_id", chat.ID), zap.Int64("message_id", existingID))
+		}
+	}
+	if !replaced {
+		if existingID > 0 {
+			s.deleteVerificationMessage(chat, &existingID)
+		}
+		sent, sendErr := s.sendThrottled(ctx, chat, text, opts)
+		if sendErr != nil {
+			s.logger.Warn("send welcome message failed", zap.Error(sendErr), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
+			return false
+		}
+		message = sent
+	}
+
+	if welcome.DeleteAfterSeconds <= 0 || message == nil {
+		return true
 	}
 
 	s.runDelayed(time.Duration(welcome.DeleteAfterSeconds)*time.Second, func() {
@@ -4181,6 +4212,7 @@ func (s *Service) sendWelcomeMessage(ctx context.Context, chat *tele.Chat, user 
 			s.logger.Warn("delete welcome message failed", zap.Error(err), zap.Int64("chat_id", chat.ID), zap.Int("message_id", message.ID))
 		}
 	})
+	return true
 }
 
 type welcomeTemplateData struct {
