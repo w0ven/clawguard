@@ -27,6 +27,18 @@ FROM groups
 WHERE ($1::BIGINT[] IS NULL OR cardinality($1::BIGINT[]) = 0 OR chat_id = ANY($1::BIGINT[]))
 ORDER BY title ASC, chat_id ASC;
 
+-- name: ListManagedGroupsScoped :many
+SELECT g.id, g.chat_id, g.title, g.type, g.member_count, g.enabled, g.joined_at, g.config
+FROM groups g
+INNER JOIN authorized_groups a ON a.chat_id = g.chat_id
+WHERE a.enabled = TRUE
+  AND ($1::BIGINT[] IS NULL OR cardinality($1::BIGINT[]) = 0 OR g.chat_id = ANY($1::BIGINT[]))
+ORDER BY g.title ASC, g.chat_id ASC;
+
+-- name: DeleteGroupByChatID :exec
+DELETE FROM groups
+WHERE chat_id = $1;
+
 -- name: UpdateGroupConfig :one
 UPDATE groups
 SET config = CASE

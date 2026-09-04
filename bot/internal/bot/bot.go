@@ -49,6 +49,7 @@ type Service struct {
 	verifyBtn          tele.Btn
 	verifyMathBtn      tele.Btn
 	verifyRandBtn      tele.Btn
+	verifyAdminBtn     tele.Btn
 	startedAt          time.Time
 	lastUpdateAt       atomic.Value
 	lastAIOKAt         atomic.Value
@@ -197,6 +198,7 @@ func New(ctx context.Context, cfg config.Config, logger *zap.Logger, queries *st
 	verifyBtn := tele.Btn{Unique: "verify_human"}
 	verifyMathBtn := tele.Btn{Unique: "verify_math"}
 	verifyRandBtn := tele.Btn{Unique: "verify_random"}
+	verifyAdminBtn := tele.Btn{Unique: "verify_admin"}
 
 	b, err := tele.NewBot(tele.Settings{
 		Token:       cfg.BotToken,
@@ -229,6 +231,7 @@ func New(ctx context.Context, cfg config.Config, logger *zap.Logger, queries *st
 		verifyBtn:       verifyBtn,
 		verifyMathBtn:   verifyMathBtn,
 		verifyRandBtn:   verifyRandBtn,
+		verifyAdminBtn:  verifyAdminBtn,
 		joinProtector:   newJoinProtector(),
 		cleanupBreaker:  newTelegramCleanupBreaker(),
 		startedAt:       time.Now().UTC(),
@@ -425,6 +428,10 @@ func (s *Service) registerHandlers() {
 
 	s.bot.Handle(&s.verifyRandBtn, func(c tele.Context) error {
 		return s.runHandler("verify_random", c, s.handleVerifyRandom)
+	})
+
+	s.bot.Handle(&s.verifyAdminBtn, func(c tele.Context) error {
+		return s.runHandler("verify_admin", c, s.handleVerifyAdmin)
 	})
 
 	s.bot.Handle(tele.OnText, func(c tele.Context) error {
@@ -1403,10 +1410,8 @@ func (s *Service) awaitPendingVerification(ctx context.Context, chatID, userID i
 
 func (s *Service) startButtonVerification(ctx context.Context, chat *tele.Chat, user *tele.User, policy config.GuardPolicy) error {
 	prompt := fmt.Sprintf(`<a href="tg://user?id=%d">%s</a> 你好，请在 %s 内<b>先阅读下面文字 3 秒</b>后再点击按钮`, user.ID, htmlEscape(displayName(user)), formatTimeout(policy.Verify.TimeoutSeconds))
-	sent, err := s.sendThrottled(ctx, chat, prompt, &tele.SendOptions{
-		ParseMode:             tele.ModeHTML,
-		DisableWebPagePreview: true,
-	})
+	existingID := s.existingVerificationMessageID(ctx, chat.ID, user.ID)
+	sent, err := s.sendOrEditVerificationText(ctx, chat, existingID, prompt, nil)
 	if err != nil {
 		s.logger.Error("send verification prompt", zap.Error(err), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
 		return err
@@ -1428,7 +1433,7 @@ func (s *Service) startButtonVerification(ctx context.Context, chat *tele.Chat, 
 
 	markup := &tele.ReplyMarkup{}
 	button := markup.Data("我是人类 ✅", s.verifyBtn.Unique, callbackData)
-	markup.Inline(markup.Row(button))
+	markup.Inline(markup.Row(button), s.adminVerificationRow(markup, user.ID))
 	if _, err := s.bot.EditReplyMarkup(sent, markup); err != nil {
 		s.deleteVerificationMessage(chat, int64Ptr(int64(sent.ID)))
 		return err
@@ -1462,14 +1467,10 @@ func (s *Service) startMathVerification(ctx context.Context, chat *tele.Chat, us
 	for _, option := range options {
 		row = append(row, markup.Data(strconv.Itoa(option), s.verifyMathBtn.Unique, formatVerifyCallbackData(user.ID, strconv.Itoa(option))))
 	}
-	markup.Inline(row)
+	markup.Inline(row, s.adminVerificationRow(markup, user.ID))
 
 	prompt := fmt.Sprintf(`<a href="tg://user?id=%d">%s</a> 你好，请在 %s 内回答：%s`, user.ID, htmlEscape(displayName(user)), formatTimeout(policy.Verify.TimeoutSeconds), htmlEscape(question))
-	sent, err := s.sendThrottled(ctx, chat, prompt, &tele.SendOptions{
-		ParseMode:             tele.ModeHTML,
-		DisableWebPagePreview: true,
-		ReplyMarkup:           markup,
-	})
+	sent, err := s.sendOrEditVerificationText(ctx, chat, s.existingVerificationMessageID(ctx, chat.ID, user.ID), prompt, markup)
 	if err != nil {
 		s.logger.Error("send math verification prompt", zap.Error(err), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
 		return err
@@ -1496,14 +1497,10 @@ func (s *Service) startRandomVerification(ctx context.Context, chat *tele.Chat, 
 	for _, option := range options {
 		row = append(row, markup.Data(option, s.verifyRandBtn.Unique, formatVerifyCallbackData(user.ID, option)))
 	}
-	markup.Inline(row)
+	markup.Inline(row, s.adminVerificationRow(markup, user.ID))
 
 	prompt := fmt.Sprintf(`%s 你好，请在 %s 内点击 %s ✅`, mentionHTML(user), formatTimeout(policy.Verify.TimeoutSeconds), htmlEscape(answer))
-	sent, err := s.sendThrottled(ctx, chat, prompt, &tele.SendOptions{
-		ParseMode:             tele.ModeHTML,
-		DisableWebPagePreview: true,
-		ReplyMarkup:           markup,
-	})
+	sent, err := s.sendOrEditVerificationText(ctx, chat, s.existingVerificationMessageID(ctx, chat.ID, user.ID), prompt, markup)
 	if err != nil {
 		s.logger.Error("send random verification prompt", zap.Error(err), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
 		return err
@@ -1895,7 +1892,7 @@ func (s *Service) handleVerifyRandom(c tele.Context) error {
 	return c.Respond(&tele.CallbackResponse{Text: "验证通过，欢迎加入", ShowAlert: false})
 }
 
-func (s *Service) completeVerification(ctx context.Context, chat *tele.Chat, user *tele.User, pending store.PendingVerification) error {
+func (s *Service) completeVerification(ctx context.Context, chat *tele.Chat, user *tele.User, pending store.PendingVerification, resultKind ...string) error {
 	deleted, err := s.queries.DeletePendingVerification(ctx, store.DeletePendingVerificationParams{
 		ChatID: chat.ID,
 		UserID: user.ID,
@@ -1920,7 +1917,11 @@ func (s *Service) completeVerification(ctx context.Context, chat *tele.Chat, use
 	s.ensureRuntimeGuards()
 	s.joinProtector.ReleasePending(chat.ID)
 
-	s.deleteVerificationMessage(chat, pending.JoinMessageID)
+	kind := "passed"
+	if len(resultKind) > 0 && strings.TrimSpace(resultKind[0]) != "" {
+		kind = strings.TrimSpace(resultKind[0])
+	}
+	s.finalizeVerificationPrompt(chat, pending, verificationResultHTML(user, kind))
 	s.sendWelcomeMessage(context.Background(), chat, user)
 
 	// 验证通过反馈（默认关）
@@ -1994,7 +1995,7 @@ func (s *Service) HandleVerificationExpiry(ctx context.Context, pending store.Pe
 	}
 	s.markTelegramCleanupSuccess(ctx, pending.ChatID)
 
-	s.deleteVerificationMessage(chat, pending.JoinMessageID)
+	s.finalizeVerificationPrompt(chat, pending, verificationResultHTML(user, "timeout"))
 
 	deleted, err := s.deleteProcessedPendingVerification(ctx, pending)
 	if err != nil {
@@ -2070,7 +2071,7 @@ func (s *Service) failVerificationImmediately(ctx context.Context, chat *tele.Ch
 		return err
 	}
 
-	s.deleteVerificationMessage(chat, pending.JoinMessageID)
+	s.finalizeVerificationPrompt(chat, pending, verificationResultHTML(user, verificationFailKind(rule)))
 
 	deleted, err := s.queries.DeletePendingVerification(ctx, store.DeletePendingVerificationParams{
 		ChatID: pending.ChatID,

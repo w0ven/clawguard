@@ -121,6 +121,12 @@ export type GuardPolicy = {
       min_score: number;
       timeout_ms: number;
       on_failure: string;
+      enabled_chat_ids?: number[];
+      score_bands?: Array<{
+        min_score: number;
+        max_score: number;
+        action: string;
+      }>;
     };
   };
   feedback: {

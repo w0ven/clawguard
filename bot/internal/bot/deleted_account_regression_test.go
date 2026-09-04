@@ -27,6 +27,7 @@ func TestRegisteredCommandRunsDeletedAccountFilter(t *testing.T) {
 		verifyBtn:      tele.Btn{Unique: "verify_human"},
 		verifyMathBtn:  tele.Btn{Unique: "verify_math"},
 		verifyRandBtn:  tele.Btn{Unique: "verify_random"},
+		verifyAdminBtn: tele.Btn{Unique: "verify_admin"},
 		joinProtector:  newJoinProtector(),
 		cleanupBreaker: newTelegramCleanupBreaker(),
 	}

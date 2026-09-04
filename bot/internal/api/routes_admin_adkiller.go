@@ -139,10 +139,18 @@ func (s *Server) handleTestAdKiller(c echo.Context) error {
 		})
 	}
 
-	confirmed := adkiller.ConfirmedAd(result.Score, cfg.MinScore, result.Level)
-	outcome := "交给后续模型"
-	if confirmed {
-		outcome = "确认广告，按现有广告动作处理"
+	bands := make([]adkiller.ScoreBand, 0, len(cfg.ScoreBands))
+	for _, band := range cfg.ScoreBands {
+		bands = append(bands, adkiller.ScoreBand{
+			MinScore: band.MinScore,
+			MaxScore: band.MaxScore,
+			Action:   band.Action,
+		})
+	}
+	action := adkiller.ResolveAction(result.Score, bands)
+	outcome := adkiller.ActionLabel(action)
+	if action != adkiller.ActionNone {
+		outcome = "确认广告，按「" + adkiller.ActionLabel(action) + "」处理"
 	}
 	return c.JSON(http.StatusOK, map[string]any{
 		"ok":               true,
@@ -150,11 +158,14 @@ func (s *Server) handleTestAdKiller(c echo.Context) error {
 		"level":            result.Level,
 		"primary_category": result.PrimaryCategory,
 		"mapped_category":  adkiller.MapCategory(result.PrimaryCategory),
-		"confirmed_ad":     confirmed,
+		"confirmed_ad":     action != adkiller.ActionNone,
+		"action":           action,
 		"outcome":          outcome,
 		"min_score":        cfg.MinScore,
 		"timeout_ms":       cfg.TimeoutMs,
 		"enabled":          cfg.Enabled,
+		"enabled_chat_ids": cfg.EnabledChatIDs,
+		"score_bands":      cfg.ScoreBands,
 		"truncated":        result.Truncated,
 		"latency_ms":       int(result.Latency.Milliseconds()),
 		"rate_remaining":   result.RateRemaining,

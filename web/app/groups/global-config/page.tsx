@@ -50,13 +50,6 @@ export default function GlobalConfigPage() {
   const [saving, setSaving] = useState(false);
   const [llmModelOptions, setLLMModelOptions] = useState<LLMModelOption[]>([]);
   const [llmOptionsError, setLLMOptionsError] = useState<string | null>(null);
-  const [adkillerKeySet, setAdkillerKeySet] = useState(false);
-  const [adkillerKeyHint, setAdkillerKeyHint] = useState("");
-  const [adkillerKeyDraft, setAdkillerKeyDraft] = useState("");
-  const [adkillerKeySaving, setAdkillerKeySaving] = useState(false);
-  const [adkillerTestText, setAdkillerTestText] = useState("");
-  const [adkillerTesting, setAdkillerTesting] = useState(false);
-  const [adkillerTestResult, setAdkillerTestResult] = useState("");
 
   useEffect(() => {
     apiFetch<{ config: Record<string, unknown> }>("/api/admin/global-config")
@@ -107,33 +100,6 @@ export default function GlobalConfigPage() {
     };
   }, []);
 
-  useEffect(() => {
-    let alive = true;
-    apiFetch<{
-      api_key_set?: boolean;
-      api_key_hint?: string;
-    }>("/api/admin/adkiller")
-      .then((payload) => {
-        if (!alive) {
-          return;
-        }
-        setAdkillerKeySet(Boolean(payload.api_key_set));
-        setAdkillerKeyHint(payload.api_key_hint ?? "");
-      })
-      .catch((error) => {
-        if (!alive) {
-          return;
-        }
-        pushToast(
-          error instanceof Error ? error.message : "加载 AdKiller 密钥失败",
-          "error",
-        );
-      });
-    return () => {
-      alive = false;
-    };
-  }, [pushToast]);
-
   const isDirty = useMemo(
     () => JSON.stringify(initial) !== JSON.stringify(draft),
     [draft, initial],
@@ -157,101 +123,6 @@ export default function GlobalConfigPage() {
       pushToast(e instanceof Error ? e.message : "保存失败", "error");
     } finally {
       setSaving(false);
-    }
-  }
-
-  async function saveAdKillerKey() {
-    const apiKey = adkillerKeyDraft.trim();
-    if (!apiKey) {
-      pushToast("请输入新的 AdKiller API Key", "error");
-      return;
-    }
-    setAdkillerKeySaving(true);
-    try {
-      const payload = await apiFetch<{
-        api_key_set?: boolean;
-        api_key_hint?: string;
-      }>("/api/admin/adkiller", {
-        method: "PUT",
-        body: JSON.stringify({ api_key: apiKey }),
-      });
-      setAdkillerKeySet(Boolean(payload.api_key_set));
-      setAdkillerKeyHint(payload.api_key_hint ?? "");
-      setAdkillerKeyDraft("");
-      pushToast("AdKiller 密钥已保存", "success");
-    } catch (error) {
-      pushToast(
-        error instanceof Error ? error.message : "保存 AdKiller 密钥失败",
-        "error",
-      );
-    } finally {
-      setAdkillerKeySaving(false);
-    }
-  }
-
-  async function clearAdKillerKey() {
-    setAdkillerKeySaving(true);
-    try {
-      const payload = await apiFetch<{
-        api_key_set?: boolean;
-        api_key_hint?: string;
-      }>("/api/admin/adkiller", {
-        method: "PUT",
-        body: JSON.stringify({ clear: true }),
-      });
-      setAdkillerKeySet(Boolean(payload.api_key_set));
-      setAdkillerKeyHint(payload.api_key_hint ?? "");
-      setAdkillerKeyDraft("");
-      pushToast("AdKiller 密钥已清除", "success");
-    } catch (error) {
-      pushToast(
-        error instanceof Error ? error.message : "清除 AdKiller 密钥失败",
-        "error",
-      );
-    } finally {
-      setAdkillerKeySaving(false);
-    }
-  }
-
-  async function testAdKiller() {
-    const text = adkillerTestText.trim();
-    if (!text) {
-      pushToast("请输入要测试的文本", "error");
-      return;
-    }
-    setAdkillerTesting(true);
-    setAdkillerTestResult("");
-    try {
-      const payload = await apiFetch<Record<string, unknown>>(
-        "/api/admin/adkiller/test",
-        {
-          method: "POST",
-          body: JSON.stringify({ text }),
-        },
-      );
-      setAdkillerTestResult(JSON.stringify(payload, null, 2));
-      if (payload.ok) {
-        pushToast(
-          typeof payload.outcome === "string"
-            ? payload.outcome
-            : "AdKiller 测试完成",
-          "success",
-        );
-      } else {
-        pushToast(
-          typeof payload.error === "string"
-            ? payload.error
-            : "AdKiller 测试失败",
-          "error",
-        );
-      }
-    } catch (error) {
-      const message =
-        error instanceof Error ? error.message : "AdKiller 测试失败";
-      setAdkillerTestResult(message);
-      pushToast(message, "error");
-    } finally {
-      setAdkillerTesting(false);
     }
   }
 
@@ -438,74 +309,6 @@ export default function GlobalConfigPage() {
             </Card>
           );
         })}
-
-        {activeTab === "ai" && (
-          <Card>
-            <CardBody>
-              <div className="mb-3">
-                <p className="text-sm font-medium">AdKiller API Key</p>
-                <p className="mt-0.5 text-xs text-[var(--text-muted)]">
-                  密钥加密存储，保存后不会回显明文。旧 Key 已暴露时请到官方后台轮换后再粘贴新 Key。
-                </p>
-              </div>
-              <p className="mb-3 text-xs text-[var(--text-muted)]">
-                当前状态：{adkillerKeySet ? `已配置 ${adkillerKeyHint}` : "未配置"}
-              </p>
-              <Input
-                type="password"
-                autoComplete="off"
-                placeholder={adkillerKeySet ? "输入新 Key 以轮换" : "粘贴 AdKiller API Key"}
-                value={adkillerKeyDraft}
-                onChange={(event) => setAdkillerKeyDraft(event.target.value)}
-              />
-              <div className="mt-3 flex flex-wrap gap-2">
-                <Button
-                  onClick={() => void saveAdKillerKey()}
-                  disabled={adkillerKeySaving || adkillerKeyDraft.trim() === ""}
-                >
-                  {adkillerKeySaving ? "保存中…" : "保存密钥"}
-                </Button>
-                <Button
-                  variant="ghost"
-                  onClick={() => void clearAdKillerKey()}
-                  disabled={adkillerKeySaving || !adkillerKeySet}
-                >
-                  清除密钥
-                </Button>
-              </div>
-            </CardBody>
-          </Card>
-        )}
-
-        {activeTab === "ai" && (
-          <Card>
-            <CardBody>
-              <div className="mb-3">
-                <p className="text-sm font-medium">AdKiller 测试</p>
-                <p className="mt-0.5 text-xs text-[var(--text-muted)]">
-                  用当前已保存的密钥和全局阈值试跑一条文本，不会删消息、也不会处罚用户。
-                </p>
-              </div>
-              <Textarea
-                className="min-h-[120px] font-mono text-xs"
-                placeholder="输入一条要检测的群聊消息"
-                value={adkillerTestText}
-                onChange={(event) => setAdkillerTestText(event.target.value)}
-              />
-              <div className="mt-3 flex flex-wrap gap-2">
-                <Button
-                  onClick={() => void testAdKiller()}
-                  disabled={adkillerTesting || adkillerTestText.trim() === ""}
-                >
-                  {adkillerTesting ? "测试中…" : "测试 AdKiller"}
-                </Button>
-              </div>
-              <pre className="mt-3 min-h-[160px] overflow-x-auto rounded-lg border border-[var(--border)] bg-[var(--surface-2)] p-3 text-xs leading-relaxed">
-                {adkillerTestResult || "结果将显示在这里"}
-              </pre>
-            </CardBody>
-          </Card>
-        )}
 
         {activeTab === "feedback" && (
           <FeedbackSection

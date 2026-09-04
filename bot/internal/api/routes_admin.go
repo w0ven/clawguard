@@ -90,7 +90,7 @@ func (s *Server) registerAdminRoutes() {
 func (s *Server) handleListGroups(c echo.Context) error {
 	admin, _ := currentAdmin(c)
 	chatIDs, _ := adminScopeFilter(admin)
-	groups, err := s.botService.Queries().ListGroupsScoped(c.Request().Context(), chatIDs)
+	groups, err := s.botService.Queries().ListManagedGroupsScoped(c.Request().Context(), chatIDs)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "list groups failed"})
 	}
@@ -113,6 +113,17 @@ func (s *Server) handleGetGroup(c echo.Context) error {
 	}
 	if !adminCanAccessChat(admin, chatID) {
 		return c.JSON(http.StatusForbidden, map[string]string{"error": "group out of scope"})
+	}
+
+	authorized, err := s.botService.Queries().GetAuthorizedGroupByChatID(c.Request().Context(), chatID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return c.JSON(http.StatusNotFound, map[string]string{"error": "group not found"})
+		}
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "load group failed"})
+	}
+	if !authorized.Enabled {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "group not found"})
 	}
 
 	group, err := s.botService.Queries().GetGroupByChatID(c.Request().Context(), chatID)
@@ -144,6 +155,17 @@ func (s *Server) handlePutGroupConfig(c echo.Context) error {
 	}
 	if !adminCanAccessChat(admin, chatID) {
 		return c.JSON(http.StatusForbidden, map[string]string{"error": "group out of scope"})
+	}
+
+	authorized, err := s.botService.Queries().GetAuthorizedGroupByChatID(c.Request().Context(), chatID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return c.JSON(http.StatusNotFound, map[string]string{"error": "group not found"})
+		}
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "load group failed"})
+	}
+	if !authorized.Enabled {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "group not found"})
 	}
 
 	group, err := s.botService.Queries().GetGroupByChatID(c.Request().Context(), chatID)
@@ -433,6 +455,12 @@ func (s *Server) handleDeleteAuthorizedGroup(c echo.Context) error {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "delete authorized group failed"})
 	}
 	s.botService.SetAuthorizedGroupCache(c.Request().Context(), chatID, false)
+	if leaveErr := s.botService.LeaveChat(chatID); leaveErr != nil {
+		s.logger.Warn("leave revoked authorized group failed", zap.Error(leaveErr), zap.Int64("chat_id", chatID))
+	}
+	if deleteErr := s.botService.Queries().DeleteGroupByChatID(c.Request().Context(), chatID); deleteErr != nil {
+		s.logger.Warn("delete revoked group record failed", zap.Error(deleteErr), zap.Int64("chat_id", chatID))
+	}
 	if auditErr := s.writeAudit(c.Request().Context(), admin, "authorized_group", &chatID, "delete_authorized_group", mustRawJSON(serializeAuthorizedGroup(before)), []byte("null")); auditErr != nil {
 		s.logger.Warn("write authorized group audit failed", zap.Error(auditErr))
 	}

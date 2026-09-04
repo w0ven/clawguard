@@ -72,6 +72,12 @@ func TestApplyAIDefaults_VideoFields(t *testing.T) {
 	if policy.AdKiller.Enabled {
 		t.Fatal("expected adkiller to default disabled")
 	}
+	if len(policy.AdKiller.ScoreBands) != 3 {
+		t.Fatalf("expected 3 default score bands, got %d", len(policy.AdKiller.ScoreBands))
+	}
+	if len(policy.AdKiller.EnabledChatIDs) != 0 {
+		t.Fatalf("expected no enabled chats by default, got %v", policy.AdKiller.EnabledChatIDs)
+	}
 }
 
 func TestDefaultPolicyNewUserNoInvitesDisabled(t *testing.T) {

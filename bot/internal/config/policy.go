@@ -243,13 +243,21 @@ type AIPolicy struct {
 }
 
 // AdKillerPolicy is a text-only advertising prefilter that runs before the
-// existing LLM moderation chain. Confirmed ads reuse actions_by_category;
-// anything else, including API failure, falls through to later models.
+// existing LLM moderation chain. Score bands decide the action; anything
+// unresolved, including API failure, falls through to later models.
 type AdKillerPolicy struct {
-	Enabled   bool   `json:"enabled"`
-	MinScore  int    `json:"min_score"`
-	TimeoutMs int    `json:"timeout_ms"`
-	OnFailure string `json:"on_failure"` // fallback | skip
+	Enabled        bool                `json:"enabled"`
+	MinScore       int                 `json:"min_score"`
+	TimeoutMs      int                 `json:"timeout_ms"`
+	OnFailure      string              `json:"on_failure"` // fallback | skip
+	EnabledChatIDs []int64             `json:"enabled_chat_ids"`
+	ScoreBands     []AdKillerScoreBand `json:"score_bands"`
+}
+
+type AdKillerScoreBand struct {
+	MinScore int    `json:"min_score"`
+	MaxScore int    `json:"max_score"`
+	Action   string `json:"action"`
 }
 
 type AIThresholds struct {
@@ -382,10 +390,16 @@ var DefaultPolicy = GuardPolicy{
 			"ad": "warn",
 		},
 		AdKiller: AdKillerPolicy{
-			Enabled:   false,
-			MinScore:  81,
-			TimeoutMs: 1500,
-			OnFailure: "fallback",
+			Enabled:        false,
+			MinScore:       81,
+			TimeoutMs:      1500,
+			OnFailure:      "fallback",
+			EnabledChatIDs: []int64{},
+			ScoreBands: []AdKillerScoreBand{
+				{MinScore: 0, MaxScore: 80, Action: "none"},
+				{MinScore: 81, MaxScore: 90, Action: "warn"},
+				{MinScore: 91, MaxScore: 100, Action: "kick"},
+			},
 		},
 	},
 	Feedback: ActionFeedbackPolicy{
@@ -454,13 +468,15 @@ var DefaultPolicy = GuardPolicy{
 
 func LoadPolicy(ctx context.Context, queries *store.Queries, chatID int64) (GuardPolicy, error) {
 	documents := make([][]byte, 0, 2)
+	var globalRaw []byte
 
 	globalConfig, err := queries.GetGlobalConfig(ctx)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return GuardPolicy{}, fmt.Errorf("get global config: %w", err)
 	}
 	if err == nil {
-		documents = append(documents, globalConfig.Config)
+		globalRaw = globalConfig.Config
+		documents = append(documents, globalRaw)
 	}
 
 	group, err := queries.GetGroupByChatID(ctx, chatID)
@@ -474,6 +490,12 @@ func LoadPolicy(ctx context.Context, queries *store.Queries, chatID int64) (Guar
 	policy, err := MergePolicyDocuments(documents...)
 	if err != nil {
 		return GuardPolicy{}, fmt.Errorf("merge guard policy: %w", err)
+	}
+	if len(globalRaw) > 0 {
+		globalPolicy, globalErr := MergePolicyDocuments(globalRaw)
+		if globalErr == nil {
+			policy.AI.AdKiller = globalPolicy.AI.AdKiller
+		}
 	}
 	return policy, nil
 }
@@ -680,9 +702,6 @@ func applyAdKillerDefaults(policy *AdKillerPolicy) {
 	if policy == nil {
 		return
 	}
-	if policy.MinScore <= 0 {
-		policy.MinScore = DefaultPolicy.AI.AdKiller.MinScore
-	}
 	if policy.TimeoutMs <= 0 {
 		policy.TimeoutMs = DefaultPolicy.AI.AdKiller.TimeoutMs
 	}
@@ -691,6 +710,48 @@ func applyAdKillerDefaults(policy *AdKillerPolicy) {
 		policy.OnFailure = strings.ToLower(strings.TrimSpace(policy.OnFailure))
 	default:
 		policy.OnFailure = DefaultPolicy.AI.AdKiller.OnFailure
+	}
+	if policy.EnabledChatIDs == nil {
+		policy.EnabledChatIDs = []int64{}
+	}
+	if len(policy.ScoreBands) == 0 {
+		policy.ScoreBands = append([]AdKillerScoreBand(nil), DefaultPolicy.AI.AdKiller.ScoreBands...)
+	}
+	for i := range policy.ScoreBands {
+		policy.ScoreBands[i].Action = normalizeAdKillerAction(policy.ScoreBands[i].Action)
+	}
+	lowest := 0
+	found := false
+	for _, band := range policy.ScoreBands {
+		if band.Action == "none" || band.Action == "" {
+			continue
+		}
+		if !found || band.MinScore < lowest {
+			lowest = band.MinScore
+			found = true
+		}
+	}
+	if found {
+		policy.MinScore = lowest
+	} else if policy.MinScore <= 0 {
+		policy.MinScore = DefaultPolicy.AI.AdKiller.MinScore
+	}
+}
+
+func normalizeAdKillerAction(action string) string {
+	switch strings.ToLower(strings.TrimSpace(action)) {
+	case "warn", "delete_warn", "delete_and_warn":
+		return "warn"
+	case "mute", "mute_5m", "mute_1h", "delete_mute":
+		return "mute"
+	case "kick":
+		return "kick"
+	case "ban", "delete_ban":
+		return "ban"
+	case "delete":
+		return "delete"
+	default:
+		return "none"
 	}
 }
 

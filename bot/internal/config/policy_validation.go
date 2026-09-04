@@ -29,6 +29,7 @@ var (
 		"delete",
 		"warn",
 		"mute",
+		"kick",
 		"ban",
 		"delete_warn",
 		"delete_and_warn",
@@ -369,6 +370,23 @@ func validateAdKillerPolicy(policy AdKillerPolicy) error {
 	}
 	if !oneOf(policy.OnFailure, "fallback", "skip") {
 		return fmt.Errorf("ai.adkiller.on_failure has unsupported value %q", policy.OnFailure)
+	}
+	for index, chatID := range policy.EnabledChatIDs {
+		if chatID == 0 {
+			return fmt.Errorf("ai.adkiller.enabled_chat_ids[%d] is invalid", index)
+		}
+	}
+	adkillerActions := stringSet("none", "warn", "mute", "kick", "ban", "delete")
+	for index, band := range policy.ScoreBands {
+		if band.MinScore < 0 || band.MinScore > 100 || band.MaxScore < 0 || band.MaxScore > 100 {
+			return fmt.Errorf("ai.adkiller.score_bands[%d] scores must be between 0 and 100", index)
+		}
+		if band.MaxScore < band.MinScore {
+			return fmt.Errorf("ai.adkiller.score_bands[%d] max_score must be >= min_score", index)
+		}
+		if _, ok := adkillerActions[normalizedPolicyValue(band.Action)]; !ok {
+			return fmt.Errorf("ai.adkiller.score_bands[%d].action has unsupported value %q", index, band.Action)
+		}
 	}
 	return nil
 }

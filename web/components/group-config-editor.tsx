@@ -677,39 +677,6 @@ export const fieldDescriptors: FieldDescriptor[] = [
     description: "0-1",
     kind: "number",
   },
-  {
-    tab: "ai",
-    path: ["ai", "adkiller", "enabled"],
-    label: "启用 AdKiller 前置广告检测",
-    description:
-      "先走 AdKiller 文本广告评分。确认广告后按现有广告动作处理；判断不了或接口故障再交给后续模型。",
-    kind: "switch",
-  },
-  {
-    tab: "ai",
-    path: ["ai", "adkiller", "min_score"],
-    label: "AdKiller 广告分数阈值",
-    description: "0-100。达到该分数才直接按广告处理，默认 81（官方 ad 档）。",
-    kind: "number",
-  },
-  {
-    tab: "ai",
-    path: ["ai", "adkiller", "timeout_ms"],
-    label: "AdKiller 超时 (ms)",
-    description: "建议 800-2000。超时后按失败策略处理，默认交给后续模型。",
-    kind: "number",
-  },
-  {
-    tab: "ai",
-    path: ["ai", "adkiller", "on_failure"],
-    label: "AdKiller 失败策略",
-    description: "接口超时、401、429 或 5xx 时如何处理",
-    kind: "select",
-    options: [
-      { label: "交给后续模型（推荐）", value: "fallback" },
-      { label: "跳过后续模型", value: "skip" },
-    ],
-  },
 ];
 
 const tabs = [
@@ -901,19 +868,6 @@ const configFieldGroups: ConfigFieldGroupDescriptor[] = [
       "ai.thresholds.flag",
     ],
     description: "AI 风险分达到阈值时触发对应动作。",
-  },
-  {
-    key: "ai.adkiller",
-    tab: "ai",
-    title: "AdKiller 前置广告检测",
-    parentPath: "ai.adkiller.enabled",
-    childPaths: [
-      "ai.adkiller.min_score",
-      "ai.adkiller.timeout_ms",
-      "ai.adkiller.on_failure",
-    ],
-    description:
-      "独立广告评分前置层，不是 LLM。确认广告后复用现有广告动作；处理不了再交给后续模型。密钥在全局策略页单独配置，不会回显。",
   },
 ];
 

@@ -65,7 +65,7 @@ func (s *Service) applyAdKillerPrefilter(
 		return false, nil
 	}
 	cfg := policy.AI.AdKiller
-	if !cfg.Enabled {
+	if !cfg.Enabled || !adkiller.ChatEnabled(cfg.EnabledChatIDs, msg.Chat.ID) {
 		return false, nil
 	}
 	text := strings.TrimSpace(content.Text)
@@ -114,13 +114,22 @@ func (s *Service) applyAdKillerPrefilter(
 		)
 		return s.finishAdKillerFailure(cfg, "request_failed")
 	}
-	if !adkiller.ConfirmedAd(result.Score, cfg.MinScore, result.Level) {
+	bands := make([]adkiller.ScoreBand, 0, len(cfg.ScoreBands))
+	for _, band := range cfg.ScoreBands {
+		bands = append(bands, adkiller.ScoreBand{
+			MinScore: band.MinScore,
+			MaxScore: band.MaxScore,
+			Action:   band.Action,
+		})
+	}
+	action := adkiller.ResolveAction(result.Score, bands)
+	if action == adkiller.ActionNone {
 		s.logger.Info("adkiller did not confirm ad, continuing to llm",
 			zap.Int64("chat_id", msg.Chat.ID),
 			zap.Int("message_id", msg.ID),
 			zap.Int("score", result.Score),
 			zap.String("level", result.Level),
-			zap.Int("min_score", cfg.MinScore),
+			zap.String("action", action),
 		)
 		return false, nil
 	}
@@ -131,13 +140,12 @@ func (s *Service) applyAdKillerPrefilter(
 			Verdict:    "ad",
 			Confidence: adkiller.Confidence(result.Score),
 			Category:   category,
-			Reason:     fmt.Sprintf("AdKiller 判定广告（score=%d, category=%s）", result.Score, result.PrimaryCategory),
+			Reason:     fmt.Sprintf("AdKiller 判定广告（score=%d, category=%s, action=%s）", result.Score, result.PrimaryCategory, adkiller.ActionLabel(action)),
 		},
 		Model:         "adkiller",
 		PromptVersion: "adkiller-v1",
 		LatencyMs:     int(result.Latency.Milliseconds()),
 	}
-	action := s.decideAIAction(policy.AI, output)
 	metadata, _ := json.Marshal(map[string]any{
 		"source":           "adkiller",
 		"score":            result.Score,
@@ -148,6 +156,8 @@ func (s *Service) applyAdKillerPrefilter(
 		"min_score":        cfg.MinScore,
 		"timeout_ms":       cfg.TimeoutMs,
 		"rate_remaining":   result.RateRemaining,
+		"action":           action,
+		"score_bands":      cfg.ScoreBands,
 	})
 	if err := s.recordAIDecision(ctx, msg, content.Text, output, action, "message", metadata); err != nil {
 		s.logger.Warn("record adkiller decision failed", zap.Error(err))

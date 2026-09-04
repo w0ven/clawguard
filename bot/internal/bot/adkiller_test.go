@@ -41,6 +41,7 @@ func TestApplyAdKillerPrefilterLowScoreFallsThrough(t *testing.T) {
 
 	policy := config.DefaultPolicy
 	policy.AI.AdKiller.Enabled = true
+	policy.AI.AdKiller.EnabledChatIDs = []int64{-1001}
 	msg := &tele.Message{
 		ID:     12,
 		Text:   "今晚一起吃饭",
@@ -68,6 +69,7 @@ func TestApplyAdKillerPrefilterAPIFailureFallsThrough(t *testing.T) {
 
 	policy := config.DefaultPolicy
 	policy.AI.AdKiller.Enabled = true
+	policy.AI.AdKiller.EnabledChatIDs = []int64{-1001}
 	policy.AI.AdKiller.OnFailure = "fallback"
 	msg := &tele.Message{
 		ID:     13,
@@ -93,6 +95,7 @@ func TestApplyAdKillerPrefilterSkipOnFailure(t *testing.T) {
 
 	policy := config.DefaultPolicy
 	policy.AI.AdKiller.Enabled = true
+	policy.AI.AdKiller.EnabledChatIDs = []int64{-1001}
 	policy.AI.AdKiller.OnFailure = "skip"
 	msg := &tele.Message{
 		ID:     14,
@@ -140,6 +143,7 @@ func TestApplyAdKillerPrefilterMissingKeyFallsThrough(t *testing.T) {
 	svc := &Service{logger: zap.NewNop(), adkiller: adkiller.NewClient("https://example.invalid", zap.NewNop())}
 	policy := config.DefaultPolicy
 	policy.AI.AdKiller.Enabled = true
+	policy.AI.AdKiller.EnabledChatIDs = []int64{-1001}
 	msg := &tele.Message{
 		ID:     16,
 		Text:   "加我领彩金",

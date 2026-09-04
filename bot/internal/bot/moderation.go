@@ -1323,10 +1323,10 @@ func verdictActionFloor(verdict string) string {
 }
 
 // clampAIActionByCeiling 按 ceiling 夹住 action，返回最终动作
-// 动作强度排序：none < flag < warn < delete < mute < ban
+// 动作强度排序：none < flag < warn < delete < mute < kick < ban
 func clampAIActionByCeiling(action, ceiling string) string {
 	rank := map[string]int{
-		"none": 0, "flag": 1, "warn": 2, "delete": 3, "mute": 4, "ban": 5,
+		"none": 0, "flag": 1, "warn": 2, "delete": 3, "mute": 4, "kick": 5, "ban": 6,
 	}
 	actionRank, okAction := rank[action]
 	ceilingRank, okCeiling := rank[ceiling]
@@ -1340,10 +1340,10 @@ func clampAIActionByCeiling(action, ceiling string) string {
 }
 
 // raiseAIActionByFloor 按 floor 抬高 action。
-// 动作强度排序：none < flag < warn < delete < mute < ban
+// 动作强度排序：none < flag < warn < delete < mute < kick < ban
 func raiseAIActionByFloor(action, floor string) string {
 	rank := map[string]int{
-		"none": 0, "flag": 1, "warn": 2, "delete": 3, "mute": 4, "ban": 5,
+		"none": 0, "flag": 1, "warn": 2, "delete": 3, "mute": 4, "kick": 5, "ban": 6,
 	}
 	actionRank, okAction := rank[action]
 	floorRank, okFloor := rank[floor]
@@ -1370,6 +1370,8 @@ func normalizeAIAction(action string) string {
 		return "flag"
 	case "warn":
 		return "warn"
+	case "kick":
+		return "kick"
 	default:
 		return "none"
 	}
@@ -2562,6 +2564,31 @@ func (s *Service) applyAIAction(ctx context.Context, msg *tele.Message, policy c
 		}
 		nextStatus = "suspicious"
 		score = 0.3
+	case "kick":
+		deleteRelease, deleteOK := s.acquireMessageDeleteLock(msg.Chat.ID, msg.ID)
+		if deleteOK {
+			defer deleteRelease()
+			if err := s.deleteMessage(msg); err != nil {
+				return err
+			}
+		} else {
+			s.logger.Info("skip duplicate ai kick message delete", zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID), zap.Int("message_id", msg.ID))
+		}
+		actionRollback, actionOK := s.acquireUserActionLock(msg.Chat.ID, msg.Sender.ID)
+		if actionOK {
+			if err := s.kickUser(msg.Chat, msg.Sender); err != nil {
+				actionRollback()
+				auditOutcome = "failed"
+				auditError = redact.ErrorString(err)
+				return err
+			}
+		} else {
+			s.logger.Info("skip duplicate ai kick user action", zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID), zap.Int("message_id", msg.ID))
+			auditOutcome = "deduped"
+			return nil
+		}
+		nextStatus = "suspicious"
+		score = 0
 	default:
 		cleanDelta = 1
 		score = minFloat64(1, trust.Score+0.05)
@@ -2852,6 +2879,10 @@ func (s *Service) dispatchAIActionFeedback(
 		vars["user"] = feedbackUserLabel(msg.Sender, fb.Ban.ParseMode)
 		vars["user_mention"] = feedbackUserMention(msg.Sender, fb.Ban.ParseMode)
 		s.sendActionFeedback(msg.Chat, nil, fb.Ban, vars)
+	case "kick":
+		vars["user"] = feedbackUserLabel(msg.Sender, fb.Kick.ParseMode)
+		vars["user_mention"] = feedbackUserMention(msg.Sender, fb.Kick.ParseMode)
+		s.sendActionFeedback(msg.Chat, nil, fb.Kick, vars)
 		// warn 走 IncrWarning，里面已经发了 Warn feedback
 	}
 }
@@ -2959,7 +2990,7 @@ func shouldKeepTrustedHumanAfterViolation(trust store.UserTrust, user *tele.User
 
 func isViolationAction(action string) bool {
 	switch normalizeTrustPenaltyAction(action) {
-	case "delete", "warn", "mute", "ban":
+	case "delete", "warn", "mute", "kick", "ban":
 		return true
 	default:
 		return false
@@ -2976,6 +3007,8 @@ func normalizeTrustPenaltyAction(action string) string {
 		return "ban"
 	case "delete":
 		return "delete"
+	case "kick":
+		return "kick"
 	default:
 		return strings.TrimSpace(strings.ToLower(action))
 	}

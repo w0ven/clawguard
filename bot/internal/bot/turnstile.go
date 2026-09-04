@@ -85,14 +85,10 @@ func (s *Service) startTurnstileVerification(ctx context.Context, chat *tele.Cha
 
 	markup := &tele.ReplyMarkup{}
 	button := markup.URL("打开验证页", verifyURL)
-	markup.Inline(markup.Row(button))
+	markup.Inline(markup.Row(button), s.adminVerificationRow(markup, user.ID))
 
 	prompt := fmt.Sprintf(`%s 你好，请在 %s 内点击下方链接完成人机验证`, mentionHTML(user), formatTimeout(policy.Verify.TimeoutSeconds))
-	sent, err := s.sendThrottled(ctx, chat, prompt, &tele.SendOptions{
-		ParseMode:             tele.ModeHTML,
-		DisableWebPagePreview: true,
-		ReplyMarkup:           markup,
-	})
+	sent, err := s.sendOrEditVerificationText(ctx, chat, s.existingVerificationMessageID(ctx, chat.ID, user.ID), prompt, markup)
 	if err != nil {
 		s.logger.Error("send turnstile verification prompt", zap.Error(err), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
 		return err
@@ -157,7 +153,7 @@ func (s *Service) VerifyTurnstileToken(ctx context.Context, token, cfResponse, r
 	s.ensureRuntimeGuards()
 	s.joinProtector.ReleasePending(pending.ChatID)
 
-	s.deleteVerificationMessage(chat, pending.JoinMessageID)
+	s.finalizeVerificationPrompt(chat, pending, verificationResultHTML(user, "passed"))
 	s.sendWelcomeMessage(ctx, chat, user)
 
 	s.logger.Info("user verified via turnstile", zap.Int64("chat_id", pending.ChatID), zap.Int64("user_id", pending.UserID))

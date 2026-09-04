@@ -37,6 +37,20 @@ WHERE ($1::BIGINT[] IS NULL OR cardinality($1::BIGINT[]) = 0 OR chat_id = ANY($1
 ORDER BY title ASC, chat_id ASC
 `
 
+const listManagedGroupsScoped = `-- name: ListManagedGroupsScoped :many
+SELECT g.id, g.chat_id, g.title, g.type, g.member_count, g.enabled, g.joined_at, g.config
+FROM groups g
+INNER JOIN authorized_groups a ON a.chat_id = g.chat_id
+WHERE a.enabled = TRUE
+  AND ($1::BIGINT[] IS NULL OR cardinality($1::BIGINT[]) = 0 OR g.chat_id = ANY($1::BIGINT[]))
+ORDER BY g.title ASC, g.chat_id ASC
+`
+
+const deleteGroupByChatID = `-- name: DeleteGroupByChatID :exec
+DELETE FROM groups
+WHERE chat_id = $1
+`
+
 const updateGroupConfig = `-- name: UpdateGroupConfig :one
 UPDATE groups
 SET config = CASE
@@ -140,7 +154,20 @@ func (q *Queries) ListGroups(ctx context.Context) ([]Group, error) {
 }
 
 func (q *Queries) ListGroupsScoped(ctx context.Context, chatIds []int64) ([]Group, error) {
-	rows, err := q.db.Query(ctx, listGroupsScoped, chatIds)
+	return q.listGroupsQuery(ctx, listGroupsScoped, chatIds)
+}
+
+func (q *Queries) ListManagedGroupsScoped(ctx context.Context, chatIds []int64) ([]Group, error) {
+	return q.listGroupsQuery(ctx, listManagedGroupsScoped, chatIds)
+}
+
+func (q *Queries) DeleteGroupByChatID(ctx context.Context, chatID int64) error {
+	_, err := q.db.Exec(ctx, deleteGroupByChatID, chatID)
+	return err
+}
+
+func (q *Queries) listGroupsQuery(ctx context.Context, query string, chatIds []int64) ([]Group, error) {
+	rows, err := q.db.Query(ctx, query, chatIds)
 	if err != nil {
 		return nil, err
 	}

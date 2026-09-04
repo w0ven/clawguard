@@ -19,6 +19,7 @@ import {
 } from "@/components/ui/table";
 import { apiFetch } from "@/lib/api";
 import { useToast } from "@/components/providers";
+import { AdKillerPanel } from "@/components/adkiller-panel";
 import {
   Pencil,
   Play,
@@ -157,7 +158,7 @@ function asRecord(value: unknown): Record<string, unknown> {
 
 export default function LLMAdminPage() {
   const { pushToast } = useToast();
-  const [tab, setTab] = useState<"providers" | "models" | "stats" | "settings">("providers");
+  const [tab, setTab] = useState<"providers" | "models" | "stats" | "settings" | "adkiller">("providers");
   const [providers, setProviders] = useState<Provider[]>([]);
   const [models, setModels] = useState<Model[]>([]);
   const [stats, setStats] = useState<Stats[]>([]);
@@ -208,12 +209,13 @@ export default function LLMAdminPage() {
     { value: "models", label: `Models · ${models.length}` },
     { value: "stats", label: `健康 · ${stats.length}` },
     { value: "settings", label: "探活设置" },
+    { value: "adkiller", label: "AdKiller" },
   ];
 
   return (
     <AdminShell
       title="模型管理"
-      subtitle="Provider / Model / 健康统计"
+      subtitle="Provider / Model / 健康统计 / AdKiller"
       actions={
         <Button variant="secondary" onClick={reloadAll} disabled={loading}>
           <RefreshCw
@@ -256,6 +258,7 @@ export default function LLMAdminPage() {
           pushToast={pushToast}
         />
       )}
+      {tab === "adkiller" && <AdKillerPanel pushToast={pushToast} />}
     </AdminShell>
   );
 }

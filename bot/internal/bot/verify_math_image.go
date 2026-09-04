@@ -283,7 +283,7 @@ func (s *Service) sendMathImageChallenge(ctx context.Context, chat *tele.Chat, u
 	for _, option := range challenge.Options {
 		row = append(row, markup.Data(strconv.Itoa(option), s.verifyMathBtn.Unique, formatVerifyCallbackData(user.ID, strconv.Itoa(option))))
 	}
-	markup.Inline(row)
+	markup.Inline(row, s.adminVerificationRow(markup, user.ID))
 
 	photo := &tele.Photo{
 		File: tele.FromReader(bytes.NewReader(png)),
@@ -293,10 +293,7 @@ func (s *Service) sendMathImageChallenge(ctx context.Context, chat *tele.Chat, u
 			formatTimeout(policy.Verify.TimeoutSeconds),
 		),
 	}
-	sent, err := s.bot.Send(chat, photo, &tele.SendOptions{
-		ParseMode:   tele.ModeHTML,
-		ReplyMarkup: markup,
-	})
+	sent, err := s.sendOrEditVerificationPhoto(chat, s.existingVerificationMessageID(ctx, chat.ID, user.ID), photo, markup)
 	if err != nil {
 		return err
 	}
