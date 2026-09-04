@@ -116,6 +116,12 @@ export type GuardPolicy = {
     check_profile_on_message: boolean;
     profile_on_message_mode: string;
     bio_cache_ttl_minutes: number;
+    adkiller?: {
+      enabled: boolean;
+      min_score: number;
+      timeout_ms: number;
+      on_failure: string;
+    };
   };
   feedback: {
     delete_msg: ActionFeedback;

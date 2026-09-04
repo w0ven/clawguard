@@ -230,15 +230,26 @@ type AIPolicy struct {
 	ActionsByCategory       map[string]string `json:"actions_by_category"`
 	TriggerKeywords         []string          `json:"trigger_keywords"`
 	// 未毕业用户（new/suspicious）发言前，针对其 bio 做一次审核
-	CheckProfileOnMessage  bool   `json:"check_profile_on_message"`
-	ProfileOnMessageMode   string `json:"profile_on_message_mode"` // "keyword" | "ai"
-	BioCacheTTLMinutes     int    `json:"bio_cache_ttl_minutes"`   // 0 表示不缓存
-	VideoModerationEnabled bool   `json:"video_moderation_enabled"`
-	VideoMaxBytes          int64  `json:"video_max_bytes"`
-	VideoMaxDurationSec    int    `json:"video_max_duration_sec"`
-	VideoFrameCount        int    `json:"video_frame_count"`
-	VideoConcurrency       int    `json:"video_concurrency"`
-	IncludeVideoNote       bool   `json:"include_video_note"`
+	CheckProfileOnMessage  bool           `json:"check_profile_on_message"`
+	ProfileOnMessageMode   string         `json:"profile_on_message_mode"` // "keyword" | "ai"
+	BioCacheTTLMinutes     int            `json:"bio_cache_ttl_minutes"`   // 0 表示不缓存
+	VideoModerationEnabled bool           `json:"video_moderation_enabled"`
+	VideoMaxBytes          int64          `json:"video_max_bytes"`
+	VideoMaxDurationSec    int            `json:"video_max_duration_sec"`
+	VideoFrameCount        int            `json:"video_frame_count"`
+	VideoConcurrency       int            `json:"video_concurrency"`
+	IncludeVideoNote       bool           `json:"include_video_note"`
+	AdKiller               AdKillerPolicy `json:"adkiller"`
+}
+
+// AdKillerPolicy is a text-only advertising prefilter that runs before the
+// existing LLM moderation chain. Confirmed ads reuse actions_by_category;
+// anything else, including API failure, falls through to later models.
+type AdKillerPolicy struct {
+	Enabled   bool   `json:"enabled"`
+	MinScore  int    `json:"min_score"`
+	TimeoutMs int    `json:"timeout_ms"`
+	OnFailure string `json:"on_failure"` // fallback | skip
 }
 
 type AIThresholds struct {
@@ -368,6 +379,13 @@ var DefaultPolicy = GuardPolicy{
 			"政治": "delete",
 			"色情": "ban",
 			"正常": "none",
+			"ad": "warn",
+		},
+		AdKiller: AdKillerPolicy{
+			Enabled:   false,
+			MinScore:  81,
+			TimeoutMs: 1500,
+			OnFailure: "fallback",
 		},
 	},
 	Feedback: ActionFeedbackPolicy{
@@ -649,11 +667,30 @@ func applyAIDefaults(policy *AIPolicy) {
 		policy.VideoConcurrency = DefaultPolicy.AI.VideoConcurrency
 	}
 	applyAIThresholdDefaults(&policy.Thresholds)
+	applyAdKillerDefaults(&policy.AdKiller)
 	if strings.TrimSpace(policy.MessageRules) == "" && strings.TrimSpace(policy.CustomRules) != "" {
 		policy.MessageRules = policy.CustomRules
 	}
 	if strings.TrimSpace(policy.BioRules) == "" && strings.TrimSpace(policy.CustomRules) != "" {
 		policy.BioRules = policy.CustomRules
+	}
+}
+
+func applyAdKillerDefaults(policy *AdKillerPolicy) {
+	if policy == nil {
+		return
+	}
+	if policy.MinScore <= 0 {
+		policy.MinScore = DefaultPolicy.AI.AdKiller.MinScore
+	}
+	if policy.TimeoutMs <= 0 {
+		policy.TimeoutMs = DefaultPolicy.AI.AdKiller.TimeoutMs
+	}
+	switch strings.ToLower(strings.TrimSpace(policy.OnFailure)) {
+	case "fallback", "skip":
+		policy.OnFailure = strings.ToLower(strings.TrimSpace(policy.OnFailure))
+	default:
+		policy.OnFailure = DefaultPolicy.AI.AdKiller.OnFailure
 	}
 }
 

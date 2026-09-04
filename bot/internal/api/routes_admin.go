@@ -83,6 +83,7 @@ func (s *Server) registerAdminRoutes() {
 	admin.GET("/ai-calls", s.handleListAICalls)
 
 	s.registerAdminLLMRoutes(admin)
+	s.registerAdminAdKillerRoutes(admin)
 	s.registerScheduledMessageRoutes(admin)
 }
 

@@ -21,6 +21,7 @@ import (
 	"go.uber.org/zap"
 	tele "gopkg.in/telebot.v3"
 
+	"github.com/openclaw/clawguard/internal/adkiller"
 	"github.com/openclaw/clawguard/internal/ai"
 	"github.com/openclaw/clawguard/internal/casclient"
 	"github.com/openclaw/clawguard/internal/config"
@@ -38,6 +39,7 @@ type Service struct {
 	aiModels           ai.ModelRegistry
 	aiResolver         *ai.Resolver
 	aiModerator        *ai.Moderator
+	adkiller           *adkiller.Client
 	bot                *tele.Bot
 	sender             telegramSender
 	sendLimiter        *SendLimiter
@@ -236,6 +238,10 @@ func New(ctx context.Context, cfg config.Config, logger *zap.Logger, queries *st
 	svc.aiModels = models
 	svc.aiResolver = resolver
 	svc.aiModerator = ai.NewModerator(ctx, logger, rdb, queries, providers, models, resolver, svc)
+	svc.adkiller = adkiller.NewClient(adkiller.DefaultBaseURL, logger)
+	if err := svc.ReloadAdKillerSecret(ctx); err != nil {
+		logger.Warn("load adkiller secret failed", zap.Error(err))
+	}
 	if err := svc.PrimeRuntimeSnapshots(ctx); err != nil {
 		return nil, fmt.Errorf("prime runtime snapshots: %w", err)
 	}

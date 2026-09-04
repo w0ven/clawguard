@@ -799,6 +799,10 @@ func (m *Moderator) reserveQuota(ctx context.Context, input CheckInput) (bool, s
 	return allowed == 1, reason, nil
 }
 
+func (m *Moderator) TryAcquireInflight(chatID int64) (func(), bool) {
+	return m.acquireInflight(chatID)
+}
+
 func (m *Moderator) acquireInflight(chatID int64) (func(), bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

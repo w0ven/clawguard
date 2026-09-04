@@ -60,6 +60,18 @@ func TestApplyAIDefaults_VideoFields(t *testing.T) {
 	if policy.IncludeVideoNote != DefaultPolicy.AI.IncludeVideoNote {
 		t.Fatalf("expected include video note %t, got %t", DefaultPolicy.AI.IncludeVideoNote, policy.IncludeVideoNote)
 	}
+	if policy.AdKiller.MinScore != DefaultPolicy.AI.AdKiller.MinScore {
+		t.Fatalf("expected adkiller min score %d, got %d", DefaultPolicy.AI.AdKiller.MinScore, policy.AdKiller.MinScore)
+	}
+	if policy.AdKiller.TimeoutMs != DefaultPolicy.AI.AdKiller.TimeoutMs {
+		t.Fatalf("expected adkiller timeout %d, got %d", DefaultPolicy.AI.AdKiller.TimeoutMs, policy.AdKiller.TimeoutMs)
+	}
+	if policy.AdKiller.OnFailure != DefaultPolicy.AI.AdKiller.OnFailure {
+		t.Fatalf("expected adkiller on_failure %q, got %q", DefaultPolicy.AI.AdKiller.OnFailure, policy.AdKiller.OnFailure)
+	}
+	if policy.AdKiller.Enabled {
+		t.Fatal("expected adkiller to default disabled")
+	}
 }
 
 func TestDefaultPolicyNewUserNoInvitesDisabled(t *testing.T) {

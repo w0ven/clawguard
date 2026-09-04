@@ -191,6 +191,15 @@ func validatePartialPolicy(policy GuardPolicy) error {
 	if !validProbability(thresholds.Ban) || !validProbability(thresholds.Mute) || !validProbability(thresholds.Warn) || !validProbability(thresholds.Flag) {
 		return fmt.Errorf("ai.thresholds values must be between 0 and 1")
 	}
+	if policy.AI.AdKiller.MinScore < 0 || policy.AI.AdKiller.MinScore > 100 {
+		return fmt.Errorf("ai.adkiller.min_score must be between 0 and 100")
+	}
+	if policy.AI.AdKiller.TimeoutMs != 0 && (policy.AI.AdKiller.TimeoutMs < 100 || policy.AI.AdKiller.TimeoutMs > 10000) {
+		return fmt.Errorf("ai.adkiller.timeout_ms must be between 100 and 10000")
+	}
+	if policy.AI.AdKiller.OnFailure != "" && !oneOf(policy.AI.AdKiller.OnFailure, "fallback", "skip") {
+		return fmt.Errorf("ai.adkiller.on_failure has unsupported value %q", policy.AI.AdKiller.OnFailure)
+	}
 	return nil
 }
 
@@ -300,6 +309,9 @@ func ValidateGuardPolicy(policy GuardPolicy) error {
 			return fmt.Errorf("ai.actions_by_category.%s has unsupported value %q", category, action)
 		}
 	}
+	if err := validateAdKillerPolicy(policy.AI.AdKiller); err != nil {
+		return err
+	}
 
 	if err := validateParseMode("verify.welcome_message.parse_mode", policy.Verify.WelcomeMessage.ParseMode); err != nil {
 		return err
@@ -346,6 +358,19 @@ func oneOfDefault(value string, allowed ...string) bool {
 
 func validProbability(value float64) bool {
 	return value >= 0 && value <= 1
+}
+
+func validateAdKillerPolicy(policy AdKillerPolicy) error {
+	if policy.MinScore < 0 || policy.MinScore > 100 {
+		return fmt.Errorf("ai.adkiller.min_score must be between 0 and 100")
+	}
+	if policy.TimeoutMs < 100 || policy.TimeoutMs > 10000 {
+		return fmt.Errorf("ai.adkiller.timeout_ms must be between 100 and 10000")
+	}
+	if !oneOf(policy.OnFailure, "fallback", "skip") {
+		return fmt.Errorf("ai.adkiller.on_failure has unsupported value %q", policy.OnFailure)
+	}
+	return nil
 }
 
 func validateParseMode(path, value string) error {

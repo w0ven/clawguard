@@ -483,6 +483,14 @@ func (s *Service) applyAIModeration(ctx context.Context, msg *tele.Message, poli
 		scene = "video"
 	}
 
+	handled, err := s.applyAdKillerPrefilter(ctx, msg, policy, trust, content, isEdited)
+	if err != nil {
+		return err
+	}
+	if handled {
+		return nil
+	}
+
 	output, err := s.aiModerator.CheckMessage(ctx, ai.CheckInput{
 		ChatID:            msg.Chat.ID,
 		UserID:            msg.Sender.ID,

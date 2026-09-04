@@ -7,6 +7,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	tele "gopkg.in/telebot.v3"
 
+	"github.com/openclaw/clawguard/internal/adkiller"
 	"github.com/openclaw/clawguard/internal/ai"
 	"github.com/openclaw/clawguard/internal/redact"
 	"github.com/openclaw/clawguard/internal/store"
@@ -85,6 +86,10 @@ func (s *Service) AIModels() ai.ModelRegistry {
 
 func (s *Service) AIModerator() *ai.Moderator {
 	return s.aiModerator
+}
+
+func (s *Service) AdKiller() *adkiller.Client {
+	return s.adkiller
 }
 
 func (s *Service) Redis() redis.Cmdable {
