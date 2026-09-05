@@ -6,7 +6,7 @@ Telegram 群组反广告 / 反潜伏广告号 / 群管理平台。Bot + Web 面�
 
 ## 1. 目标
 
-- **入群验证**：按钮 / 数学题 / Cloudflare Turnstile，多模式可切换。
+- **入群验证**：按钮 / 数学题 / 图片算术题 / Cloudflare Turnstile，多模式可切换。失败的图片题会删除原图。
 - **反硬广告**：关键词、正则、链接白名单、新人期加严、速率限制、CAS 联动。
 - **反潜伏广告号**：用户信任状态机 + AI 内容审核 + Bio（简介）审核双层防线。
 - **多群管理**：全局策略 + 群级覆盖，面板可视化配置。
@@ -197,8 +197,8 @@ Turnstile 路径细节：JWT 带 `chat_id + user_id + exp`，Web 前端渲染 Tu
 
 防"入群时 Bio 干净、之后偷偷改 Bio 加广告"的场景。两处入口：
 
-- **入群时**：`checkProfile`（`moderation.go`），模式 = `policy.Verify.ProfileCheckMode`（`off` / `keyword` / `ai`）。命中 → `performAsyncVerificationMatch` 走 ban + 记录链路。
-- **未毕业用户发言前**：`checkProfileOnMessage`（`moderation.go`），开关 `policy.AI.CheckProfileOnMessage`，模式 `policy.AI.ProfileOnMessageMode`。命中 → ban + 写 `ai_decisions` + `resetTrustAfterViolation` + `violations`（含消息原文）。
+- **入群时**：`checkProfile`（`moderation.go`），模式 = `policy.Verify.ProfileCheckMode`（`off` / `keyword` / `ai`）。AdKiller 开启时先对简介打分，命中 → `performAsyncVerificationMatch`（`decisionMode=join_adkiller`）；未命中再走关键词/AI。命中后仍走 ban + 记录链路。
+- **未毕业用户发言前**：`checkProfileOnMessage`（`moderation.go`），开关 `policy.AI.CheckProfileOnMessage`，模式 `policy.AI.ProfileOnMessageMode`。同样先走 AdKiller，命中记 `on_message_adkiller`。命中 → ban + 写 `ai_decisions` + `resetTrustAfterViolation` + `violations`（含消息原文）。
 
 Bio 通过 `getChat` 抓取，`policy.AI.BioCacheTTLMinutes` 控制 Redis 缓存 TTL 节流。每次命中 / 通过 / 跳过 / 错误都写 `profile_check_logs`，Web 面板 `/verify` 可看。
 

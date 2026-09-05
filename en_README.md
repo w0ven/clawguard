@@ -6,11 +6,11 @@ ClawGuard is a Telegram group-management system with join verification, join-flo
 
 ## Current Status
 
-This document reflects the `main` branch as of **2026-07-16**.
+This document reflects the `main` branch as of **2026-09-05**.
 
 | Area | Status |
 |---|---|
-| Database schema | goose migration `00028` |
+| Database schema | goose migration `00030` |
 | Production topology | One bot, one web service, PostgreSQL 16, Redis 7 AOF, and Caddy 2 |
 | Delivery | GitHub Actions tests and publishes bot/web images; production is upgraded in place with Docker Compose |
 | Backend CI | Unit tests, vet, race, govulncheck, and a real PostgreSQL migration smoke test |
@@ -26,7 +26,8 @@ The current deployment is designed for **one bot replica**. Join-protection stat
 
 - Button, arithmetic, image arithmetic, emoji-choice, and Cloudflare Turnstile challenges.
 - Per-group timeout, failure action, join-message cleanup, and welcome-message settings.
-- Optional CAS and Bio keyword/AI checks before verification.
+- Optional CAS and Bio keyword/AI checks before verification. Failed image-arithmetic challenges delete the original photo so a stale puzzle does not look active.
+- When AdKiller is enabled, bios are scored before keyword/AI review; confirmed ads follow the configured score bands.
 - PostgreSQL-backed verification jobs with due times, leases, retries, and last-error tracking.
 - Pending verification and cleanup jobs survive service restarts.
 - The bot automatically rejects unauthorized groups; owners manage authorization in the Web console.
@@ -74,6 +75,7 @@ A first-time joiner cannot already be trusted. The backend only retains an anti-
 - Provider/model registry, encrypted API keys, capability tags, priority, probes, fallback chains, and automatic degradation.
 - Text, image, video-frame, VideoNote, sticker, animation, voice/audio placeholder, document, contact, poll, location, venue, game, Invoice, Story, and Giveaway content.
 - Bio checks before a message is processed, preventing post-join profile changes from bypassing review.
+- Optional AdKiller advertising prefilter with a complete 0-100 `score_bands` partition; incomplete overlays are rejected.
 - Scene/category/confidence-based decisions with human review in the Web console.
 
 Trust states:
@@ -158,7 +160,7 @@ clawguard/
 │   ├── internal/scheduler/     # Scheduled group messages
 │   ├── internal/store/         # sqlc data layer
 │   ├── internal/worker/        # Background workers
-│   └── migrations/             # Database migrations through 00028
+│   └── migrations/             # Database migrations through 00030
 ├── web/                        # Next.js administration console
 ├── scripts/                    # Production smoke and restore rehearsal
 ├── docs/                       # Design and restore documentation

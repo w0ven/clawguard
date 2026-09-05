@@ -243,8 +243,10 @@ type AIPolicy struct {
 }
 
 // AdKillerPolicy is a text-only advertising prefilter that runs before the
-// existing LLM moderation chain. Score bands decide the action; anything
-// unresolved, including API failure, falls through to later models.
+// existing LLM moderation chain, including join and on-message bio checks.
+// Score bands decide the action and must partition scores 0-100 without
+// overlap or gaps. Anything unresolved, including API failure, falls through
+// to later models unless on_failure=skip.
 type AdKillerPolicy struct {
 	Enabled        bool                `json:"enabled"`
 	MinScore       int                 `json:"min_score"`

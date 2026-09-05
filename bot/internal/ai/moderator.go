@@ -135,6 +135,10 @@ type CheckOutput struct {
 	Cached        bool    `json:"cached"`
 	FlagOnly      bool    `json:"flag_only"`
 	Skipped       bool    `json:"skipped"`
+	// Action is set by deterministic prefilters such as AdKiller.  Model
+	// output itself never controls this field; it lets profile moderation
+	// preserve the prefilter's configured action when handling a bio hit.
+	Action        string  `json:"action,omitempty"`
 }
 
 type pendingBatch struct {

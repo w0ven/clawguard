@@ -106,19 +106,22 @@ func (s *Service) finalizeVerificationPrompt(chat *tele.Chat, pending store.Pend
 	if chat == nil || pending.JoinMessageID == nil || *pending.JoinMessageID <= 0 {
 		return
 	}
+	// Telegram cannot turn a photo message into a text message.  Do not merely
+	// edit the caption of an arithmetic challenge after it has failed: that
+	// leaves the old puzzle visible and makes a stale verification look active.
+	// The successful path removes the image before sending the welcome message;
+	// every unsuccessful math-image path removes it here as well.
+	if pending.Method == "math_image" {
+		s.deleteVerificationMessage(chat, pending.JoinMessageID)
+		return
+	}
 	msg := s.verificationMessageRef(chat, int(*pending.JoinMessageID))
 	opts := &tele.SendOptions{
 		ParseMode:             tele.ModeHTML,
 		DisableWebPagePreview: true,
 		ReplyMarkup:           &tele.ReplyMarkup{},
 	}
-	var err error
-	if pending.Method == "math_image" {
-		_, err = s.bot.EditCaption(msg, html, opts)
-	} else {
-		_, err = s.bot.Edit(msg, html, opts)
-	}
-	if err != nil && s.logger != nil {
+	if _, err := s.bot.Edit(msg, html, opts); err != nil && s.logger != nil {
 		s.logger.Warn("edit verification result failed",
 			zap.Error(err),
 			zap.Int64("chat_id", chat.ID),

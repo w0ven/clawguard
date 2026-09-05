@@ -4,6 +4,11 @@ import (
 	"context"
 	"math/rand"
 	"testing"
+
+	"go.uber.org/zap"
+	tele "gopkg.in/telebot.v3"
+
+	"github.com/openclaw/clawguard/internal/store"
 )
 
 func TestBuildMathImageChallengeReturnsValidChallengeAcrossSeeds(t *testing.T) {
@@ -74,5 +79,22 @@ func TestBuildMathImageChallengeReturnsFallbackWhenMaxAttemptsZero(t *testing.T)
 	}
 	if !foundAnswer {
 		t.Fatalf("answer %d missing from options %v", challenge.Answer, challenge.Options)
+	}
+}
+
+func TestFinalizeVerificationPromptDeletesMathImage(t *testing.T) {
+	botClient, transport := newMockTelegramBot(t, "")
+	svc := &Service{logger: zap.NewNop(), bot: botClient}
+	messageID := int64(88)
+	svc.finalizeVerificationPrompt(
+		&tele.Chat{ID: -1001},
+		store.PendingVerification{Method: "math_image", JoinMessageID: &messageID},
+		"❌ 验证失败",
+	)
+	if !containsString(transport.Methods(), "deleteMessage") {
+		t.Fatalf("methods = %v, want deleteMessage", transport.Methods())
+	}
+	if containsString(transport.Methods(), "editMessageCaption") {
+		t.Fatalf("math_image failure should not edit the caption: %v", transport.Methods())
 	}
 }

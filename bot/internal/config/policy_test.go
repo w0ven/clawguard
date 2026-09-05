@@ -189,3 +189,30 @@ func TestDefaultPolicyIsValid(t *testing.T) {
 		t.Fatalf("serialized default policy document is invalid: %v", err)
 	}
 }
+
+func TestValidateAdKillerScoreBandsRejectsOverlapAndGap(t *testing.T) {
+	policy := DefaultPolicy
+	policy.AI.AdKiller.ScoreBands = []AdKillerScoreBand{
+		{MinScore: 0, MaxScore: 80, Action: "none"},
+		{MinScore: 70, MaxScore: 100, Action: "ban"},
+	}
+	if err := ValidateGuardPolicy(policy); err == nil {
+		t.Fatal("overlapping score bands were accepted")
+	}
+
+	policy = DefaultPolicy
+	policy.AI.AdKiller.ScoreBands = []AdKillerScoreBand{
+		{MinScore: 0, MaxScore: 80, Action: "none"},
+		{MinScore: 90, MaxScore: 100, Action: "ban"},
+	}
+	if err := ValidateGuardPolicy(policy); err == nil {
+		t.Fatal("gapped score bands were accepted")
+	}
+}
+
+func TestValidatePartialPolicyRequiresCompleteScoreBandsWhenPresent(t *testing.T) {
+	err := ValidatePolicyDocument([]byte(`{"ai":{"adkiller":{"score_bands":[{"min_score":0,"max_score":50,"action":"none"}]}}}`))
+	if err == nil {
+		t.Fatal("partial score_bands overlay that does not cover 0-100 was accepted")
+	}
+}

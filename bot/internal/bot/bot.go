@@ -1161,6 +1161,9 @@ func (s *Service) startAsyncVerificationChecks(chat *tele.Chat, user *tele.User,
 			if strings.EqualFold(strings.TrimSpace(policy.Verify.ProfileCheckMode), "ai") {
 				decisionMode = "join_ai"
 			}
+			if aiOutput != nil && strings.EqualFold(aiOutput.Model, "adkiller") {
+				decisionMode = "join_adkiller"
+			}
 			if err := s.handleAsyncVerificationMatch(ctx, asyncVerificationMatch{
 				chat:         chat,
 				user:         user,

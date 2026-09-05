@@ -3575,6 +3575,16 @@ func (s *Service) checkProfile(ctx context.Context, chat *tele.Chat, user *tele.
 	}
 	bio := strings.TrimSpace(privateChat.Bio)
 
+	if matched, output, skipLLM, err := s.checkBioAdKiller(ctx, chatID, user, bio, policy, "join_adkiller"); err != nil {
+		s.enqueueProfileCheckLog(chatID, user, bio, logMode, "error", nil, nil, nil)
+		return "", nil, err
+	} else if matched != "" {
+		return matched, output, nil
+	} else if skipLLM && mode == "ai" {
+		mode = "keyword"
+		logMode = "keyword"
+	}
+
 	// keyword mode: existing behavior
 	if logMode == "keyword" {
 		for _, blacklisted := range policy.Verify.ProfileBlacklist {
@@ -3682,6 +3692,15 @@ func (s *Service) checkProfileOnMessage(ctx context.Context, chat *tele.Chat, us
 		return "", nil, nil
 	}
 	_ = fromCache
+
+	if matched, output, skipLLM, err := s.checkBioAdKiller(ctx, chatID, user, bio, policy, "on_message_adkiller"); err != nil {
+		s.enqueueProfileCheckLog(chatID, user, bio, "on_message_"+mode, "error", nil, nil, nil)
+		return "", nil, err
+	} else if matched != "" {
+		return matched, output, nil
+	} else if skipLLM && mode == "ai" {
+		mode = "keyword"
+	}
 
 	// 关键词模式：复用 Verify.ProfileBlacklist
 	if mode == "keyword" {
@@ -4033,6 +4052,9 @@ func (s *Service) handleProfileOnMessageViolation(
 	decisionMode := "on_message_ai"
 	if strings.EqualFold(strings.TrimSpace(policy.AI.ProfileOnMessageMode), "keyword") {
 		decisionMode = "on_message_keyword"
+	}
+	if aiOutput != nil && strings.EqualFold(aiOutput.Model, "adkiller") {
+		decisionMode = "on_message_adkiller"
 	}
 	if err := s.recordProfileViolationDecision(ctx, msg.Chat, msg.Sender, msg, matched, decisionMode, aiOutput); err != nil {
 		s.logger.Warn("record profile violation ai_decision failed", zap.Error(err))

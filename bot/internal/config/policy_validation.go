@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"reflect"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/openclaw/clawguard/internal/messagefmt"
@@ -201,6 +202,14 @@ func validatePartialPolicy(policy GuardPolicy) error {
 	if policy.AI.AdKiller.OnFailure != "" && !oneOf(policy.AI.AdKiller.OnFailure, "fallback", "skip") {
 		return fmt.Errorf("ai.adkiller.on_failure has unsupported value %q", policy.AI.AdKiller.OnFailure)
 	}
+	// A nil slice means the score_bands field was omitted from this partial
+	// overlay.  An explicitly supplied array replaces the inherited array and
+	// therefore must itself be a complete, non-overlapping 0-100 partition.
+	if policy.AI.AdKiller.ScoreBands != nil {
+		if err := validateAdKillerScoreBands(policy.AI.AdKiller.ScoreBands); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -376,8 +385,21 @@ func validateAdKillerPolicy(policy AdKillerPolicy) error {
 			return fmt.Errorf("ai.adkiller.enabled_chat_ids[%d] is invalid", index)
 		}
 	}
+	return validateAdKillerScoreBands(policy.ScoreBands)
+}
+
+// validateAdKillerScoreBands validates the complete score partition.  A band
+// list replaces the previous list as a whole, so accepting overlaps or gaps
+// would make the runtime's action choice depend on array order.  Scores are
+// validated after sorting a copy; the user's configured order is not changed.
+func validateAdKillerScoreBands(bands []AdKillerScoreBand) error {
+	if len(bands) == 0 {
+		return fmt.Errorf("ai.adkiller.score_bands must contain at least one band")
+	}
+
 	adkillerActions := stringSet("none", "warn", "mute", "kick", "ban", "delete")
-	for index, band := range policy.ScoreBands {
+	ordered := append([]AdKillerScoreBand(nil), bands...)
+	for index, band := range ordered {
 		if band.MinScore < 0 || band.MinScore > 100 || band.MaxScore < 0 || band.MaxScore > 100 {
 			return fmt.Errorf("ai.adkiller.score_bands[%d] scores must be between 0 and 100", index)
 		}
@@ -387,6 +409,27 @@ func validateAdKillerPolicy(policy AdKillerPolicy) error {
 		if _, ok := adkillerActions[normalizedPolicyValue(band.Action)]; !ok {
 			return fmt.Errorf("ai.adkiller.score_bands[%d].action has unsupported value %q", index, band.Action)
 		}
+	}
+
+	sort.SliceStable(ordered, func(i, j int) bool {
+		if ordered[i].MinScore != ordered[j].MinScore {
+			return ordered[i].MinScore < ordered[j].MinScore
+		}
+		return ordered[i].MaxScore < ordered[j].MaxScore
+	})
+
+	expectedMin := 0
+	for index, band := range ordered {
+		if band.MinScore < expectedMin {
+			return fmt.Errorf("ai.adkiller.score_bands overlap near band %d (%d-%d)", index, band.MinScore, band.MaxScore)
+		}
+		if band.MinScore > expectedMin {
+			return fmt.Errorf("ai.adkiller.score_bands have a gap before band %d (missing %d-%d)", index, expectedMin, band.MinScore-1)
+		}
+		expectedMin = band.MaxScore + 1
+	}
+	if expectedMin != 101 {
+		return fmt.Errorf("ai.adkiller.score_bands must cover scores 0-100 (ends at %d)", expectedMin-1)
 	}
 	return nil
 }

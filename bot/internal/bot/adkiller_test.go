@@ -159,3 +159,59 @@ func TestApplyAdKillerPrefilterMissingKeyFallsThrough(t *testing.T) {
 		t.Fatal("missing api key should fall through to later models")
 	}
 }
+
+func TestCheckBioAdKillerHitReturnsMatched(t *testing.T) {
+	svc, calls := newAdKillerTestService(t, func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"score":            95,
+			"level":            "ad",
+			"primary_category": "private_contact_diversion",
+			"dimensions":       map[string]int{"private_contact_diversion": 90},
+		})
+	})
+
+	policy := config.DefaultPolicy
+	policy.AI.AdKiller.Enabled = true
+	policy.AI.AdKiller.EnabledChatIDs = []int64{-1001}
+	user := &tele.User{ID: 42, FirstName: "New"}
+
+	matched, output, skipLLM, err := svc.checkBioAdKiller(context.Background(), -1001, user, "加我私聊领彩金 vx:abc", policy, "join_adkiller")
+	if err != nil {
+		t.Fatalf("checkBioAdKiller() error = %v", err)
+	}
+	if matched == "" {
+		t.Fatal("high-score bio should match")
+	}
+	if output == nil || output.Model != "adkiller" || output.Action != "kick" {
+		t.Fatalf("output = %+v, want adkiller kick", output)
+	}
+	if !skipLLM {
+		t.Fatal("confirmed bio ad should skip later models")
+	}
+	if atomic.LoadInt32(calls) != 1 {
+		t.Fatalf("api calls = %d, want 1", atomic.LoadInt32(calls))
+	}
+}
+
+func TestCheckBioAdKillerLowScoreFallsThrough(t *testing.T) {
+	svc, _ := newAdKillerTestService(t, func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"score":            12,
+			"level":            "normal",
+			"primary_category": "normal_chat",
+			"dimensions":       map[string]int{"normal_chat": 90},
+		})
+	})
+
+	policy := config.DefaultPolicy
+	policy.AI.AdKiller.Enabled = true
+	policy.AI.AdKiller.EnabledChatIDs = []int64{-1001}
+
+	matched, output, skipLLM, err := svc.checkBioAdKiller(context.Background(), -1001, &tele.User{ID: 42}, "今晚一起吃饭", policy, "join_adkiller")
+	if err != nil {
+		t.Fatalf("checkBioAdKiller() error = %v", err)
+	}
+	if matched != "" || output != nil || skipLLM {
+		t.Fatalf("low-score bio should fall through, matched=%q skip=%t output=%v", matched, skipLLM, output)
+	}
+}

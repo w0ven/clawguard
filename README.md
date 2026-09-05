@@ -6,11 +6,11 @@ ClawGuard 是一套面向 Telegram 群组的群管理系统，包含入群验证
 
 ## 当前状态
 
-本文档基线为 **2026-07-16**，以 `main` 分支当前实现为准。
+本文档基线为 **2026-09-05**，以 `main` 分支当前实现为准。
 
 | 项目 | 当前状态 |
 |---|---|
-| 数据库 Schema | goose migration `00028` |
+| 数据库 Schema | goose migration `00030` |
 | 生产拓扑 | 单 bot 实例 + 单 web 实例 + PostgreSQL 16 + Redis 7 AOF + Caddy 2 |
 | 发布方式 | GitHub Actions 测试并构建 bot/web 镜像，生产机使用 Docker Compose 原位升级 |
 | 后端 CI | 单测、vet、race、govulncheck、真实 PostgreSQL migration smoke |
@@ -26,7 +26,8 @@ ClawGuard 是一套面向 Telegram 群组的群管理系统，包含入群验证
 
 - 支持按钮、算术题、图片算术题、Emoji 四选一和 Cloudflare Turnstile。
 - 可按群配置超时时间、失败动作、进群服务消息删除和欢迎语。
-- 入群前可执行 CAS 查询和 Bio 关键词/AI 检查。
+- 入群前可执行 CAS 查询和 Bio 关键词/AI 检查；图片算术题失败或超时会删除原图，避免旧题看起来仍有效。
+- Bio 在 AdKiller 开启时先走广告预筛，命中后再按分段动作处理，未命中才交给关键词或 LLM。
 - 验证任务写入 PostgreSQL，使用 `next_attempt_at`、租约、重试次数和错误信息可靠处理。
 - 服务重启后会继续处理未完成的验证和清理任务。
 - 未授权群会被自动拒绝，群授权由 owner 在 Web 后台维护。
@@ -84,6 +85,7 @@ ClawGuard 是一套面向 Telegram 群组的群管理系统，包含入群验证
 - 支持主模型、fallback 链、模型健康探测、自动降级、缓存、合批和每用户调用上限。
 - 支持文本、图片、视频抽帧、VideoNote、贴纸、动图、语音/音频占位、文件、联系人、投票、位置、地点、游戏、Invoice、Story 和 Giveaway 等内容。
 - 支持消息前 Bio 审核，避免用户入群后修改简介绕过检查。
+- AdKiller 文本广告预筛可按群启用；`score_bands` 必须完整覆盖 0-100 且无重叠，保存不完整分段会被拒绝。
 - AI 判决和动作按场景、类别、置信度阈值记录，可在 Web 后台人工复核。
 
 用户状态：
@@ -190,7 +192,7 @@ clawguard/
 │   ├── internal/scheduler/     # 群定时消息
 │   ├── internal/store/         # sqlc 数据访问层
 │   ├── internal/worker/        # 后台 Worker
-│   └── migrations/             # 数据库迁移，当前到 00028
+│   └── migrations/             # 数据库迁移，当前到 00030
 ├── web/
 │   ├── app/                    # Next.js 页面和 Route Handler
 │   ├── components/             # 管理后台组件
