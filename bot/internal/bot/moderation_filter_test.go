@@ -362,7 +362,87 @@ func TestCheckNewUserFilterFallbacksUseDeleteAction(t *testing.T) {
 			if result.Action != "delete" {
 				t.Fatalf("Action = %q, want delete", result.Action)
 			}
+			if result.ContinueReview {
+				t.Fatalf("ContinueReview = true, want false for %s", tt.name)
+			}
 		})
+	}
+}
+
+func TestCheckNewUserFilterContactContinuesReview(t *testing.T) {
+	svc := &Service{}
+	trust := store.UserTrust{Status: "new"}
+	policy := config.FilterNewUserPolicy{
+		Enabled: true,
+		NoMedia: true,
+	}
+	msg := &tele.Message{
+		Chat:   &tele.Chat{ID: -100},
+		Sender: &tele.User{ID: 42},
+		Contact: &tele.Contact{
+			FirstName:   "Crypto_R",
+			PhoneNumber: "+8615736504420",
+		},
+	}
+
+	result, err := svc.checkNewUserFilter(context.Background(), msg, trust, policy, true)
+	if err != nil {
+		t.Fatalf("checkNewUserFilter returned error: %v", err)
+	}
+	if !result.Hit {
+		t.Fatal("Hit = false, want true")
+	}
+	if result.Reason != "filter_newuser_no_media" {
+		t.Fatalf("Reason = %q, want filter_newuser_no_media", result.Reason)
+	}
+	if result.MatchedRule != "contact" {
+		t.Fatalf("MatchedRule = %q, want contact", result.MatchedRule)
+	}
+	if result.Action != "delete" {
+		t.Fatalf("Action = %q, want delete", result.Action)
+	}
+	if !result.ContinueReview {
+		t.Fatal("ContinueReview = false, want true for contact")
+	}
+}
+
+func TestApplyFilterChecksContinuesReviewAfterUngraduatedContactDelete(t *testing.T) {
+	chatID := int64(-100123)
+	userID := int64(8873667625)
+	db := newModerationProfileMatchMockDB(chatID, userID)
+	db.userTrust.Status = "new"
+	botClient, transport := newMockTelegramBot(t, "")
+	svc := &Service{logger: zap.NewNop(), queries: store.New(db), bot: botClient}
+
+	policy := config.DefaultPolicy
+	policy.Filter.NewUser.Enabled = true
+	policy.Filter.NewUser.NoMedia = true
+	policy.Filter.NewUser.NoInvites = true
+
+	msg := &tele.Message{
+		ID:     12095,
+		Chat:   &tele.Chat{ID: chatID, Type: tele.ChatSuperGroup, Title: "test-group"},
+		Sender: &tele.User{ID: userID, Username: "chusaiqu", FirstName: "一騎"},
+		Contact: &tele.Contact{
+			FirstName:   "Crypto_R總",
+			PhoneNumber: "+8615736504420",
+		},
+	}
+
+	handled, err := svc.applyFilterChecks(context.Background(), msg, policy, false, false, false)
+	if err != nil {
+		t.Fatalf("applyFilterChecks returned error: %v", err)
+	}
+	if handled {
+		t.Fatal("handled = true, want false so contact can continue to AI review")
+	}
+
+	methods := transport.Methods()
+	if got := countString(methods, "restrictChatMember"); got != 1 {
+		t.Fatalf("restrictChatMember calls = %d, want 1; methods=%v", got, methods)
+	}
+	if got := countString(methods, "deleteMessage"); got != 1 {
+		t.Fatalf("deleteMessage calls = %d, want 1; methods=%v", got, methods)
 	}
 }
 

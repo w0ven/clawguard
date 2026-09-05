@@ -638,6 +638,9 @@ func (s *Service) applyFilterChecks(ctx context.Context, msg *tele.Message, poli
 	if err := s.applyFilterResult(ctx, msg, policy, result, actionsPaused); err != nil {
 		return false, err
 	}
+	if result.ContinueReview {
+		return false, nil
+	}
 	return true, nil
 }
 
@@ -730,11 +733,13 @@ func (s *Service) checkNewUserFilter(ctx context.Context, msg *tele.Message, tru
 		}, nil
 	}
 	if policy.NoMedia && messageHasRestrictedMedia(msg) {
+		kind := messageMediaKind(msg)
 		return FilterResult{
-			Hit:         true,
-			Reason:      "filter_newuser_no_media",
-			MatchedRule: messageMediaKind(msg),
-			Action:      "delete",
+			Hit:            true,
+			Reason:         "filter_newuser_no_media",
+			MatchedRule:    kind,
+			Action:         "delete",
+			ContinueReview: kind == "contact",
 		}, nil
 	}
 	if countRate && policy.MaxMessagesPerMinute > 0 {

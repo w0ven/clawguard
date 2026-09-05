@@ -14,10 +14,11 @@ import (
 var bareURLPattern = regexp.MustCompile(`https?://[^\s]+`)
 
 type FilterResult struct {
-	Hit         bool
-	Reason      string
-	MatchedRule string
-	Action      string
+	Hit            bool
+	Reason         string
+	MatchedRule    string
+	Action         string
+	ContinueReview bool
 }
 
 func checkMessage(_ context.Context, msg *tele.Message, policy config.FilterConfig, isAdmin bool) FilterResult {
