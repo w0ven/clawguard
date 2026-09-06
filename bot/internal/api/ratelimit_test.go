@@ -51,6 +51,77 @@ func TestVerifyRateLimitReturns429WithRetryAfter(t *testing.T) {
 	}
 }
 
+func TestTelegramLoginGETRateLimitReturns429WithRetryAfter(t *testing.T) {
+	redisClient := newAPIFakeRedisClient(t)
+	limiter := newRateLimiter(redisClient, zap.NewNop())
+	server := &Server{}
+	okHandler := func(c echo.Context) error {
+		return c.NoContent(http.StatusOK)
+	}
+
+	e := echo.New()
+	e.GET("/api/auth/telegram-login", okHandler,
+		limiter.middleware(server.ipRateLimitKey("auth:telegram_login_ip"), telegramLoginIPLimit, apiRateLimitWindow),
+		limiter.middleware(server.telegramLoginUserRateLimitKey, telegramLoginUserLimit, apiRateLimitWindow),
+	)
+
+	for i := 0; i < telegramLoginUserLimit; i++ {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/api/auth/telegram-login?id=42", nil)
+		e.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET request %d status = %d, want 200", i+1, rec.Code)
+		}
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/auth/telegram-login?id=42", nil)
+	e.ServeHTTP(rec, req)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("over-limit GET status = %d, want 429", rec.Code)
+	}
+	if rec.Header().Get(echo.HeaderRetryAfter) == "" {
+		t.Fatal("Retry-After header is empty")
+	}
+	if !strings.Contains(rec.Body.String(), "rate limited") {
+		t.Fatalf("body = %q, want rate limited error", rec.Body.String())
+	}
+}
+
+func TestTelegramLoginGETSharesRateLimitKeysWithPOST(t *testing.T) {
+	redisClient := newAPIFakeRedisClient(t)
+	limiter := newRateLimiter(redisClient, zap.NewNop())
+	server := &Server{}
+	okHandler := func(c echo.Context) error {
+		return c.NoContent(http.StatusOK)
+	}
+	ipLimit := limiter.middleware(server.ipRateLimitKey("auth:telegram_login_ip"), telegramLoginIPLimit, apiRateLimitWindow)
+	userLimit := limiter.middleware(server.telegramLoginUserRateLimitKey, telegramLoginUserLimit, apiRateLimitWindow)
+
+	e := echo.New()
+	e.GET("/api/auth/telegram-login", okHandler, ipLimit, userLimit)
+	e.POST("/api/auth/telegram-login", okHandler, ipLimit, userLimit)
+
+	for i := 0; i < telegramLoginUserLimit; i++ {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/api/auth/telegram-login?id=42", nil)
+		e.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("POST request %d status = %d, want 200", i+1, rec.Code)
+		}
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/auth/telegram-login?id=42", nil)
+	e.ServeHTTP(rec, req)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("GET after POST quota status = %d, want 429 (shared key)", rec.Code)
+	}
+	if rec.Header().Get(echo.HeaderRetryAfter) == "" {
+		t.Fatal("Retry-After header is empty")
+	}
+}
+
 func TestRateLimitFailOpenWhenRedisDown(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

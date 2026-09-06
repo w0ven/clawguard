@@ -559,6 +559,134 @@ func TestCheckMessageUsernameBlacklistHit(t *testing.T) {
 	}
 }
 
+func keywordFilterPolicy(keywords ...string) config.FilterConfig {
+	policy := config.DefaultPolicy.Filter
+	policy.Keywords.Enabled = true
+	policy.Keywords.List = keywords
+	policy.Links.Enabled = false
+	return policy
+}
+
+func TestCheckMessagePollQuestionAndOptionKeywordHit(t *testing.T) {
+	t.Run("question", func(t *testing.T) {
+		msg := &tele.Message{
+			Sender: &tele.User{ID: 1},
+			Poll: &tele.Poll{
+				Question: "如何免费领取空投？",
+				Options:  []tele.PollOption{{Text: "点这里"}, {Text: "算了"}},
+			},
+		}
+		result := checkMessage(context.Background(), msg, keywordFilterPolicy("空投"), false)
+		if !result.Hit || result.Reason != "filter_keyword" || result.MatchedRule != "空投" {
+			t.Fatalf("result = %+v, want poll question keyword hit", result)
+		}
+	})
+	t.Run("option", func(t *testing.T) {
+		msg := &tele.Message{
+			Sender: &tele.User{ID: 1},
+			Poll: &tele.Poll{
+				Question: "晚饭吃什么",
+				Options:  []tele.PollOption{{Text: "米饭"}, {Text: "加微信领红包"}},
+			},
+		}
+		result := checkMessage(context.Background(), msg, keywordFilterPolicy("加微信"), false)
+		if !result.Hit || result.Reason != "filter_keyword" || result.MatchedRule != "加微信" {
+			t.Fatalf("result = %+v, want poll option keyword hit", result)
+		}
+	})
+}
+
+func TestCheckMessageContactNameOrPhoneKeywordHit(t *testing.T) {
+	t.Run("name", func(t *testing.T) {
+		msg := &tele.Message{
+			Sender: &tele.User{ID: 1},
+			Contact: &tele.Contact{
+				FirstName:   "Crypto",
+				LastName:    "Seller",
+				PhoneNumber: "+8610000000000",
+				UserID:      4242,
+			},
+		}
+		result := checkMessage(context.Background(), msg, keywordFilterPolicy("Seller"), false)
+		if !result.Hit || result.Reason != "filter_keyword" || result.MatchedRule != "Seller" {
+			t.Fatalf("result = %+v, want contact name keyword hit", result)
+		}
+	})
+	t.Run("phone", func(t *testing.T) {
+		msg := &tele.Message{
+			Sender: &tele.User{ID: 1},
+			Contact: &tele.Contact{
+				FirstName:   "Alice",
+				PhoneNumber: "+8615736504420",
+				UserID:      4242,
+			},
+		}
+		result := checkMessage(context.Background(), msg, keywordFilterPolicy("15736504420"), false)
+		if !result.Hit || result.Reason != "filter_keyword" || result.MatchedRule != "15736504420" {
+			t.Fatalf("result = %+v, want contact phone keyword hit", result)
+		}
+	})
+}
+
+func TestCheckMessageVenueTitleKeywordHit(t *testing.T) {
+	msg := &tele.Message{
+		Sender: &tele.User{ID: 1},
+		Venue: &tele.Venue{
+			Title:    "博彩体验馆",
+			Address:  "Example Street 1",
+			Location: tele.Location{Lat: 31.23, Lng: 121.47},
+		},
+	}
+	result := checkMessage(context.Background(), msg, keywordFilterPolicy("博彩"), false)
+	if !result.Hit || result.Reason != "filter_keyword" || result.MatchedRule != "博彩" {
+		t.Fatalf("result = %+v, want venue title keyword hit", result)
+	}
+}
+
+func TestCheckMessageInvoiceOrDocumentKeywordHit(t *testing.T) {
+	t.Run("invoice description", func(t *testing.T) {
+		msg := &tele.Message{
+			Sender: &tele.User{ID: 1},
+			Invoice: &tele.Invoice{
+				Title:       "会员开通",
+				Description: "代刷单服务费",
+			},
+		}
+		result := checkMessage(context.Background(), msg, keywordFilterPolicy("代刷单"), false)
+		if !result.Hit || result.Reason != "filter_keyword" || result.MatchedRule != "代刷单" {
+			t.Fatalf("result = %+v, want invoice description keyword hit", result)
+		}
+	})
+	t.Run("document filename", func(t *testing.T) {
+		msg := &tele.Message{
+			Sender:   &tele.User{ID: 1},
+			Document: &tele.Document{FileName: "casino-invite.pdf"},
+		}
+		result := checkMessage(context.Background(), msg, keywordFilterPolicy("casino"), false)
+		if !result.Hit || result.Reason != "filter_keyword" || result.MatchedRule != "casino" {
+			t.Fatalf("result = %+v, want document filename keyword hit", result)
+		}
+	})
+}
+
+func TestCheckMessageContactDoesNotHitAIReviewTags(t *testing.T) {
+	msg := &tele.Message{
+		Sender: &tele.User{ID: 1},
+		Contact: &tele.Contact{
+			FirstName:   "Alice",
+			LastName:    "Lee",
+			PhoneNumber: "+8610000000000",
+			UserID:      987654321,
+		},
+	}
+	for _, keyword := range []string{"[联系人]", "telegram_user="} {
+		result := checkMessage(context.Background(), msg, keywordFilterPolicy(keyword), false)
+		if result.Hit {
+			t.Fatalf("keyword %q hit %+v; filter must not ingest AI tags or telegram identity", keyword, result)
+		}
+	}
+}
+
 func TestNormalizeBioAICategory(t *testing.T) {
 	tests := []struct {
 		name     string

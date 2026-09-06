@@ -21,6 +21,12 @@ import { Select } from "@/components/ui/select";
 import { Button } from "@/components/ui/button";
 import { apiFetch } from "@/lib/api";
 import {
+  GLOBAL_CONFIG_CONFLICT_MESSAGE,
+  fetchGlobalConfig,
+  isGlobalConfigConflict,
+  saveGlobalConfigDocument,
+} from "@/lib/global-config";
+import {
   cleanStaleAIModelRefs,
   getPathValue,
   hasPath,
@@ -47,15 +53,17 @@ export default function GlobalConfigPage() {
   const [activeTab, setActiveTab] = useState("verify");
   const [draft, setDraft] = useState<Record<string, unknown>>({});
   const [initial, setInitial] = useState<Record<string, unknown>>({});
+  const [version, setVersion] = useState<number | null>(null);
   const [saving, setSaving] = useState(false);
   const [llmModelOptions, setLLMModelOptions] = useState<LLMModelOption[]>([]);
   const [llmOptionsError, setLLMOptionsError] = useState<string | null>(null);
 
   useEffect(() => {
-    apiFetch<{ config: Record<string, unknown> }>("/api/admin/global-config")
+    fetchGlobalConfig()
       .then((p) => {
         setDraft(p.config ?? {});
         setInitial(p.config ?? {});
+        setVersion(typeof p.version === "number" ? p.version : null);
       })
       .catch((e) =>
         pushToast(e instanceof Error ? e.message : "加载失败", "error"),
@@ -106,21 +114,27 @@ export default function GlobalConfigPage() {
   );
 
   async function save() {
+    if (version == null) {
+      pushToast("缺少配置版本，请刷新后再保存", "error");
+      return;
+    }
     setSaving(true);
     try {
       const nextDraft = cleanStaleAIModelRefs(draft, llmModelOptions);
-      const p = await apiFetch<{ config: Record<string, unknown> }>(
-        "/api/admin/global-config",
-        {
-          method: "PUT",
-          body: JSON.stringify(nextDraft),
-        },
-      );
+      const p = await saveGlobalConfigDocument(version, nextDraft);
       setDraft(p.config ?? {});
       setInitial(p.config ?? {});
+      setVersion(typeof p.version === "number" ? p.version : version);
       pushToast("已保存", "success");
     } catch (e) {
-      pushToast(e instanceof Error ? e.message : "保存失败", "error");
+      pushToast(
+        isGlobalConfigConflict(e)
+          ? GLOBAL_CONFIG_CONFLICT_MESSAGE
+          : e instanceof Error
+            ? e.message
+            : "保存失败",
+        "error",
+      );
     } finally {
       setSaving(false);
     }

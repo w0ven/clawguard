@@ -58,7 +58,7 @@ type telegramMiniAppUser struct {
 }
 
 func (s *Server) registerAuthRoutes() {
-	s.echo.GET("/api/auth/telegram-login", s.handleTelegramLogin)
+	s.echo.GET("/api/auth/telegram-login", s.handleTelegramLogin, s.apiRateLimit(s.ipRateLimitKey("auth:telegram_login_ip"), telegramLoginIPLimit, apiRateLimitWindow), s.apiRateLimit(s.telegramLoginUserRateLimitKey, telegramLoginUserLimit, apiRateLimitWindow))
 	s.echo.POST("/api/auth/telegram-login", s.handleTelegramLogin, s.apiRateLimit(s.ipRateLimitKey("auth:telegram_login_ip"), telegramLoginIPLimit, apiRateLimitWindow), s.apiRateLimit(s.telegramLoginUserRateLimitKey, telegramLoginUserLimit, apiRateLimitWindow))
 	s.echo.POST("/api/auth/miniapp", s.handleTelegramMiniApp, s.apiRateLimit(s.ipRateLimitKey("auth:miniapp_ip"), telegramLoginIPLimit, apiRateLimitWindow))
 	s.echo.POST("/api/auth/logout", s.handleLogout, s.apiRateLimit(s.ipRateLimitKey("auth:logout_ip"), logoutIPLimit, apiRateLimitWindow))

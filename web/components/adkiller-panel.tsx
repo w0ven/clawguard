@@ -8,6 +8,12 @@ import { Textarea } from "@/components/ui/textarea";
 import { Switch } from "@/components/ui/switch";
 import { Select } from "@/components/ui/select";
 import { apiFetch } from "@/lib/api";
+import {
+  GLOBAL_CONFIG_CONFLICT_MESSAGE,
+  fetchGlobalConfig,
+  isGlobalConfigConflict,
+  saveGlobalConfigSection,
+} from "@/lib/global-config";
 import { useToast } from "@/components/providers";
 import type { Group } from "@/lib/types";
 
@@ -103,7 +109,7 @@ export function AdKillerPanel({ pushToast }: { pushToast?: ToastFn }) {
         apiFetch<{ api_key_set?: boolean; api_key_hint?: string }>(
           "/api/admin/adkiller",
         ),
-        apiFetch<{ config: Record<string, unknown> }>("/api/admin/global-config"),
+        fetchGlobalConfig(),
         apiFetch<{ groups?: Group[] }>("/api/admin/groups"),
       ]);
       setKeySet(Boolean(secret.api_key_set));
@@ -171,34 +177,28 @@ export function AdKillerPanel({ pushToast }: { pushToast?: ToastFn }) {
   async function saveSettings() {
     setSaving(true);
     try {
-      const current = await apiFetch<{ config: Record<string, unknown> }>(
-        "/api/admin/global-config",
-      );
-      const currentConfig = asRecord(current.config);
-      const currentAI = asRecord(currentConfig.ai);
-      const payload = await apiFetch<{ config: Record<string, unknown> }>(
-        "/api/admin/global-config",
-        {
-          method: "PUT",
-          body: JSON.stringify({
-            ...currentConfig,
-            ai: {
-              ...currentAI,
-              adkiller: {
-                enabled: config.enabled,
-                timeout_ms: config.timeout_ms,
-                on_failure: config.on_failure,
-                enabled_chat_ids: config.enabled_chat_ids,
-                score_bands: config.score_bands,
-              },
-            },
-          }),
+      const payload = await saveGlobalConfigSection("adkiller", {
+        ai: {
+          adkiller: {
+            enabled: config.enabled,
+            timeout_ms: config.timeout_ms,
+            on_failure: config.on_failure,
+            enabled_chat_ids: config.enabled_chat_ids,
+            score_bands: config.score_bands,
+          },
         },
-      );
+      });
       setConfig(parseConfig(asRecord(asRecord(payload.config).ai).adkiller));
       notify("AdKiller 设置已保存", "success");
     } catch (error) {
-      notify(error instanceof Error ? error.message : "保存 AdKiller 失败", "error");
+      notify(
+        isGlobalConfigConflict(error)
+          ? GLOBAL_CONFIG_CONFLICT_MESSAGE
+          : error instanceof Error
+            ? error.message
+            : "保存 AdKiller 失败",
+        "error",
+      );
     } finally {
       setSaving(false);
     }

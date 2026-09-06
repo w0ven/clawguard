@@ -14,6 +14,12 @@ import { Button } from "@/components/ui/button";
 import { Select } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { apiFetch } from "@/lib/api";
+import {
+  GLOBAL_CONFIG_CONFLICT_MESSAGE,
+  fetchGlobalConfig,
+  isGlobalConfigConflict,
+  saveGlobalConfigSection,
+} from "@/lib/global-config";
 import { useToast } from "@/components/providers";
 import { Copy, Eye, Play, Save } from "lucide-react";
 
@@ -45,7 +51,6 @@ function normalizeRuleValue(value: unknown): string {
 
 export default function PromptEditorPage() {
   const { pushToast } = useToast();
-  const [configState, setConfigState] = useState<Record<string, unknown>>({});
   const [messageRules, setMessageRules] = useState("");
   const [bioRules, setBioRules] = useState("");
   const [originalMessage, setOriginalMessage] = useState("");
@@ -70,9 +75,7 @@ export default function PromptEditorPage() {
   useEffect(() => {
     let active = true;
     Promise.all([
-      apiFetch<{ config: Record<string, unknown> & { ai?: AIConfigShape } }>(
-        "/api/admin/global-config",
-      ),
+      fetchGlobalConfig(),
       apiFetch<ProviderPayload>("/api/admin/ai-providers"),
     ])
       .then(([configPayload, providerPayload]) => {
@@ -86,7 +89,6 @@ export default function PromptEditorPage() {
         const nextMessage = normalizeRuleValue(aiConfig.message_rules) || fallbackRules;
         const nextBio = normalizeRuleValue(aiConfig.bio_rules) || fallbackRules;
 
-        setConfigState(nextConfig);
         setMessageRules(nextMessage);
         setBioRules(nextBio);
         setOriginalMessage(nextMessage);
@@ -139,39 +141,11 @@ export default function PromptEditorPage() {
   async function saveRules(target: "message" | "bio") {
     setSavingTarget(target);
     try {
-      const currentAI =
-        (configState.ai as Record<string, unknown> | undefined) ?? {};
-      const nextAI: Record<string, unknown> = { ...currentAI };
-      if (target === "message") {
-        nextAI.message_rules = messageRules;
-      } else {
-        nextAI.bio_rules = bioRules;
-      }
-      // 一旦两个新字段都已落库（含本次写入），就把旧 custom_rules 清空，完成持久迁移。
-      // 之前只保存了一边时，custom_rules 仍作为另一边的兜底回填来源，不能动。
-      const willHaveMessage =
-        typeof nextAI.message_rules === "string"
-          ? (nextAI.message_rules as string).length > 0
-          : false;
-      const willHaveBio =
-        typeof nextAI.bio_rules === "string"
-          ? (nextAI.bio_rules as string).length > 0
-          : false;
-      if (willHaveMessage && willHaveBio) {
-        nextAI.custom_rules = "";
-      }
-
-      const response = await apiFetch<{ config: Record<string, unknown> }>(
-        "/api/admin/global-config",
-        {
-          method: "PUT",
-          body: JSON.stringify({
-            ...configState,
-            ai: nextAI,
-          }),
-        },
-      );
-      setConfigState(response.config ?? {});
+      const nextAI: Record<string, unknown> =
+        target === "message"
+          ? { message_rules: messageRules }
+          : { bio_rules: bioRules };
+      await saveGlobalConfigSection("prompt", { ai: nextAI });
       if (target === "message") {
         setOriginalMessage(messageRules);
       } else {
@@ -180,7 +154,11 @@ export default function PromptEditorPage() {
       pushToast("规则已保存", "success");
     } catch (error) {
       pushToast(
-        error instanceof Error ? error.message : "保存规则失败",
+        isGlobalConfigConflict(error)
+          ? GLOBAL_CONFIG_CONFLICT_MESSAGE
+          : error instanceof Error
+            ? error.message
+            : "保存规则失败",
         "error",
       );
     } finally {

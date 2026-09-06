@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { Shield } from "lucide-react";
 import { apiFetch } from "@/lib/api";
 
-const botUsername = process.env.NEXT_PUBLIC_BOT_USERNAME ?? "rfcguard_bot";
+const botUsername = process.env.NEXT_PUBLIC_BOT_USERNAME ?? "your_bot";
 
 export default function HomePage() {
   const router = useRouter();

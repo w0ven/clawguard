@@ -20,6 +20,22 @@ import (
 // a slow Redis cannot block the moderation path after a failed send.
 const keywordReplyCooldownReleaseTimeout = 3 * time.Second
 
+// maybeKeywordReply is a side effect only. Match, cooldown, Redis errors,
+// and send failures must never abort the rest of moderation.
+func (s *Service) maybeKeywordReply(ctx context.Context, msg *tele.Message, policy config.GuardPolicy) {
+	if _, err := s.tryKeywordReply(ctx, msg, policy); err != nil {
+		chatID := int64(0)
+		msgID := 0
+		if msg != nil {
+			msgID = msg.ID
+			if msg.Chat != nil {
+				chatID = msg.Chat.ID
+			}
+		}
+		s.logger.Warn("keyword reply failed, continue moderation", zap.Error(err), zap.Int64("chat_id", chatID), zap.Int("message_id", msgID))
+	}
+}
+
 func (s *Service) tryKeywordReply(ctx context.Context, msg *tele.Message, policy config.GuardPolicy) (matched bool, err error) {
 	if msg == nil || msg.Chat == nil || msg.Sender == nil {
 		return false, nil
@@ -81,10 +97,10 @@ func (s *Service) tryKeywordReply(ctx context.Context, msg *tele.Message, policy
 			ok, redisErr := s.redis.SetNX(ctx, cdKey, "1", time.Duration(rule.CooldownSeconds)*time.Second).Result()
 			if redisErr != nil {
 				s.logger.Warn("keyword reply cooldown unavailable, suppress reply fail-closed", zap.Error(redisErr), zap.Int64("chat_id", msg.Chat.ID), zap.String("rule_id", ruleID))
-				return true, nil
+				return false, nil
 			}
 			if !ok {
-				return true, nil
+				return false, nil
 			}
 			releaseCooldown = func() {
 				// ctx may already be cancelled by the caller's moderation timeout,

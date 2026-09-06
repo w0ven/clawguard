@@ -145,14 +145,20 @@ func meaningfulVideoCaption(text string) string {
 	}
 }
 
-func shouldRunVideoModeration(content reviewableContent, policy config.AIPolicy) bool {
+func shouldRunVideoModeration(msg *tele.Message, policy config.AIPolicy) bool {
 	if !policy.VideoModerationEnabled {
 		return false
 	}
-	switch content.Kind {
-	case "video", "animation":
+	if msg == nil {
+		return false
+	}
+	// Identify the current message's own media only. mergeReviewableContent can
+	// copy reply/external VideoMeta onto photo/document captions while Kind stays
+	// media_caption, so merged content.VideoMeta must not drive frame extract.
+	switch {
+	case msg.Video != nil, msg.Animation != nil:
 		return true
-	case "video_note":
+	case msg.VideoNote != nil:
 		return policy.IncludeVideoNote
 	default:
 		return false
@@ -237,13 +243,7 @@ func (s *Service) handleIncomingMessageWithOptions(c tele.Context, isEdited bool
 		return nil
 	}
 
-	matchedReply, err := s.tryKeywordReply(ctx, msg, policy)
-	if err != nil {
-		return err
-	}
-	if matchedReply {
-		return nil
-	}
+	s.maybeKeywordReply(ctx, msg, policy)
 
 	content := s.buildReviewableContent(ctx, msg)
 	if content.Skip {
@@ -455,7 +455,7 @@ func (s *Service) applyAIModeration(ctx context.Context, msg *tele.Message, poli
 		}
 	}
 
-	if shouldRunVideoModeration(content, policy.AI) {
+	if shouldRunVideoModeration(msg, policy.AI) {
 		vCtx, vCancel := context.WithTimeout(ctx, 30*time.Second)
 		res, err := s.fetchVideoFrames(vCtx, msg, content.VideoMeta, policy.AI)
 		vCancel()
@@ -739,7 +739,7 @@ func (s *Service) checkNewUserFilter(ctx context.Context, msg *tele.Message, tru
 			Reason:         "filter_newuser_no_media",
 			MatchedRule:    kind,
 			Action:         "delete",
-			ContinueReview: kind == "contact",
+			ContinueReview: shouldContinueReviewAfterNewUserMediaDelete(kind),
 		}, nil
 	}
 	if countRate && policy.MaxMessagesPerMinute > 0 {
@@ -859,10 +859,10 @@ func messageMediaKind(msg *tele.Message) string {
 		return "poll"
 	case msg.Dice != nil:
 		return "dice"
-	case msg.Location != nil:
-		return "location"
 	case msg.Venue != nil:
 		return "venue"
+	case msg.Location != nil:
+		return "location"
 	case msg.Game != nil:
 		return "game"
 	case msg.Invoice != nil:
@@ -2084,10 +2084,10 @@ func extractReviewableContent(msg *tele.Message) reviewableContent {
 		return reviewableContent{Text: prefix + pollReviewText(msg.Poll), Kind: "poll", ViaBotHint: viaBotHint}
 	case msg.Dice != nil:
 		return reviewableContent{Text: prefix + diceReviewText(msg.Dice), Kind: "dice", ViaBotHint: viaBotHint}
-	case msg.Location != nil:
-		return reviewableContent{Text: prefix + locationReviewText(msg.Location), Kind: "location", ViaBotHint: viaBotHint}
 	case msg.Venue != nil:
 		return reviewableContent{Text: prefix + venueReviewText(msg.Venue), Kind: "venue", ViaBotHint: viaBotHint}
+	case msg.Location != nil:
+		return reviewableContent{Text: prefix + locationReviewText(msg.Location), Kind: "location", ViaBotHint: viaBotHint}
 	case msg.Game != nil:
 		return reviewableContent{Text: prefix + gameReviewText(msg.Game), Kind: "game", ViaBotHint: viaBotHint}
 	case msg.Invoice != nil:

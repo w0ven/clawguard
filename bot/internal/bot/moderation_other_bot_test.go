@@ -52,7 +52,7 @@ func (db *otherBotMockDB) Query(_ context.Context, query string, args ...any) (p
 func (db *otherBotMockDB) QueryRow(_ context.Context, query string, args ...any) pgx.Row {
 	switch {
 	case strings.Contains(query, "FROM global_config"):
-		return mockScanRow(int32(1), []byte(`{}`), db.now)
+		return mockScanRow(int32(1), []byte(`{}`), db.now, int64(1))
 	case strings.Contains(query, "FROM groups"):
 		raw, _ := json.Marshal(db.policy)
 		return mockScanRow(int64(1), args[0].(int64), "group", "supergroup", int32(0), true, db.now, raw)

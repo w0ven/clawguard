@@ -71,6 +71,7 @@ type GlobalConfig struct {
 	ID        int32
 	Config    []byte
 	UpdatedAt time.Time
+	Version   int64
 }
 
 type SystemState struct {
