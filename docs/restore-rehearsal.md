@@ -1,11 +1,11 @@
 # 数据库备份恢复演练
 
-生产目录 `/root/clawguard` 可定期运行恢复演练，确认最近 PostgreSQL 备份能恢复到临时库并完成基础校验。
+在放置 Compose 与 `.env` 的目录定期跑恢复演练，确认最近 PostgreSQL 备份能恢复到临时库并完成基础校验。
 
 脚本默认从生产备份目录 `/var/backups/clawguard` 查找最新的 `.sql`、`.sql.gz`、`.dump`、`.dump.gz` 文件；也可以显式指定备份路径。
 
 ```bash
-cd /root/clawguard
+cd /path/to/clawguard
 bash scripts/restore-rehearsal.sh
 
 # 或指定备份文件

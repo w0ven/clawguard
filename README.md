@@ -1,258 +1,147 @@
-# ClawGuard
+# 🛡️ ClawGuard
 
-ClawGuard 是一套面向 Telegram 群组的群管理系统，包含入群验证、入群洪泛防护、规则过滤、CAS 联动、AI 内容审核、用户信任状态机、定时消息和 Web 管理后台。
+[![Go](https://img.shields.io/badge/Go-1.26-00ADD8.svg)](https://go.dev)
+[![Next.js](https://img.shields.io/badge/Next.js-16-black.svg)](https://nextjs.org)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-336791.svg)](https://www.postgresql.org)
+[![Redis](https://img.shields.io/badge/Redis-7-DC382D.svg)](https://redis.io)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](./LICENSE)
+[![CI](https://github.com/w0ven/clawguard/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/w0ven/clawguard/actions/workflows/docker-publish.yml)
+[![GitHub Stars](https://img.shields.io/github/stars/w0ven/clawguard.svg?style=social&label=Star)](https://github.com/w0ven/clawguard/stargazers)
 
-> [English documentation](./en_README.md)
+[English](./en_README.md) · [系统设计](./docs/DESIGN.md) · [本地开发](./docs/development.md) · [安全披露](./SECURITY.md)
 
-## 当前状态
+> 面向 Telegram 群组的治理系统：入群验证、洪泛防护、规则过滤、CAS、AI 审核、信任状态机、定时消息，以及 Web / Mini App 管理后台。策略在面板里配，运行状态可回看、可回滚。
 
-当前实现对应 goose migration `00031`。
+---
 
-| 项目 | 当前状态 |
-|---|---|
-| 数据库 Schema | goose migration `00031` |
-| 生产拓扑 | 单 bot 实例 + 单 web 实例 + PostgreSQL 16 + Redis 7 AOF + Caddy 2 |
-| 发布方式 | GitHub Actions 测试并构建 bot/web 镜像，生产机使用 Docker Compose 原位升级 |
-| 后端 CI | 单测、vet、race、govulncheck、真实 PostgreSQL migration smoke |
-| 前端 CI | TypeScript、Next.js 生产构建、npm audit、Playwright 桌面/移动端 |
-| 入群洪泛防护 | 默认开启，Redis 原子状态机，数据库任务租约，Redis 清理兜底 |
-| AI 审核 | 能力完整，默认策略关闭，需要配置 Provider/Model 后按群启用 |
+## 📜 目录
 
-当前部署按**单 bot 实例**设计。入群防护状态已放入 Redis，但定时消息、日报等任务尚未全部实现分布式 leader election，因此不要直接把 bot 扩成多个副本。
+- [✨ 核心特性](#-核心特性)
+- [🧭 架构概览](#-架构概览)
+- [🚀 快速开始](#-快速开始)
+- [📖 使用指南](#-使用指南)
+- [🖥️ Web 与 Mini App](#️-web-与-mini-app)
+- [🔐 入群验证](#-入群验证)
+- [🚨 入群洪泛防护](#-入群洪泛防护)
+- [🛡️ 规则过滤与反垃圾](#️-规则过滤与反垃圾)
+- [🧠 AI 审核与信任](#-ai-审核与信任)
+- [🔧 配置说明](#-配置说明)
+- [🚢 发布与升级](#-发布与升级)
+- [📂 项目结构](#-项目结构)
+- [🤝 贡献](#-贡献)
+- [📄 许可证](#-许可证)
+- [🙏 致谢](#-致谢)
 
-## 核心功能
+---
 
-### 入群验证
+## ✨ 核心特性
 
-- 支持按钮、算术题、图片算术题、Emoji 四选一和 Cloudflare Turnstile。
-- 可按群配置超时时间、失败动作、进群服务消息删除和欢迎语。
-- 入群前可执行 CAS 查询和 Bio 关键词/AI 检查；图片算术题失败或超时会删除原图，避免旧题看起来仍有效。
-- Bio 在 AdKiller 开启时先走广告预筛，命中后再按分段动作处理，未命中才交给关键词或 LLM。
-- 验证任务写入 PostgreSQL，使用 `next_attempt_at`、租约、重试次数和错误信息可靠处理。
-- 服务重启后会继续处理未完成的验证和清理任务。
-- 未授权群会被自动拒绝，群授权由 owner 在 Web 后台维护。
+| 特性 | 描述 |
+| :--- | :--- |
+| 🔐 **入群验证** | 按钮、算术题、图片算术题、Emoji 四选一、Cloudflare Turnstile；任务带租约，重启后续跑。 |
+| 🚨 **洪泛防护** | 短窗口集中涌入时临时处理新账号，不波及群内老成员；Redis Lua 原子状态机。 |
+| 🧹 **规则过滤** | 关键词、正则、用户名黑名单、链接白名单、未毕业加严、速率限制、警告升级。 |
+| 🤖 **CAS 联动** | 同步 Combot Anti-Spam 黑名单，入群命中可直接封禁。 |
+| 🧠 **AI 审核** | 文本、图片、视频抽帧、名片/投票/地点等结构化内容；多 Provider 与 fallback。 |
+| 🪪 **信任状态机** | `new → trusted / suspicious / banned`，毕业靠干净消息累计，不靠「挂几天」。 |
+| 📱 **Web + Mini App** | 完整管理后台；Telegram 内也能管群、复核 AI、改 Prompt。 |
+| ⏰ **定时消息** | 每群最多 20 条，支持间隔或每日多个北京时间，带运行历史。 |
+| 💾 **可回滚发布** | Compose 固定 `sha-<commit>` 镜像，升级失败自动回到旧版本。 |
 
-### 入群洪泛防护
+---
 
-该功能只处理短时间集中涌入的新账号，不会对群内老成员做批量动作。
-
-默认参数：
-
-| 参数 | 默认值 | 含义 |
-|---|---:|---|
-| `join_threshold` | 20 人 | 统计窗口内达到此人数进入防护 |
-| `join_window_seconds` | 60 秒 | 入群统计窗口 |
-| `protection_duration_seconds` | 900 秒 | 防护持续 15 分钟 |
-| `temporary_ban_seconds` | 3600 秒 | 新账号临时封禁 60 分钟 |
-| `admin_notify_interval_seconds` | 300 秒 | 管理员汇总提醒限频 |
-| `max_pending_verifications` | 30 人 | 待验证任务接近上限时提前防护 |
-| `telegram_failure_cooldown_seconds` | 300 秒 | Telegram 清理失败后的基础冷却 |
-
-运行机制：
-
-1. 正常入群继续执行原有验证。
-2. 入群人数或待验证任务达到阈值后，进入临时防护。
-3. 防护期间不生成验证题、不调用 CAS/Bio/AI，也不逐人刷提示。
-4. 后续集中涌入的新账号被临时处理，防护到期后自动恢复正常验证。
-
-状态和故障处理：
-
-- Redis Lua 脚本原子完成窗口清理、计数、触发、拦截统计和提醒限频。
-- Redis 保存防护结束时间、触发原因、拦截人数、最近提醒和 Telegram 故障熔断状态。
-- Redis 暂时不可用时退化为单进程内存保护；数据库计数失败时按达到上限处理。
-- Telegram 动作失败时先尝试受限兜底，再写 PostgreSQL 清理任务；数据库也失败时写 Redis 持久清理队列。
-- 清理 Worker 每 15 秒处理恢复通知、数据库租约任务和 Redis 兜底任务。
-- Web 状态卡显示当前状态、触发原因、结束时间、拦截人数、待验证数、清理冷却和延迟任务数。
-
-首次入群账号不会被提前判为 trusted。后台只对数据库中已有本群毕业记录的返群用户保留免误伤保护。
-
-### 规则过滤与反垃圾
-
-- 关键词过滤，支持区分大小写和多种处置动作。
-- 正则规则、用户名黑名单、链接白名单和管理员豁免。
-- 未毕业用户可限制链接、转发、媒体、邀请成员和每分钟消息数。
-- 非文字消息可关闭、删除、删除并警告或交给 AI。
-- CAS 黑名单同步和入群检查。
-- 消息速率限制和警告累计/衰减/升级。
-- 其他 bot 可配置为审核、移出、封禁或忽略，并支持 username 白名单。
-- 可识别 sender chat、via bot、编辑消息、跨聊天引用和 t.me 链接预览。
-- 关键词自动回复支持模糊、精确、正则、冷却、管理员跳过和自动删除。
-
-### AI 审核与信任状态
-
-- 支持 OpenAI Chat Completions、OpenAI Responses 和 Anthropic Messages 兼容 Provider。
-- Provider、Model、API Key、能力标签、优先级和探活设置可在 Web 后台维护。
-- 支持主模型、fallback 链、模型健康探测、自动降级、缓存、合批和每用户调用上限。
-- 支持文本、图片、视频抽帧、VideoNote、贴纸、动图、语音/音频占位、文件、联系人、投票、位置、地点、游戏、Invoice、Story 和 Giveaway 等内容。
-- 支持消息前 Bio 审核，避免用户入群后修改简介绕过检查。
-- AdKiller 文本广告预筛可按群启用；`score_bands` 必须完整覆盖 0-100 且无重叠，保存不完整分段会被拒绝。
-- AI 判决和动作按场景、类别、置信度阈值记录，可在 Web 后台人工复核。
-
-用户状态：
-
-```text
-new -> suspicious -> trusted
-  \         |          |
-   +-------> banned <---+
-
-new(长期无发言) -> archived
-```
-
-- `new` 和 `suspicious` 必须累计 `graduate_after_messages` 条 AI 审核通过的干净消息才会毕业，默认 5 条。
-- `graduate_after_days` 仅保留旧配置兼容，不参与毕业判定。
-- 已毕业真人不会因后续普通内容审核被自动降回 `suspicious`，但关键词、链接等内容过滤仍正常执行。
-- 明确的封禁动作仍可把任何违规用户写为 `banned`。
-- 僵尸归档只处理长期无发言、`messages_checked=0` 的 `new` 用户，不会删除 trusted 毕业用户。
-
-### 动作反馈与定时消息
-
-- 删除、禁言、踢出、封禁、警告、验证结果、CAS 命中、信任毕业和管理员动作均可配置反馈模板。
-- 模板支持用户/管理员 mention、原因、时长等变量，支持 MarkdownV2、HTML 和自动删除。
-- 每群最多 20 条定时消息，支持每 N 分钟或每日多个北京时间。
-- 定时消息支持变量、链接按钮、自动删除、立即试发和最近 50 条运行历史。
-- 同一条定时消息有进程内重入锁，上一条仍等待自动删除时可跳过后续发送。
-
-### Web 管理后台
-
-后台包含以下页面：
-
-- 总览：系统健康、群数、活跃验证、今日违规和系统状态。
-- 群管理：基础、验证、入群防护、过滤、关键词回复、警告、反垃圾、AI、动作反馈、日志、审计和定时消息。
-- 全局配置：全局默认策略，群配置在此基础上覆盖。
-- 群授权：控制 bot 可以服务的群。
-- 违规与警告：筛选、清除警告、封禁和解封。
-- AI 复核、AI 调用统计、信任系统、Prompt 编辑器和模型管理。
-- 审计日志：配置变更、AI 自动动作、管理员命令、警告升级和其他 bot 事件。
-- 管理员：owner/admin 角色和群范围权限。
-- 系统开关：暂停 AI、暂停 Telegram 动作或冻结系统。
-
-## Telegram 命令
-
-群内管理员命令：
-
-| 命令 | 用途 |
-|---|---|
-| `/start`, `/help` | 机器人介绍和命令列表 |
-| `/status` | 本群今日统计 |
-| `/trust` | 回复消息或 `@用户` 查询信任状态 |
-| `/warn` | 警告用户并进入累计升级流程 |
-| `/unban` | 解封用户并清理本地封禁状态 |
-| `/spam` | 回复、`@用户` 或 user ID 快捷封禁 |
-| `/cas` | 查询 CAS 状态 |
-| `/warn_status` | 查看警告记录 |
-| `/config` | 获取一次性管理后台登录链接 |
-
-私聊管理员可使用 `/start`、`/help`、`/status`、`/trust <user_id>` 和 `/config`。
-
-## Telegram Mini App
-
-Bot 私聊底部的“管理面板”按钮会打开 `/miniapp`。Mini App 使用 Telegram `initData` 在服务端完成 HMAC-SHA-256 校验，只允许 `admins` 表中的管理员登录，并复用原有 JWT、CSRF、权限范围和审计体系。
-
-Mini App 覆盖完整后台功能：总览、群管理、群授权、违规、AI 复核、AI 统计、信任系统、Prompt、模型管理、审计和管理员管理。界面自动适配 Telegram 明暗主题、安全区、返回按钮与触觉反馈；手机端使用底部高频导航和“全部功能”菜单，桌面 Web 后台保持原布局。
-
-上线前需要在 BotFather 中为 Bot 配置 Mini App/Web App 允许域名，域名必须与 `PUBLIC_BASE_URL` 一致并使用 HTTPS。Bot 每次启动注册 webhook 时会同步默认 Mini App 菜单按钮。
-
-## 技术架构
+## 🧭 架构概览
 
 ```text
 Telegram / Browser
-        |
-Cloudflare Tunnel
-        |
-Caddy :80
-  |             |
-  |             +--> Next.js 16 Web :3000
-  |
-  +--> Go Bot + Echo API :8080
-             |          |
-       PostgreSQL 16   Redis 7 AOF
+        │
+HTTPS 入口（Cloudflare Tunnel 或自有反代）
+        │
+     Caddy :80
+        │
+        ├── Next.js 16 Web :3000
+        └── Go Bot + Echo API :8080
+                    │
+            PostgreSQL 16   Redis 7 AOF
 ```
 
-| 层 | 技术 |
-|---|---|
-| Bot/API | Go 1.26.6、telebot.v3、Echo v4 |
-| Web | Node.js 22、Next.js 16 App Router、React 19、Tailwind CSS |
-| 数据 | PostgreSQL 16、pgx/v5、sqlc、goose migration |
-| 状态/限流 | Redis 7，AOF `everysec` |
-| 媒体 | ffmpeg、DejaVu 字体、Go 图片渲染 |
-| 入口 | Caddy 2、Cloudflare Tunnel |
-| 部署 | Docker Compose、Docker Hub、GitHub Actions |
-
-## 项目结构
+审核流水线（简化）：
 
 ```text
-clawguard/
-├── .github/workflows/          # CI 和 Docker 镜像发布
-├── bot/
-│   ├── cmd/clawguard/          # Bot/API 主进程
-│   ├── cmd/migrate/            # goose 迁移入口
-│   ├── internal/ai/            # Provider、Model、调用与加密
-│   ├── internal/api/           # REST API、认证、限流和 CSRF
-│   ├── internal/bot/           # Telegram 处理、验证、过滤和审核
-│   ├── internal/scheduler/     # 群定时消息
-│   ├── internal/store/         # sqlc 数据访问层
-│   ├── internal/worker/        # 后台 Worker
-│   └── migrations/             # 数据库迁移，当前到 00031
-├── web/
-│   ├── app/                    # Next.js 页面和 Route Handler
-│   ├── components/             # 管理后台组件
-│   └── lib/                    # API client、类型和工具
-├── scripts/
-│   ├── prod-smoke.sh           # 生产升级后检查
-│   └── restore-rehearsal.sh    # 备份恢复演练
-├── docs/
-│   ├── DESIGN.md               # 详细设计
-│   └── restore-rehearsal.md    # 恢复演练说明
-├── Caddyfile
-├── docker-compose.yml
-└── .env.example
+入站消息
+  ├─ 硬过滤（关键词 / 正则 / 用户名 / 链接）
+  ├─ 未毕业限制（链接 / 转发 / 媒体 / 速率）
+  ├─ 关键词自动回复（不短路后续审核）
+  ├─ AdKiller 广告预筛
+  └─ AI（文本 / 图片 / 视频抽帧）
 ```
 
-## 配置模型
+> [!NOTE]
+> 当前按 **单 bot 实例** 设计。入群防护状态在 Redis 里，但定时消息和日报还没有分布式选主，不要把 bot 扩成多副本。
 
-最终策略按以下顺序合并，后者覆盖前者：
+---
 
-```text
-代码内置默认值 -> global_config -> group.config
-```
+## 🚀 快速开始
 
-配置写入前会使用和运行时相同的合并、默认值和校验逻辑。群配置可以只保存差异字段；敏感的全局配置更新会拒绝疑似截断的文档。
-
-## 快速开始
+> [!TIP]
+> 推荐用已发布的 Docker 镜像。当前生产镜像标签：`sha-92b751a`。
 
 ### 前置条件
 
-- Linux 主机
-- Docker Engine 和 Docker Compose v2
-- Telegram Bot Token
-- 一个 HTTPS 公网域名或 Cloudflare Tunnel
+- Linux 主机，Docker Engine + Compose v2
+- Telegram Bot Token（[@BotFather](https://t.me/BotFather)）
+- HTTPS 公网域名，或 Cloudflare Tunnel
+- 你自己的 Telegram 数字 ID（填进 `SUPER_ADMIN_IDS`）
 
-### 1. 配置环境
+### 1. 克隆并生成密钥
 
 ```bash
+git clone https://github.com/w0ven/clawguard.git
+cd clawguard
 cp .env.example .env
 openssl rand -hex 32
 ```
 
-至少填写：
+把命令输出分别填进 `WEBHOOK_SECRET`、`POSTGRES_PASSWORD`、`REDIS_PASSWORD`、`JWT_SECRET`、`ENCRYPTION_KEY`。每个值都要独立生成。
+
+### 2. 填写启动项
+
+至少改这些：
 
 ```env
-BOT_TOKEN=...
-BOT_USERNAME=...
-TELEGRAM_LOGIN_BOT_USERNAME=...
-WEBHOOK_SECRET=...
-SUPER_ADMIN_IDS=...
+BOT_TOKEN=123456:ABC...
+BOT_USERNAME=your_bot
+TELEGRAM_LOGIN_BOT_USERNAME=your_bot
+WEBHOOK_SECRET=...          # openssl rand -hex 32
+SUPER_ADMIN_IDS=123456789
 POSTGRES_PASSWORD=...
 REDIS_PASSWORD=...
 JWT_SECRET=...
+ENCRYPTION_KEY=...          # 生产必须稳定，丢了就解不开已存的 LLM Key
 PUBLIC_BASE_URL=https://your-domain.example
+CLAWGUARD_TAG=sha-92b751a
 ```
 
-如果在 Web 后台保存 LLM Provider API Key，生产环境必须设置稳定的 `ENCRYPTION_KEY`。留空会在每次启动生成临时密钥，重启后无法解密之前保存的 Key。
+完整模板见 [`.env.example`](./.env.example)。
 
-### 2. 启动
+| 分组 | 变量 | 说明 |
+| :--- | :--- | :--- |
+| Telegram | `BOT_TOKEN`, `BOT_USERNAME`, `TELEGRAM_LOGIN_BOT_USERNAME` | Bot 与 Web 登录身份 |
+| Webhook | `WEBHOOK_SECRET`, `PUBLIC_BASE_URL`, `WEB_BASE_URL` | webhook 校验和公网地址 |
+| Admin | `SUPER_ADMIN_IDS`, `ADMIN_TELEGRAM_IDS` | 初始 owner / admin |
+| PostgreSQL | `POSTGRES_*` | 数据库 |
+| Redis | `REDIS_*` | 状态、限流、入群防护 |
+| Auth | `JWT_SECRET`, `ENCRYPTION_KEY` | 登录 JWT 与 Provider Key 加密 |
+| Turnstile | `TURNSTILE_SITE_KEY`, `TURNSTILE_SECRET_KEY` | 入群验证码（可选） |
+| Runtime | `CLAWGUARD_TAG` | 固定镜像版本，生产不要用漂浮的 `latest` |
+| Web build | `NEXT_PUBLIC_BOT_USERNAME`, `NEXT_PUBLIC_TURNSTILE_SITE_KEY` | **构建时**写入前端 bundle |
 
-当前 Compose 使用已发布镜像：
+> [!IMPORTANT]
+> `ENCRYPTION_KEY` 必须随数据库一起备份。更换后，面板里已保存的 LLM API Key 全部失效。
+>
+> `NEXT_PUBLIC_*` 写在 GitHub Repository Variables 里，只改生产机 `.env` 不会改变已经构建好的前端。
+
+### 3. 启动
 
 ```bash
 docker compose pull
@@ -261,111 +150,26 @@ docker compose ps
 curl -fsS http://127.0.0.1:8080/readyz
 ```
 
-bot 启动时自动执行 goose migration、注册 Telegram webhook、加载模型注册表和后台任务。`readyz` 只有在 PostgreSQL 与 Redis 都可用时才返回 ready。
-
-### 3. 授权群
-
-1. 把 bot 加入群并授予删除消息、限制/封禁成员和邀请成员等必要权限。
-2. 使用 owner 登录 Web 后台。
-3. 在“群授权”中添加 chat ID。
-4. 进入“群管理”按群调整策略。
-
-## 环境变量
-
-完整模板见 [`.env.example`](./.env.example)。
-
-| 分组 | 变量 | 说明 |
-|---|---|---|
-| Telegram | `BOT_TOKEN`, `BOT_USERNAME`, `TELEGRAM_LOGIN_BOT_USERNAME` | Bot 和 Web 登录身份 |
-| Webhook | `WEBHOOK_SECRET`, `PUBLIC_BASE_URL`, `WEB_BASE_URL` | webhook 校验和公网地址 |
-| Admin | `SUPER_ADMIN_IDS`, `ADMIN_TELEGRAM_IDS` | 初始 owner/admin Telegram ID |
-| PostgreSQL | `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD` | 数据库连接 |
-| Redis | `REDIS_HOST`, `REDIS_PORT`, `REDIS_PASSWORD` | 状态、限流、缓存、任务兜底和 AOF |
-| Auth | `JWT_SECRET`, `ENCRYPTION_KEY` | 登录 JWT 与 Provider Key 加密 |
-| Turnstile | `TURNSTILE_SITE_KEY`, `TURNSTILE_SECRET_KEY` | 新人入群验证验证码 |
-| LLM bootstrap | `LLM_PROVIDERS` 及 Provider Key env | 旧环境配置迁移和初始 Provider |
-| Runtime | `APP_ENV`, `HTTP_PORT`, `DAILY_REPORT_ENABLED`, `CLAWGUARD_LOG_RAW_UPDATES`, `CLAWGUARD_TAG` | 运行模式、端口、日报、诊断日志和固定镜像版本 |
-| Retention | `RETENTION_VIOLATIONS_DAYS`, `RETENTION_AI_DECISIONS_DAYS`, `RETENTION_CONFIG_AUDIT_DAYS`, `RETENTION_PROFILE_CHECK_LOGS_DAYS`, `RETENTION_ZOMBIE_DAYS`, `RETENTION_BANNED_DAYS` | 各类数据独立保留周期 |
-| Backup | `BACKUP_DIR`, `BACKUP_RETENTION_DAYS`, `BACKUP_OFFSITE_DIR` | 本机备份目录、保留天数和可选异地目录 |
-| Web build | `NEXT_PUBLIC_BOT_USERNAME`, `NEXT_PUBLIC_TURNSTILE_SITE_KEY` | GitHub Actions 构建时写入浏览器 bundle |
-
-`NEXT_PUBLIC_*` 必须配置在 GitHub Repository Variables；只修改生产机 `.env` 不会改变已构建的前端 bundle。
-
-## 后台任务
-
-| 任务 | 频率/触发 | 职责 |
-|---|---|---|
-| VerificationExpiry | 轮询 | 领取到期验证任务并执行失败动作 |
-| JoinProtectionRecovery | 每 15 秒 | 防护恢复通知、数据库清理任务和 Redis 兜底队列 |
-| Healthcheck | 每 5 分钟 | AI 连续失败、清理积压、死信、备份和 Worker 心跳告警 |
-| LLMProber | 配置频率 | 模型探活、健康状态和 owner 告警 |
-| LLMStatsAggregator | 定时 | 聚合 AI 调用统计 |
-| DailyReport | 每日 | 向 owner 发送运营报告 |
-| RetentionCleanup | 启动时及每日 03:00 | 清理事件、归档僵尸用户、清理旧 banned 记录 |
-| ProfileCheckLogsRetention | 启动时及每日 03:00 | 清理 Bio 检查日志 |
-| ScheduledMessages | cron | 发送群定时消息并保存运行历史 |
-
-## 安全设计
-
-| 方面 | 当前实现 |
-|---|---|
-| Webhook | URL secret 与 `X-Telegram-Bot-Api-Secret-Token` 双校验 |
-| Web 登录 | Telegram Login 或一次性 magic link，仅数据库管理员可登录 |
-| Session | 24 小时 HS256 JWT，`Secure`、`HttpOnly`、`SameSite=Strict` Cookie |
-| CSRF | Cookie 会话的写请求必须携带双提交 `X-CSRF-Token` |
-| 权限 | owner/admin 角色，admin 可限制群范围，SQL 查询下推 scope |
-| API 限流 | 登录、登出、Turnstile 和管理写接口使用 Redis 限流 |
-| Telegram 限流 | 全局和单群发送限流，429 按 RetryAfter 重试 |
-| LLM Key | 使用 `ENCRYPTION_KEY` 加密后存入 PostgreSQL |
-| SQL | sqlc/pgx 参数化查询 |
-| HTTP | 服务端 timeout、Caddy 安全响应头、仅回环端口暴露给 Tunnel |
-| 日志 | 错误经过 redact 包处理，原始 Telegram update 默认关闭 |
-
-生产模式会拒绝短于 32 字符的 `JWT_SECRET`、`WEBHOOK_SECRET`、`ENCRYPTION_KEY`，也会拒绝占位符和非 HTTPS 的 `PUBLIC_BASE_URL`。Webhook 注册日志只记录公开地址，不记录 secret path。
-
-## 发布与升级
-
-### CI/CD
-
-Pull Request 会执行 bot 单测/vet/race 和 web 类型检查/生产构建。合并到 `main` 后，GitHub Actions 构建：
+Compose 会拉：
 
 ```text
-kelework/clawguard-bot:latest
-kelework/clawguard-bot:sha-<commit>
-kelework/clawguard-web:latest
-kelework/clawguard-web:sha-<commit>
+kelework/clawguard-bot:sha-92b751a
+kelework/clawguard-web:sha-92b751a
 ```
 
-镜像带 `org.opencontainers.image.revision` label，可在生产机核对实际 commit。
+bot 启动时自动跑 goose migration、注册 webhook、拉起后台任务。`/readyz` 只有 PostgreSQL 和 Redis 都可用才返回 ready。
 
-### 生产原位升级
+服务默认只绑回环：
 
-使用固定提交标签执行升级。脚本会先创建数据库备份和旧镜像回滚标签，再依次升级 Bot/Web、核对健康状态和 OCI revision；任何一步失败都会恢复旧镜像：
+| 端口 | 用途 |
+| :--- | :--- |
+| `127.0.0.1:8090` | Caddy 对外入口（Tunnel / 反代指这里） |
+| `127.0.0.1:8080` | Bot API / webhook / health |
+| `127.0.0.1:3000` | Web 后台 |
 
-```bash
-cd /root/clawguard
-bash scripts/deploy-production.sh sha-<commit>
-```
+### 4. 把 HTTPS 指过来
 
-密钥疑似进入日志时，可用 `ROTATE_WEBHOOK_SECRET=1 bash scripts/deploy-production.sh sha-<commit>` 在可回滚事务中轮换 Webhook secret。
-
-只更新文档不需要重启生产服务。
-
-### 升级后检查
-
-```bash
-cd /root/clawguard
-bash scripts/prod-smoke.sh \
-  --since 5m \
-  --url https://your-domain.example \
-  --compose docker-compose.yml
-```
-
-脚本检查 Compose 服务、bot 错误日志、webhook 注册、公开入口安全响应头、镜像 revision 和 digest，不会主动向 Telegram 发消息。
-
-### Cloudflare Tunnel
-
-Tunnel 应指向宿主机回环 HTTP 入口：
+Cloudflare Tunnel 示例：
 
 ```yaml
 ingress:
@@ -374,61 +178,226 @@ ingress:
   - service: http_status:404
 ```
 
-### 生产备份与恢复演练
+域名必须和 `PUBLIC_BASE_URL` 一致，且是 HTTPS。
 
-安装每日 02:20 备份定时器：
+### 5. 授权第一个群
 
-```bash
-install -m 0644 deploy/systemd/clawguard-backup.service /etc/systemd/system/
-install -m 0644 deploy/systemd/clawguard-backup.timer /etc/systemd/system/
-systemctl daemon-reload
-systemctl enable --now clawguard-backup.timer
-systemctl start clawguard-backup.service
+1. 把 bot 拉进群，设为管理员，至少给 **删除消息、限制成员、封禁成员**。
+2. 用 owner 账号打开 `https://your-domain.example`，走 Telegram Login；或私聊 bot 发 `/config`。
+3. 「群授权」里填 chat ID。
+4. 「群管理」里按群打开验证、过滤、AI。
+
+> [!IMPORTANT]
+> 未授权的群会被自动拒绝。AI 审核默认关着，配好 Provider / Model 后再按群启用。
+
+Fork 或离线构建见 [本地开发](./docs/development.md)。
+
+---
+
+## 📖 使用指南
+
+### 🔑 准备 Bot
+
+1. [@BotFather](https://t.me/BotFather) → `/newbot` 拿到 Token 和用户名。
+2. `/setprivacy` 设为 **Disable**，否则 bot 看不到普通群消息。
+3. `/setjoingroups` 保持允许。
+4. Mini App：把 Web App 域名配成与 `PUBLIC_BASE_URL` 相同的 HTTPS 主机。
+5. 自己的数字 ID 可用 [@userinfobot](https://t.me/userinfobot) 查询，写入 `SUPER_ADMIN_IDS`。
+
+### ⌨️ 群内管理员命令
+
+| 命令 | 说明 |
+| :--- | :--- |
+| `/start` `/help` | 介绍和命令列表 |
+| `/status` | 本群今日统计 |
+| `/trust` | 回复消息或 `@用户` 查看信任状态 |
+| `/warn` | 警告并进入累计升级 |
+| `/unban` | 解封并清理本地封禁 |
+| `/spam` | 回复 / `@用户` / user ID 快捷封禁 |
+| `/cas` | 查询 CAS |
+| `/warn_status` | 警告记录 |
+| `/config` | 一次性管理后台登录链接 |
+
+私聊管理员可用 `/start`、`/help`、`/status`、`/trust <user_id>`、`/config`。
+
+---
+
+## 🖥️ Web 与 Mini App
+
+后台覆盖：总览、群管理、全局策略、群授权、违规、AI 复核、AI 统计、信任、Prompt、模型、审计、管理员、系统开关。
+
+群配置页包括：基础、验证、入群防护、过滤、关键词回复、警告、反垃圾、AI、动作反馈、日志、审计、定时消息。
+
+**Mini App**：私聊底部「管理面板」打开 `/miniapp`。服务端校验 Telegram `initData`，只允许 `admins` 表里的人登录，复用 JWT / CSRF / 群范围权限。
+
+- 手机：底部高频导航 +「全部功能」
+- 桌面 Web：原布局
+- 跟随 Telegram 明暗主题和安全区
+
+分段保存 Prompt / AdKiller / 全局策略；整份保存带 `version` 乐观锁，两个页面不会互相覆盖。
+
+---
+
+## 🔐 入群验证
+
+新成员先被限制权限，完成挑战后再恢复。验证任务写 PostgreSQL，带到期时间、租约和重试。
+
+| 方式 | 说明 |
+| :--- | :--- |
+| 按钮 | 点按确认 |
+| 算术题 | 文本口算 |
+| 图片算术题 | 渲染题目图；失败或超时会删原图 |
+| Emoji 四选一 | 选对指定表情 |
+| Turnstile | Cloudflare 人机验证 |
+
+可选：入群前跑 CAS、Bio 关键词 / AI。AdKiller 开启时，简介先广告预筛，命中再按分段动作处理。
+
+---
+
+## 🚨 入群洪泛防护
+
+只处理短时间涌进来的**新账号**，不会对老成员做批量动作。
+
+| 参数 | 默认 | 含义 |
+| :--- | ---: | :--- |
+| `join_threshold` | 20 | 窗口内达到此人数进入防护 |
+| `join_window_seconds` | 60 | 统计窗口（秒） |
+| `protection_duration_seconds` | 900 | 防护持续 15 分钟 |
+| `temporary_ban_seconds` | 3600 | 新账号临时封禁 60 分钟 |
+| `max_pending_verifications` | 30 | 待验证接近上限时提前防护 |
+
+防护期间不发验证题、不打 CAS / Bio / AI、不逐人刷提示。到期自动恢复。状态在 Redis，重启可续。
+
+---
+
+## 🛡️ 规则过滤与反垃圾
+
+- 关键词 / 正则，可配多种动作
+- 未毕业用户：限制链接、转发、媒体、邀请、每分钟条数
+- 结构化文本也会进关键词：联系人、投票、地点卡片、发票、文件名
+- 其他 bot 可审核、移出、封禁或忽略
+- 识别 sender chat、via bot、编辑消息、跨聊天引用、t.me 预览
+- 关键词自动回复支持模糊 / 精确 / 正则；**命中回复不会跳过审核**
+
+---
+
+## 🧠 AI 审核与信任
+
+支持 OpenAI Chat Completions、OpenAI Responses、Anthropic Messages 兼容网关。Provider、模型、Key、能力标签、优先级、探活在后台维护。
+
+```text
+new ──干净消息累计──► trusted
+ │                      │
+ └──► suspicious ◄──────┘   明确封禁 → banned
+          │
+   长期无发言的 new → archived
 ```
 
-备份使用 PostgreSQL custom archive、SHA-256 校验和、原子落盘与 14 天默认保留；配置 `BACKUP_OFFSITE_DIR` 后会额外复制到异地挂载目录。成功时间写入 Redis，并显示在后台运行状态卡。
+- 毕业看 `graduate_after_messages`（默认 5 条 AI 通过的干净消息）
+- 已毕业真人不会被普通内容审核自动打回 `suspicious`
+- 关键词 / 链接等硬规则对谁都有效
+- 视频按真实媒体抽帧，caption 不改变是否抽帧
 
-恢复演练脚本默认从 `/var/backups/clawguard` 选择最新备份并恢复到临时 PostgreSQL 容器，不会触碰生产数据库：
+---
 
-```bash
-cd /root/clawguard
-bash scripts/restore-rehearsal.sh
+## 🔧 配置说明
 
-# 或指定文件
-BACKUP_PATH=/path/to/clawguard.sql.gz bash scripts/restore-rehearsal.sh
+最终策略：
+
+```text
+代码内置默认值  →  global_config  →  group.config
 ```
 
-`restore-rehearsal.sh` 只验证备份，不触碰生产数据库。真正的异机/对象存储副本仍需将 `BACKUP_OFFSITE_DIR` 指向外部挂载。
+群配置只存差异。`null` / 缺省表示继承全局。
 
-## 测试现状与边界
+生产模式会拒绝：
 
-2026-07-16 本地基线：
+- 短于 32 字符的 `JWT_SECRET` / `WEBHOOK_SECRET` / `ENCRYPTION_KEY`
+- 占位符密钥
+- 非 HTTPS 的 `PUBLIC_BASE_URL`
 
-- Go 代码有 57 个 `_test.go` 文件，总 statement coverage 约 30.3%。
-- 核心包覆盖率：bot 38.9%、AI 49.4%、config 56.7%、API 13.9%、scheduler 22.4%、worker 6.2%。
-- Web 已有 Playwright 桌面和移动端入口测试，仍需继续覆盖登录后的配置保存与运营操作。
-- CI 发布 `sha-<commit>` 镜像；生产 Compose 使用 `CLAWGUARD_TAG` 固定版本并由升级脚本核对 revision。
-- 当前不支持无脑横向扩容 bot，多实例前需要为 scheduler、日报和其他周期任务增加 leader election 或分布式锁。
-- 仓库提供生产备份 timer 和恢复演练；真正的异机副本需要配置外部挂载。
+Webhook 地址是 `PUBLIC_BASE_URL/webhook/<WEBHOOK_SECRET>`，日志里不会打印 secret path。
 
-## 近期版本变化
+---
 
-- 新增入群洪泛防护配置页、运行状态卡、模拟触发和管理员汇总通知。
-- 入群防护状态迁移到 Redis 原子状态机，支持跨重启恢复和多实例共享计数。
-- Telegram 清理失败加入指数冷却、PostgreSQL 租约任务和 Redis 持久兜底队列。
-- 防护激活后跳过重复数据库 COUNT，待验证查询增加复合索引。
-- 修复延迟清理动作语义、重新入群代际校验和已离群用户误处理。
-- 已毕业真人不会被普通内容审核自动降回 suspicious；内容过滤仍照常执行。
-- 加强全局配置截断保护、Telegram 动作暂停复核和关键 moderator 查询错误处理。
-- 入群防护界面改为“达到阈值 -> 临时处理新账号 -> 自动恢复”的简明流程。
-- 修复 Webhook secret 日志泄漏和数据保留周期混用，升级 Go/pgx/Next/PostCSS 安全版本。
-- 新增固定版本自动回滚发布、生产备份 timer、浏览器测试和运行状态/告警指标。
+## 🚢 发布与升级
 
-## 进一步设计
+合并到 `main` 后，GitHub Actions 构建：
 
-- [系统设计](./docs/DESIGN.md)
-- [数据库备份恢复演练](./docs/restore-rehearsal.md)
+```text
+kelework/clawguard-bot:latest
+kelework/clawguard-bot:sha-<commit>
+kelework/clawguard-web:latest
+kelework/clawguard-web:sha-<commit>
+```
 
-## License
+生产请钉死 `CLAWGUARD_TAG=sha-<commit>`。镜像带 `org.opencontainers.image.revision`，可在主机上核对 commit。
 
-[MIT](./LICENSE)
+```bash
+# 在放置 Compose 的目录
+git pull
+bash scripts/deploy-production.sh sha-<commit>
+```
+
+脚本会备份数据库、记下旧镜像、升级 bot/web、核对健康和 OCI revision；失败则回到旧镜像。
+
+升级后检查：
+
+```bash
+bash scripts/prod-smoke.sh \
+  --since 5m \
+  --url https://your-domain.example \
+  --compose docker-compose.yml
+```
+
+备份与恢复演练见 [docs/restore-rehearsal.md](./docs/restore-rehearsal.md)。
+
+---
+
+## 📂 项目结构
+
+```text
+clawguard/
+├── bot/                       # Go Bot + 管理 API
+│   ├── cmd/clawguard/
+│   ├── cmd/migrate/
+│   ├── internal/{ai,api,bot,scheduler,store,worker}
+│   └── migrations/            # goose，当前到 00031
+├── web/                       # Next.js 16 管理后台
+├── scripts/                   # 升级、备份、smoke
+├── docs/
+│   ├── DESIGN.md
+│   ├── development.md
+│   └── restore-rehearsal.md
+├── docker-compose.yml
+├── Caddyfile
+└── .env.example
+```
+
+---
+
+## 🤝 贡献
+
+欢迎 Issue 和 Pull Request。开发、测试、PR 约定见 [CONTRIBUTING.md](./CONTRIBUTING.md) 和 [docs/development.md](./docs/development.md)。
+
+安全问题请按 [SECURITY.md](./SECURITY.md) 私下报告，不要开公开 Issue。
+
+---
+
+## 📄 许可证
+
+[MIT](./LICENSE) © 2026 w0ven
+
+---
+
+## 🙏 致谢
+
+- [telebot](https://github.com/tucnak/telebot) — Telegram Bot API
+- [Echo](https://echo.labstack.com/) — Go HTTP
+- [Next.js](https://nextjs.org/) — 管理后台
+- [sqlc](https://sqlc.dev/) / [goose](https://github.com/pressly/goose) — 数据访问与迁移
+- [Combot CAS](https://combot.org/cas) — 公开反垃圾名单
+
+---
+
+如果这个项目对你有帮助，请给个 Star ⭐️
