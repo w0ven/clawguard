@@ -1,25 +1,14 @@
-<h1 align="center">🛡️ ClawGuard</h1>
+# 🛡️ ClawGuard
 
-<p align="center">
-  <img src="https://img.shields.io/badge/Go-1.26-00ADD8.svg" alt="Go">
-  <img src="https://img.shields.io/badge/Next.js-16-black.svg" alt="Next.js">
-  <img src="https://img.shields.io/badge/PostgreSQL-16-336791.svg" alt="PostgreSQL">
-  <img src="https://img.shields.io/badge/Redis-7-DC382D.svg" alt="Redis">
-  <img src="https://img.shields.io/badge/License-MIT-green.svg" alt="License">
-  <a href="https://github.com/w0ven/clawguard/actions/workflows/docker-publish.yml">
-    <img src="https://github.com/w0ven/clawguard/actions/workflows/docker-publish.yml/badge.svg" alt="CI">
-  </a>
-  <a href="https://github.com/w0ven/clawguard/stargazers">
-    <img src="https://img.shields.io/github/stars/w0ven/clawguard.svg?style=social&label=Star" alt="GitHub Stars">
-  </a>
-</p>
+[![Go](https://img.shields.io/badge/Go-1.26-00ADD8.svg)](https://go.dev)
+[![Next.js](https://img.shields.io/badge/Next.js-16-black.svg)](https://nextjs.org)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-336791.svg)](https://www.postgresql.org)
+[![Redis](https://img.shields.io/badge/Redis-7-DC382D.svg)](https://redis.io)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](./LICENSE)
+[![CI](https://github.com/w0ven/clawguard/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/w0ven/clawguard/actions/workflows/docker-publish.yml)
+[![GitHub Stars](https://img.shields.io/github/stars/w0ven/clawguard.svg?style=social&label=Star)](https://github.com/w0ven/clawguard/stargazers)
 
-<p align="center">
-  <a href="./en_README.md">English</a> ·
-  <a href="./docs/DESIGN.md">系统设计</a> ·
-  <a href="./docs/development.md">本地开发</a> ·
-  <a href="./SECURITY.md">安全披露</a>
-</p>
+[English](./en_README.md) · [系统设计](./docs/DESIGN.md) · [本地开发](./docs/development.md) · [安全披露](./SECURITY.md)
 
 > 面向 Telegram 群组的治理系统：入群验证、洪泛防护、规则过滤、CAS、AI 审核、信任状态机、定时消息，以及 Web / Mini App 管理后台。策略在面板里配，运行状态可回看、可回滚。
 
@@ -133,9 +122,6 @@ PUBLIC_BASE_URL=https://your-domain.example
 CLAWGUARD_TAG=sha-92b751a
 ```
 
-<details>
-<summary>📝 完整变量说明（点击展开）</summary>
-
 完整模板见 [`.env.example`](./.env.example)。
 
 | 分组 | 变量 | 说明 |
@@ -154,8 +140,6 @@ CLAWGUARD_TAG=sha-92b751a
 > `ENCRYPTION_KEY` 必须随数据库一起备份。更换后，面板里已保存的 LLM API Key 全部失效。
 >
 > `NEXT_PUBLIC_*` 写在 GitHub Repository Variables 里，只改生产机 `.env` 不会改变已经构建好的前端。
-
-</details>
 
 ### 3. 启动
 
@@ -416,6 +400,4 @@ clawguard/
 
 ---
 
-<p align="center">
-  如果这个项目对你有帮助，请给个 Star ⭐️
-</p>
+如果这个项目对你有帮助，请给个 Star ⭐️

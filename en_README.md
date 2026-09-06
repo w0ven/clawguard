@@ -1,25 +1,14 @@
-<h1 align="center">🛡️ ClawGuard</h1>
+# 🛡️ ClawGuard
 
-<p align="center">
-  <img src="https://img.shields.io/badge/Go-1.26-00ADD8.svg" alt="Go">
-  <img src="https://img.shields.io/badge/Next.js-16-black.svg" alt="Next.js">
-  <img src="https://img.shields.io/badge/PostgreSQL-16-336791.svg" alt="PostgreSQL">
-  <img src="https://img.shields.io/badge/Redis-7-DC382D.svg" alt="Redis">
-  <img src="https://img.shields.io/badge/License-MIT-green.svg" alt="License">
-  <a href="https://github.com/w0ven/clawguard/actions/workflows/docker-publish.yml">
-    <img src="https://github.com/w0ven/clawguard/actions/workflows/docker-publish.yml/badge.svg" alt="CI">
-  </a>
-  <a href="https://github.com/w0ven/clawguard/stargazers">
-    <img src="https://img.shields.io/github/stars/w0ven/clawguard.svg?style=social&label=Star" alt="GitHub Stars">
-  </a>
-</p>
+[![Go](https://img.shields.io/badge/Go-1.26-00ADD8.svg)](https://go.dev)
+[![Next.js](https://img.shields.io/badge/Next.js-16-black.svg)](https://nextjs.org)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-336791.svg)](https://www.postgresql.org)
+[![Redis](https://img.shields.io/badge/Redis-7-DC382D.svg)](https://redis.io)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](./LICENSE)
+[![CI](https://github.com/w0ven/clawguard/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/w0ven/clawguard/actions/workflows/docker-publish.yml)
+[![GitHub Stars](https://img.shields.io/github/stars/w0ven/clawguard.svg?style=social&label=Star)](https://github.com/w0ven/clawguard/stargazers)
 
-<p align="center">
-  <a href="./README.md">中文文档</a> ·
-  <a href="./docs/DESIGN.md">Design</a> ·
-  <a href="./docs/development.md">Development</a> ·
-  <a href="./SECURITY.md">Security</a>
-</p>
+[中文文档](./README.md) · [Design](./docs/DESIGN.md) · [Development](./docs/development.md) · [Security](./SECURITY.md)
 
 > Telegram group governance: join verification, flood protection, rule filters, CAS, AI moderation, a trust state machine, scheduled messages, and a Web / Mini App console.
 
@@ -190,6 +179,4 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) and [docs/development.md](./docs/develo
 
 ---
 
-<p align="center">
-  If this helps you, a Star is appreciated ⭐️
-</p>
+If this helps you, a Star is appreciated ⭐️
