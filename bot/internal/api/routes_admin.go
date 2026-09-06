@@ -306,9 +306,7 @@ func (s *Server) handleGetGlobalConfig(c echo.Context) error {
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "load global config failed"})
 	}
-	return c.JSON(http.StatusOK, map[string]any{
-		"config": json.RawMessage(globalConfig.Config),
-	})
+	return c.JSON(http.StatusOK, serializeGlobalConfig(globalConfig))
 }
 
 func (s *Server) handleListAuthorizedGroups(c echo.Context) error {
@@ -332,6 +330,44 @@ func (s *Server) handleCreateAuthorizedGroup(c echo.Context) error {
 	if !adminHasGlobalAccess(admin) {
 		return c.JSON(http.StatusForbidden, map[string]string{"error": "authorized groups out of scope"})
 	}
+	return createAuthorizedGroupFromContext(c, s.botService.Queries(), func(ctx context.Context, created store.AuthorizedGroup) {
+		s.botService.SetAuthorizedGroupCache(ctx, created.ChatID, created.Enabled)
+		if auditErr := s.writeAudit(ctx, admin, "authorized_group", &created.ChatID, "upsert_authorized_group", nil, mustRawJSON(serializeAuthorizedGroup(created))); auditErr != nil {
+			s.logger.Warn("write authorized group audit failed", zap.Error(auditErr))
+		}
+	})
+}
+
+const authorizedGroupAlreadyExistsMessage = "授权群已存在"
+
+var (
+	errAuthorizedGroupAlreadyExists = errors.New(authorizedGroupAlreadyExistsMessage)
+	errLoadAuthorizedGroup          = errors.New("load authorized group failed")
+	errSaveAuthorizedGroup          = errors.New("save authorized group failed")
+)
+
+type authorizedGroupWriter interface {
+	GetAuthorizedGroupByChatID(ctx context.Context, chatID int64) (store.AuthorizedGroup, error)
+	UpsertAuthorizedGroup(ctx context.Context, arg store.UpsertAuthorizedGroupParams) (store.AuthorizedGroup, error)
+}
+
+func createAuthorizedGroupIfAbsent(ctx context.Context, queries authorizedGroupWriter, params store.UpsertAuthorizedGroupParams) (store.AuthorizedGroup, error) {
+	_, err := queries.GetAuthorizedGroupByChatID(ctx, params.ChatID)
+	if err == nil {
+		return store.AuthorizedGroup{}, errAuthorizedGroupAlreadyExists
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return store.AuthorizedGroup{}, fmt.Errorf("%w: %w", errLoadAuthorizedGroup, err)
+	}
+	created, err := queries.UpsertAuthorizedGroup(ctx, params)
+	if err != nil {
+		return store.AuthorizedGroup{}, fmt.Errorf("%w: %w", errSaveAuthorizedGroup, err)
+	}
+	return created, nil
+}
+
+func createAuthorizedGroupFromContext(c echo.Context, queries authorizedGroupWriter, afterCreate func(context.Context, store.AuthorizedGroup)) error {
+	admin, _ := currentAdmin(c)
 	var payload struct {
 		ChatID  int64   `json:"chat_id"`
 		Title   *string `json:"title"`
@@ -345,32 +381,25 @@ func (s *Server) handleCreateAuthorizedGroup(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "chat_id required"})
 	}
 
-	before, err := s.botService.Queries().GetAuthorizedGroupByChatID(c.Request().Context(), payload.ChatID)
-	hadBefore := err == nil
-	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "load authorized group failed"})
-	}
-
-	created, err := s.botService.Queries().UpsertAuthorizedGroup(c.Request().Context(), store.UpsertAuthorizedGroupParams{
+	created, err := createAuthorizedGroupIfAbsent(c.Request().Context(), queries, store.UpsertAuthorizedGroupParams{
 		ChatID:       payload.ChatID,
 		Title:        trimStringPtr(payload.Title),
 		AuthorizedBy: &admin.TelegramID,
 		Enabled:      payload.Enabled,
 		Notes:        trimStringPtr(payload.Notes),
 	})
+	if errors.Is(err, errAuthorizedGroupAlreadyExists) {
+		return c.JSON(http.StatusConflict, map[string]string{"error": authorizedGroupAlreadyExistsMessage})
+	}
+	if errors.Is(err, errLoadAuthorizedGroup) {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "load authorized group failed"})
+	}
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "save authorized group failed"})
 	}
-	s.botService.SetAuthorizedGroupCache(c.Request().Context(), payload.ChatID, created.Enabled)
-
-	beforeRaw := json.RawMessage(nil)
-	if hadBefore {
-		beforeRaw = mustRawJSON(serializeAuthorizedGroup(before))
+	if afterCreate != nil {
+		afterCreate(c.Request().Context(), created)
 	}
-	if auditErr := s.writeAudit(c.Request().Context(), admin, "authorized_group", &payload.ChatID, "upsert_authorized_group", beforeRaw, mustRawJSON(serializeAuthorizedGroup(created))); auditErr != nil {
-		s.logger.Warn("write authorized group audit failed", zap.Error(auditErr))
-	}
-
 	return c.JSON(http.StatusOK, map[string]any{"group": serializeAuthorizedGroup(created)})
 }
 
@@ -529,45 +558,6 @@ func (s *Server) handlePutSystemState(c echo.Context) error {
 		s.logger.Warn("write system state audit failed", zap.Error(auditErr))
 	}
 	return c.JSON(http.StatusOK, map[string]any{"state": serializeSystemState(updated)})
-}
-
-func (s *Server) handlePutGlobalConfig(c echo.Context) error {
-	admin, _ := currentAdmin(c)
-	if !adminHasGlobalAccess(admin) {
-		return c.JSON(http.StatusForbidden, map[string]string{"error": "global config out of scope"})
-	}
-	queries := s.botService.Queries()
-	before, err := queries.GetGlobalConfig(c.Request().Context())
-	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "load global config failed"})
-	}
-
-	nextConfig, err := normalizeJSONBody(c)
-	if err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": redact.ErrorString(err)})
-	}
-	if err := rejectDangerousGlobalConfigTruncation(before.Config, nextConfig); err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": redact.ErrorString(err)})
-	}
-	if err := validateGlobalPolicyUpdate(c.Request().Context(), queries, nextConfig); err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": redact.ErrorString(err)})
-	}
-
-	updated, err := queries.UpsertGlobalConfig(c.Request().Context(), store.UpsertGlobalConfigParams{Config: nextConfig})
-	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "update global config failed"})
-	}
-
-	if err := s.writeAudit(c.Request().Context(), admin, "global", nil, "update_global_config", before.Config, nextConfig); err != nil {
-		s.logger.Warn("write global config audit failed")
-	}
-	if err := s.botService.RefreshAllGuardPolicySnapshots(c.Request().Context()); err != nil {
-		s.logger.Warn("refresh guard policy snapshots after global config update failed", zap.Error(err))
-	}
-
-	return c.JSON(http.StatusOK, map[string]any{
-		"config": json.RawMessage(updated.Config),
-	})
 }
 
 func (s *Server) handleListViolations(c echo.Context) error {

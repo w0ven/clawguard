@@ -26,7 +26,7 @@ func checkMessage(_ context.Context, msg *tele.Message, policy config.FilterConf
 		return FilterResult{}
 	}
 
-	content := collectMessageContent(msg)
+	content := collectFilterableContent(msg)
 	searchContent := strings.ToLower(content)
 	if policy.Keywords.CaseSensitive {
 		searchContent = content
@@ -120,6 +120,73 @@ func collectMessageContent(msg *tele.Message) string {
 	return msg.Caption
 }
 
+// collectFilterableContent gathers user-visible text for keyword/regex
+// filters. It includes structured card fields (poll, contact, venue, etc.)
+// without AI review tags or identity prefixes. Auto-reply matching must
+// keep using collectMessageContent (Text+Caption only).
+func collectFilterableContent(msg *tele.Message) string {
+	if msg == nil {
+		return ""
+	}
+	var parts []string
+	add := func(value string) {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return
+		}
+		parts = append(parts, value)
+	}
+
+	add(msg.Text)
+	add(messageCaption(msg))
+
+	if msg.Contact != nil {
+		add(strings.TrimSpace(msg.Contact.FirstName + " " + msg.Contact.LastName))
+		add(msg.Contact.PhoneNumber)
+	}
+	if msg.Poll != nil {
+		add(msg.Poll.Question)
+		for _, option := range msg.Poll.Options {
+			add(option.Text)
+		}
+		add(msg.Poll.Explanation)
+	}
+	if msg.Venue != nil {
+		add(msg.Venue.Title)
+		add(msg.Venue.Address)
+	}
+	if msg.Invoice != nil {
+		add(msg.Invoice.Title)
+		add(msg.Invoice.Description)
+	}
+	if msg.Game != nil {
+		add(msg.Game.Title)
+		add(msg.Game.Description)
+	}
+	if msg.Document != nil {
+		add(msg.Document.FileName)
+	}
+	if msg.Audio != nil {
+		add(msg.Audio.FileName)
+		add(msg.Audio.Title)
+		add(msg.Audio.Performer)
+	}
+	if msg.Video != nil {
+		add(msg.Video.FileName)
+	}
+	if msg.Animation != nil {
+		add(msg.Animation.FileName)
+	}
+	if msg.Giveaway != nil {
+		add(msg.Giveaway.PrizeDescription)
+	}
+	if msg.GiveawayWinners != nil {
+		add(msg.GiveawayWinners.PrizeDescription)
+	}
+
+	return strings.Join(parts, "\n")
+}
+
 func collectMessageLinks(msg *tele.Message) []string {
 	if msg == nil {
 		return nil
@@ -159,6 +226,9 @@ func collectMessageLinks(msg *tele.Message) []string {
 		add(match)
 	}
 	for _, match := range bareURLPattern.FindAllString(msg.Caption, -1) {
+		add(match)
+	}
+	for _, match := range bareURLPattern.FindAllString(collectFilterableContent(msg), -1) {
 		add(match)
 	}
 

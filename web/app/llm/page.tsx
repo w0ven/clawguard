@@ -18,6 +18,12 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { apiFetch } from "@/lib/api";
+import {
+  GLOBAL_CONFIG_CONFLICT_MESSAGE,
+  fetchGlobalConfig,
+  isGlobalConfigConflict,
+  saveGlobalConfigSection,
+} from "@/lib/global-config";
 import { useToast } from "@/components/providers";
 import { AdKillerPanel } from "@/components/adkiller-panel";
 import {
@@ -182,7 +188,7 @@ export default function LLMAdminPage() {
         apiFetch<{ providers: Provider[] }>("/api/admin/llm/providers"),
         apiFetch<{ models: Model[] }>("/api/admin/llm/models"),
         apiFetch<{ stats: Stats[] }>("/api/admin/llm/stats"),
-        apiFetch<{ config: Record<string, unknown> }>("/api/admin/global-config"),
+        fetchGlobalConfig(),
       ]);
       setProviders(p.providers ?? []);
       setModels(m.models ?? []);
@@ -502,7 +508,7 @@ function ProviderForm({
           <Input
             value={baseURL}
             onChange={(e) => setBaseURL(e.target.value)}
-            placeholder="https://newapi.misaka.si/v1"
+            placeholder="https://llm.example.com/v1"
           />
         </Field>
         <Field label={editing ? "API Key (留空 = 不修改)" : "API Key"}>
@@ -1160,27 +1166,14 @@ function SettingsPanel({
   async function save() {
     setSaving(true);
     try {
-      const current = await apiFetch<{ config: Record<string, unknown> }>(
-        "/api/admin/global-config",
-      );
-      const currentConfig = asRecord(current.config);
-      const currentAI = asRecord(currentConfig.ai);
       const nextInterval = Math.max(30, Number(interval) || 120);
-      const payload = await apiFetch<{ config: Record<string, unknown> }>(
-        "/api/admin/global-config",
-        {
-          method: "PUT",
-          body: JSON.stringify({
-            ...currentConfig,
-            ai: {
-              ...currentAI,
-              probe_enabled: probeEnabled,
-              auto_degrade: autoDegrade,
-              probe_interval_seconds: nextInterval,
-            },
-          }),
+      const payload = await saveGlobalConfigSection("llm", {
+        ai: {
+          probe_enabled: probeEnabled,
+          auto_degrade: autoDegrade,
+          probe_interval_seconds: nextInterval,
         },
-      );
+      });
       const next = asRecord(asRecord(payload.config).ai);
       setProbeEnabled(Boolean(next.probe_enabled ?? false));
       setAutoDegrade(Boolean(next.auto_degrade ?? true));
@@ -1188,7 +1181,14 @@ function SettingsPanel({
       pushToast("探活设置已保存", "success");
       await onChanged();
     } catch (e) {
-      pushToast(e instanceof Error ? e.message : "保存失败", "error");
+      pushToast(
+        isGlobalConfigConflict(e)
+          ? GLOBAL_CONFIG_CONFLICT_MESSAGE
+          : e instanceof Error
+            ? e.message
+            : "保存失败",
+        "error",
+      );
     } finally {
       setSaving(false);
     }

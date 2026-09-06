@@ -76,7 +76,9 @@ func (c llmModelReferenceCleanup) response() map[string]any {
 func cleanupDeletedLLMModelReferences(ctx context.Context, queries *store.Queries, admin store.Admin, target llmModelReferenceTarget) (llmModelReferenceCleanup, error) {
 	var total llmModelReferenceCleanup
 
-	globalConfig, err := queries.GetGlobalConfig(ctx)
+	// The caller must keep this lock in its model-deletion transaction so that
+	// cleanup cannot overwrite a concurrent configuration save with a stale copy.
+	globalConfig, err := queries.GetGlobalConfigForUpdate(ctx)
 	switch {
 	case err == nil:
 		cleaned, refs, changed, err := cleanLLMModelReferencesFromConfig(globalConfig.Config, target)
@@ -84,7 +86,7 @@ func cleanupDeletedLLMModelReferences(ctx context.Context, queries *store.Querie
 			return total, fmt.Errorf("clean global config: %w", err)
 		}
 		if changed {
-			if _, err := queries.UpsertGlobalConfig(ctx, store.UpsertGlobalConfigParams{Config: cleaned}); err != nil {
+			if _, err := queries.UpdateGlobalConfig(ctx, store.UpdateGlobalConfigParams{Config: cleaned}); err != nil {
 				return total, fmt.Errorf("update global config: %w", err)
 			}
 			total.GlobalConfigs++

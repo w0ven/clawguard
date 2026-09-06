@@ -270,10 +270,14 @@ restore_backup() {
         psql -v ON_ERROR_STOP=1 -U "${PGUSER_REHEARSAL}" -d "${DB_NAME}" -f "${RESTORE_MOUNT}"
       ;;
     *.sql.gz)
+      if ! gzip -t "${backup}"; then
+        printf 'ERROR: gzip integrity check failed: %s\n' "${backup}" >&2
+        return 1
+      fi
       docker exec \
         -e PGPASSWORD="${PGPASSWORD_REHEARSAL}" \
         "${CONTAINER_NAME}" \
-        sh -c 'gzip -dc "$1" | psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' \
+        sh -c 'tmp=$(mktemp) || exit 1; gzip -dc "$1" > "$tmp" || { rc=$?; rm -f "$tmp"; exit $rc; }; psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -f "$tmp"; rc=$?; rm -f "$tmp"; exit $rc' \
         sh "${RESTORE_MOUNT}"
       ;;
     *.dump)
@@ -283,10 +287,14 @@ restore_backup() {
         pg_restore --no-owner --no-acl -U "${PGUSER_REHEARSAL}" -d "${DB_NAME}" "${RESTORE_MOUNT}"
       ;;
     *.dump.gz)
+      if ! gzip -t "${backup}"; then
+        printf 'ERROR: gzip integrity check failed: %s\n' "${backup}" >&2
+        return 1
+      fi
       docker exec \
         -e PGPASSWORD="${PGPASSWORD_REHEARSAL}" \
         "${CONTAINER_NAME}" \
-        sh -c 'gzip -dc "$1" | pg_restore --no-owner --no-acl -U "$POSTGRES_USER" -d "$POSTGRES_DB"' \
+        sh -c 'tmp=$(mktemp) || exit 1; gzip -dc "$1" > "$tmp" || { rc=$?; rm -f "$tmp"; exit $rc; }; pg_restore --no-owner --no-acl -U "$POSTGRES_USER" -d "$POSTGRES_DB" "$tmp"; rc=$?; rm -f "$tmp"; exit $rc' \
         sh "${RESTORE_MOUNT}"
       ;;
     *)

@@ -5,7 +5,7 @@ APP_DIR=${APP_DIR:-/root/clawguard}
 COMPOSE_FILE=docker-compose.yml
 SINCE=5m
 WEBHOOK_LOG_WINDOW=24h
-PUBLIC_URL=https://rfcguard.misaka.si
+PUBLIC_URL=https://your-domain.example
 EXPECTED_REVISION=${EXPECTED_REVISION:-}
 SERVICES="bot web postgres redis caddy"
 
@@ -13,7 +13,7 @@ failures=0
 
 usage() {
   cat <<'EOF'
-Usage: scripts/prod-smoke.sh [--since 5m] [--webhook-log-window 24h] [--url https://rfcguard.misaka.si] [--compose docker-compose.yml]
+Usage: scripts/prod-smoke.sh [--since 5m] [--webhook-log-window 24h] [--url https://your-domain.example] [--compose docker-compose.yml]
 
 Runs production smoke checks from /root/clawguard by default. Override the
 directory with APP_DIR=/path/to/clawguard.

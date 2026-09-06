@@ -6,11 +6,11 @@ ClawGuard 是一套面向 Telegram 群组的群管理系统，包含入群验证
 
 ## 当前状态
 
-本文档基线为 **2026-09-05**，以 `main` 分支当前实现为准。
+当前实现对应 goose migration `00031`。
 
 | 项目 | 当前状态 |
 |---|---|
-| 数据库 Schema | goose migration `00030` |
+| 数据库 Schema | goose migration `00031` |
 | 生产拓扑 | 单 bot 实例 + 单 web 实例 + PostgreSQL 16 + Redis 7 AOF + Caddy 2 |
 | 发布方式 | GitHub Actions 测试并构建 bot/web 镜像，生产机使用 Docker Compose 原位升级 |
 | 后端 CI | 单测、vet、race、govulncheck、真实 PostgreSQL migration smoke |
@@ -170,7 +170,7 @@ Caddy :80
 
 | 层 | 技术 |
 |---|---|
-| Bot/API | Go 1.26.5、telebot.v3、Echo v4 |
+| Bot/API | Go 1.26.6、telebot.v3、Echo v4 |
 | Web | Node.js 22、Next.js 16 App Router、React 19、Tailwind CSS |
 | 数据 | PostgreSQL 16、pgx/v5、sqlc、goose migration |
 | 状态/限流 | Redis 7，AOF `everysec` |
@@ -192,7 +192,7 @@ clawguard/
 │   ├── internal/scheduler/     # 群定时消息
 │   ├── internal/store/         # sqlc 数据访问层
 │   ├── internal/worker/        # 后台 Worker
-│   └── migrations/             # 数据库迁移，当前到 00030
+│   └── migrations/             # 数据库迁移，当前到 00031
 ├── web/
 │   ├── app/                    # Next.js 页面和 Route Handler
 │   ├── components/             # 管理后台组件
@@ -431,4 +431,4 @@ BACKUP_PATH=/path/to/clawguard.sql.gz bash scripts/restore-rehearsal.sh
 
 ## License
 
-私有项目，未授权禁止使用。
+[MIT](./LICENSE)

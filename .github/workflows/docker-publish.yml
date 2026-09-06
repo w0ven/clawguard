@@ -78,7 +78,7 @@ jobs:
         working-directory: bot
         env:
           TEST_DATABASE_URL: postgres://clawguard:test-password@127.0.0.1:5432/clawguard_test?sslmode=disable
-        run: go test -tags=integration ./internal/store
+        run: go test -tags=integration -timeout 180s ./internal/store ./internal/api
 
   test-web:
     name: Test web

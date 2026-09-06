@@ -6,11 +6,11 @@ ClawGuard is a Telegram group-management system with join verification, join-flo
 
 ## Current Status
 
-This document reflects the `main` branch as of **2026-09-05**.
+The current schema is goose migration `00031`.
 
 | Area | Status |
 |---|---|
-| Database schema | goose migration `00030` |
+| Database schema | goose migration `00031` |
 | Production topology | One bot, one web service, PostgreSQL 16, Redis 7 AOF, and Caddy 2 |
 | Delivery | GitHub Actions tests and publishes bot/web images; production is upgraded in place with Docker Compose |
 | Backend CI | Unit tests, vet, race, govulncheck, and a real PostgreSQL migration smoke test |
@@ -138,7 +138,7 @@ Caddy :80
 
 | Layer | Technology |
 |---|---|
-| Bot/API | Go 1.26.5, telebot.v3, Echo v4 |
+| Bot/API | Go 1.26.6, telebot.v3, Echo v4 |
 | Web | Node.js 22, Next.js 16 App Router, React 19, Tailwind CSS |
 | Data | PostgreSQL 16, pgx/v5, sqlc, goose |
 | State and rate limits | Redis 7 with AOF `everysec` |
@@ -160,7 +160,7 @@ clawguard/
 │   ├── internal/scheduler/     # Scheduled group messages
 │   ├── internal/store/         # sqlc data layer
 │   ├── internal/worker/        # Background workers
-│   └── migrations/             # Database migrations through 00030
+│   └── migrations/             # Database migrations through 00031
 ├── web/                        # Next.js administration console
 ├── scripts/                    # Production smoke and restore rehearsal
 ├── docs/                       # Design and restore documentation
@@ -349,4 +349,4 @@ Baseline measured on 2026-07-16:
 
 ## License
 
-Private project. Unauthorized use is prohibited.
+[MIT](./LICENSE)
