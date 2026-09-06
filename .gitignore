@@ -12,3 +12,4 @@ caddy_data/
 pgdata/
 backups/
 .codex-write-test
+_audit/

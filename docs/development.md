@@ -80,3 +80,17 @@ docker build \
 goose 文件在 `bot/migrations/`，当前到 `00031`。容器入口会先跑 `migrate` 再启动 bot，一般不必手跑 SQL。
 
 不要依赖 goose `down` 做生产回滚。回滚靠备份 / PITR，见 [restore-rehearsal.md](./restore-rehearsal.md)。
+
+## README 截图
+
+登录页和总览截图在 `docs/screenshots/`。本机 Next 跑在 `127.0.0.1:3100` 时可以重拍：
+
+```bash
+cd web
+npx playwright install chromium
+npm run dev -- --hostname 127.0.0.1 --port 3100
+# 另开一个终端
+node ../scripts/capture-readme-screenshots.mjs
+```
+
+总览走接口 mock，不会碰到生产数据。
