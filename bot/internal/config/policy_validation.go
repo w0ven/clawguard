@@ -241,6 +241,12 @@ func ValidateGuardPolicy(policy GuardPolicy) error {
 	if !IsFilterAction(policy.Filter.Links.Action) {
 		return fmt.Errorf("filter.links.action has unsupported value %q", policy.Filter.Links.Action)
 	}
+	if !IsFilterAction(policy.Filter.Regex.Action) {
+		return fmt.Errorf("filter.regex.action has unsupported value %q", policy.Filter.Regex.Action)
+	}
+	if !IsFilterAction(policy.Filter.Usernames.Action) {
+		return fmt.Errorf("filter.usernames.action has unsupported value %q", policy.Filter.Usernames.Action)
+	}
 	if !oneOf(policy.Filter.NonTextMessages, "off", "delete", "delete_warn", "ai_review") {
 		return fmt.Errorf("filter.non_text_messages has unsupported value %q", policy.Filter.NonTextMessages)
 	}

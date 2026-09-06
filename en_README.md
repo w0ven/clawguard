@@ -89,7 +89,7 @@ BOT_TOKEN=...
 BOT_USERNAME=your_bot
 TELEGRAM_LOGIN_BOT_USERNAME=your_bot
 WEBHOOK_SECRET=...
-SUPER_ADMIN_IDS=123456789
+SUPER_ADMIN_IDS=123456789   # your numeric ID; seeded as owner on first start
 POSTGRES_PASSWORD=...
 REDIS_PASSWORD=...
 JWT_SECRET=...
@@ -120,7 +120,9 @@ Local source builds: [docs/development.md](./docs/development.md). Full variable
 1. Create a bot with [@BotFather](https://t.me/BotFather).
 2. `/setprivacy` → **Disable** so the bot can see group messages.
 3. Set the Mini App domain to the same HTTPS host as `PUBLIC_BASE_URL`.
-4. Put your numeric Telegram ID in `SUPER_ADMIN_IDS`.
+4. Put your numeric Telegram ID in `SUPER_ADMIN_IDS` (seeded as owner).
+   Use `ADMIN_TELEGRAM_IDS` for lower-privileged admins. Both only create missing
+   accounts on first start; existing admins are never demoted or overwritten.
 
 | Command | Purpose |
 | :--- | :--- |

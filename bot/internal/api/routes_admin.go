@@ -963,17 +963,29 @@ func (s *Server) handleListEvents(c echo.Context) error {
 	})
 }
 
+type adminLister interface {
+	ListAdmins(ctx context.Context) ([]store.Admin, error)
+}
+
 func (s *Server) handleListAdmins(c echo.Context) error {
-	items, err := s.botService.Queries().ListAdmins(c.Request().Context())
+	return listAdminsFromContext(c, s.botService.Queries())
+}
+
+// listAdminsFromContext returns the admin roster narrowed to what the requesting
+// admin needs to see. Scope-restricted admins must not be able to enumerate the
+// full roster (Telegram IDs, usernames and notes of admins outside their scope).
+func listAdminsFromContext(c echo.Context, queries adminLister) error {
+	viewer, _ := currentAdmin(c)
+	items, err := queries.ListAdmins(c.Request().Context())
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "list admins failed"})
 	}
-	if items == nil {
-		items = make([]store.Admin, 0)
-	}
 	response := make([]map[string]any, 0, len(items))
 	for _, item := range items {
-		response = append(response, serializeAdmin(item))
+		if !adminVisibleToViewer(viewer, item) {
+			continue
+		}
+		response = append(response, serializeAdminForViewer(viewer, item))
 	}
 	return c.JSON(http.StatusOK, map[string]any{"admins": response})
 }
@@ -2310,6 +2322,71 @@ func adminScopeFilter(admin store.Admin) ([]int64, bool) {
 		return []int64{}, true
 	}
 	return decodeGroupScope(admin.GroupScope), false
+}
+
+// intersectGroupScopes returns the chat IDs present in both scopes, preserving
+// the order of b and dropping duplicates.
+func intersectGroupScopes(a, b []int64) []int64 {
+	allowed := make(map[int64]struct{}, len(a))
+	for _, chatID := range a {
+		allowed[chatID] = struct{}{}
+	}
+	result := make([]int64, 0, len(b))
+	seen := make(map[int64]struct{}, len(b))
+	for _, chatID := range b {
+		if _, ok := allowed[chatID]; !ok {
+			continue
+		}
+		if _, dup := seen[chatID]; dup {
+			continue
+		}
+		seen[chatID] = struct{}{}
+		result = append(result, chatID)
+	}
+	return result
+}
+
+// adminVisibleToViewer decides whether target belongs in viewer's admin roster.
+// It only narrows disclosure; it does not change any authorization decision.
+//
+//   - Global viewers (owner, or an admin whose group_scope is empty, which this
+//     project treats as "no restriction") keep seeing the full roster.
+//   - A scope-restricted admin sees itself, every global admin/owner (they can
+//     act on its groups, so it must know who they are), and every other
+//     restricted admin whose scope overlaps its own.
+//   - Restricted admins with no overlapping group are hidden entirely.
+func adminVisibleToViewer(viewer, target store.Admin) bool {
+	if adminHasGlobalAccess(viewer) {
+		return true
+	}
+	if viewer.ID == target.ID {
+		return true
+	}
+	if adminHasGlobalAccess(target) {
+		return true
+	}
+	viewerScope := decodeGroupScope(viewer.GroupScope)
+	targetScope := decodeGroupScope(target.GroupScope)
+	return len(intersectGroupScopes(viewerScope, targetScope)) > 0
+}
+
+// serializeAdminForViewer renders a visible admin, redacting the fields a
+// scope-restricted viewer has no need for. Global viewers and the viewer's own
+// record keep the unchanged payload.
+func serializeAdminForViewer(viewer, target store.Admin) map[string]any {
+	item := serializeAdmin(target)
+	if adminHasGlobalAccess(viewer) || viewer.ID == target.ID {
+		return item
+	}
+	// notes are free-form operator annotations about another person; a restricted
+	// admin only needs to know who can act on its groups, not why they exist.
+	item["notes"] = nil
+	// Never disclose chat IDs the viewer has no access to. Global targets keep an
+	// empty scope so the UI still renders them as unrestricted.
+	if !adminHasGlobalAccess(target) {
+		item["group_scope"] = intersectGroupScopes(decodeGroupScope(viewer.GroupScope), decodeGroupScope(target.GroupScope))
+	}
+	return item
 }
 
 func filterAuditByScope(admin store.Admin, items []store.ConfigAudit) []store.ConfigAudit {

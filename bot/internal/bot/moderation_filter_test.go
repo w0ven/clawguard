@@ -711,3 +711,255 @@ func TestNormalizeBioAICategory(t *testing.T) {
 		})
 	}
 }
+
+// The regex and username blacklist rules must surface their own configured
+// action instead of leaving FilterResult.Action empty, which made
+// applyFilterAction fall back to the built-in keyword action and silently
+// ignored the administrator's configuration.
+func TestCheckMessageUsesRuleSpecificFilterActions(t *testing.T) {
+	tests := []struct {
+		name       string
+		configure  func(policy *config.FilterConfig)
+		msg        *tele.Message
+		wantReason string
+		wantRule   string
+		wantAction string
+	}{
+		{
+			name: "regex hit uses regex action",
+			configure: func(policy *config.FilterConfig) {
+				policy.Regex.Enabled = true
+				policy.Regex.Patterns = []string{`\d{6,}`}
+				policy.Regex.Action = "delete_ban"
+			},
+			msg: &tele.Message{
+				Text:   "contact 1234567 now",
+				Chat:   &tele.Chat{ID: -100},
+				Sender: &tele.User{ID: 42},
+			},
+			wantReason: "filter_regex",
+			wantRule:   `\d{6,}`,
+			wantAction: "delete_ban",
+		},
+		{
+			name: "username hit uses username action",
+			configure: func(policy *config.FilterConfig) {
+				policy.Usernames.Enabled = true
+				policy.Usernames.Blacklist = []string{"spammer"}
+				policy.Usernames.Action = "delete_mute"
+			},
+			msg: &tele.Message{
+				Text:   "hello",
+				Chat:   &tele.Chat{ID: -100},
+				Sender: &tele.User{ID: 43, Username: "Spammer"},
+			},
+			wantReason: "filter_username",
+			wantRule:   "spammer",
+			wantAction: "delete_mute",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			policy := config.DefaultPolicy.Filter
+			policy.Keywords.Enabled = false
+			policy.Keywords.List = nil
+			policy.Keywords.Action = "delete_ban"
+			policy.Regex.Enabled = false
+			policy.Usernames.Enabled = false
+			tt.configure(&policy)
+
+			result := checkMessage(context.Background(), tt.msg, policy, false)
+			if !result.Hit {
+				t.Fatalf("result.Hit = false, want hit on %s", tt.wantReason)
+			}
+			if result.Reason != tt.wantReason {
+				t.Fatalf("result.Reason = %q, want %q", result.Reason, tt.wantReason)
+			}
+			if result.MatchedRule != tt.wantRule {
+				t.Fatalf("result.MatchedRule = %q, want %q", result.MatchedRule, tt.wantRule)
+			}
+			if result.Action != tt.wantAction {
+				t.Fatalf("result.Action = %q, want %q", result.Action, tt.wantAction)
+			}
+		})
+	}
+}
+
+// Configs written before filter.regex.action / filter.usernames.action existed
+// decode into empty strings. checkMessage must keep propagating the empty
+// action so applyFilterAction applies the historical delete_warn fallback.
+func TestCheckMessageKeepsLegacyFallbackWhenRuleActionUnset(t *testing.T) {
+	tests := []struct {
+		name       string
+		configure  func(policy *config.FilterConfig)
+		msg        *tele.Message
+		wantReason string
+	}{
+		{
+			name: "regex without action",
+			configure: func(policy *config.FilterConfig) {
+				policy.Regex.Enabled = true
+				policy.Regex.Patterns = []string{`\d{6,}`}
+				policy.Regex.Action = ""
+			},
+			msg: &tele.Message{
+				Text:   "contact 1234567 now",
+				Chat:   &tele.Chat{ID: -100},
+				Sender: &tele.User{ID: 44},
+			},
+			wantReason: "filter_regex",
+		},
+		{
+			name: "username without action",
+			configure: func(policy *config.FilterConfig) {
+				policy.Usernames.Enabled = true
+				policy.Usernames.Blacklist = []string{"spammer"}
+				policy.Usernames.Action = ""
+			},
+			msg: &tele.Message{
+				Text:   "hello",
+				Chat:   &tele.Chat{ID: -100},
+				Sender: &tele.User{ID: 45, Username: "spammer"},
+			},
+			wantReason: "filter_username",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			policy := config.DefaultPolicy.Filter
+			policy.Keywords.Enabled = false
+			policy.Keywords.List = nil
+			policy.Regex.Enabled = false
+			policy.Usernames.Enabled = false
+			tt.configure(&policy)
+
+			result := checkMessage(context.Background(), tt.msg, policy, false)
+			if !result.Hit || result.Reason != tt.wantReason {
+				t.Fatalf("result = %+v, want hit on %s", result, tt.wantReason)
+			}
+			if result.Action != "" {
+				t.Fatalf("result.Action = %q, want empty so applyFilterAction keeps the legacy fallback", result.Action)
+			}
+		})
+	}
+}
+
+// End-to-end: a regex hit configured as delete_ban must actually ban, and the
+// violation must be recorded under the regex action rather than the keyword one.
+func TestApplyFilterChecksAppliesRegexActionEndToEnd(t *testing.T) {
+	chatID := int64(-100123)
+	userID := int64(820)
+	db := newModerationProfileMatchMockDB(chatID, userID)
+	db.userTrust.Status = "trusted"
+	botClient, transport := newMockTelegramBot(t, "")
+	svc := &Service{logger: zap.NewNop(), queries: store.New(db), bot: botClient}
+
+	policy := config.DefaultPolicy
+	policy.Filter.Keywords.Enabled = false
+	policy.Filter.Keywords.List = nil
+	policy.Filter.Keywords.Action = "delete"
+	policy.Filter.Regex.Enabled = true
+	policy.Filter.Regex.Patterns = []string{`\d{6,}`}
+	policy.Filter.Regex.Action = "delete_ban"
+	msg := &tele.Message{
+		ID:     9200,
+		Text:   "wire 1234567 to me",
+		Chat:   &tele.Chat{ID: chatID, Type: tele.ChatSuperGroup},
+		Sender: &tele.User{ID: userID, FirstName: "Mallory"},
+	}
+
+	handled, err := svc.applyFilterChecks(context.Background(), msg, policy, false, false, false)
+	if err != nil || !handled {
+		t.Fatalf("handled=%t err=%v; want handled regex hit", handled, err)
+	}
+	if methods := transport.Methods(); !containsString(methods, "kickChatMember") {
+		t.Fatalf("telegram methods = %v, want ban from filter.regex.action=delete_ban", methods)
+	}
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	if len(db.violations) != 1 || db.violations[0].Action != "delete_ban" {
+		t.Fatalf("violations = %+v, want one delete_ban record from the regex action", db.violations)
+	}
+}
+
+// End-to-end: a username blacklist hit configured as delete_ban must ban rather
+// than inherit the keyword action.
+func TestApplyFilterChecksAppliesUsernameActionEndToEnd(t *testing.T) {
+	chatID := int64(-100123)
+	userID := int64(821)
+	db := newModerationProfileMatchMockDB(chatID, userID)
+	db.userTrust.Status = "trusted"
+	botClient, transport := newMockTelegramBot(t, "")
+	svc := &Service{logger: zap.NewNop(), queries: store.New(db), bot: botClient}
+
+	policy := config.DefaultPolicy
+	policy.Filter.Keywords.Enabled = false
+	policy.Filter.Keywords.List = nil
+	policy.Filter.Keywords.Action = "delete"
+	policy.Filter.Usernames.Enabled = true
+	policy.Filter.Usernames.Blacklist = []string{"spammer"}
+	policy.Filter.Usernames.Action = "delete_ban"
+	msg := &tele.Message{
+		ID:     9201,
+		Text:   "hello",
+		Chat:   &tele.Chat{ID: chatID, Type: tele.ChatSuperGroup},
+		Sender: &tele.User{ID: userID, FirstName: "Mallory", Username: "spammer"},
+	}
+
+	handled, err := svc.applyFilterChecks(context.Background(), msg, policy, false, false, false)
+	if err != nil || !handled {
+		t.Fatalf("handled=%t err=%v; want handled username hit", handled, err)
+	}
+	if methods := transport.Methods(); !containsString(methods, "kickChatMember") {
+		t.Fatalf("telegram methods = %v, want ban from filter.usernames.action=delete_ban", methods)
+	}
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	if len(db.violations) != 1 || db.violations[0].Action != "delete_ban" {
+		t.Fatalf("violations = %+v, want one delete_ban record from the username action", db.violations)
+	}
+}
+
+// An empty rule action must still resolve to the historical delete_warn
+// behaviour, so upgrading without touching the config changes nothing.
+func TestApplyFilterActionFallsBackToDeleteWarnWhenRuleActionEmpty(t *testing.T) {
+	chatID := int64(-100123)
+	userID := int64(822)
+	db := newModerationProfileMatchMockDB(chatID, userID)
+	db.userTrust.Status = "trusted"
+	botClient, transport := newMockTelegramBot(t, "")
+	svc := &Service{logger: zap.NewNop(), queries: store.New(db), bot: botClient}
+
+	policy := config.DefaultPolicy
+	policy.Feedback.DeleteMsg.Enabled = false
+	policy.Feedback.Warn.Enabled = false
+	msg := &tele.Message{
+		ID:     9202,
+		Text:   "wire 1234567 to me",
+		Chat:   &tele.Chat{ID: chatID, Type: tele.ChatSuperGroup},
+		Sender: &tele.User{ID: userID, FirstName: "Mallory"},
+	}
+
+	result := FilterResult{Hit: true, Reason: "filter_regex", MatchedRule: `\d{6,}`}
+	if err := svc.applyFilterAction(context.Background(), msg, policy, result); err != nil {
+		t.Fatal(err)
+	}
+
+	methods := transport.Methods()
+	if !containsString(methods, "deleteMessage") {
+		t.Fatalf("telegram methods = %v, want deleteMessage from delete_warn fallback", methods)
+	}
+	if containsString(methods, "kickChatMember") {
+		t.Fatalf("telegram methods = %v, want no ban for the empty-action fallback", methods)
+	}
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	if len(db.violations) != 1 || db.violations[0].Action != "delete_warn" {
+		t.Fatalf("violations = %+v, want one delete_warn fallback record", db.violations)
+	}
+	if len(db.warnings) != 1 {
+		t.Fatalf("warnings = %d, want 1 from the delete_warn fallback", len(db.warnings))
+	}
+}

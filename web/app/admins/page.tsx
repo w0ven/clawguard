@@ -186,7 +186,7 @@ export default function AdminsPage() {
                     Telegram ID
                   </label>
                   <Input
-                    placeholder="例如 6425070392"
+                    placeholder="例如 123456789"
                     value={form.telegram_id}
                     onChange={(e) =>
                       setForm((f) => ({ ...f, telegram_id: e.target.value }))

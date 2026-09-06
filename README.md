@@ -97,7 +97,7 @@ HTTPS 入口（Cloudflare Tunnel 或自有反代）
 - Linux 主机，Docker Engine + Compose v2
 - Telegram Bot Token（[@BotFather](https://t.me/BotFather)）
 - HTTPS 公网域名，或 Cloudflare Tunnel
-- 你自己的 Telegram 数字 ID（填进 `SUPER_ADMIN_IDS`）
+- 你自己的 Telegram 数字 ID（填进 `SUPER_ADMIN_IDS`，否则部署完没人能登录后台）
 
 ### 1. 克隆并生成密钥
 
@@ -119,7 +119,7 @@ BOT_TOKEN=123456:ABC...
 BOT_USERNAME=your_bot
 TELEGRAM_LOGIN_BOT_USERNAME=your_bot
 WEBHOOK_SECRET=...          # openssl rand -hex 32
-SUPER_ADMIN_IDS=123456789
+SUPER_ADMIN_IDS=123456789   # 你的数字 ID，首次启动建成 owner
 POSTGRES_PASSWORD=...
 REDIS_PASSWORD=...
 JWT_SECRET=...
@@ -134,7 +134,7 @@ CLAWGUARD_TAG=sha-92b751a
 | :--- | :--- | :--- |
 | Telegram | `BOT_TOKEN`, `BOT_USERNAME`, `TELEGRAM_LOGIN_BOT_USERNAME` | Bot 与 Web 登录身份 |
 | Webhook | `WEBHOOK_SECRET`, `PUBLIC_BASE_URL`, `WEB_BASE_URL` | webhook 校验和公网地址 |
-| Admin | `SUPER_ADMIN_IDS`, `ADMIN_TELEGRAM_IDS` | 初始 owner / admin |
+| Admin | `SUPER_ADMIN_IDS`, `ADMIN_TELEGRAM_IDS` | 初始 owner / admin；只在该 ID 不存在时建号，不会降级已有管理员 |
 | PostgreSQL | `POSTGRES_*` | 数据库 |
 | Redis | `REDIS_*` | 状态、限流、入群防护 |
 | Auth | `JWT_SECRET`, `ENCRYPTION_KEY` | 登录 JWT 与 Provider Key 加密 |
@@ -208,7 +208,8 @@ Fork 或离线构建见 [本地开发](./docs/development.md)。
 2. `/setprivacy` 设为 **Disable**，否则 bot 看不到普通群消息。
 3. `/setjoingroups` 保持允许。
 4. Mini App：把 Web App 域名配成与 `PUBLIC_BASE_URL` 相同的 HTTPS 主机。
-5. 自己的数字 ID 可用 [@userinfobot](https://t.me/userinfobot) 查询，写入 `SUPER_ADMIN_IDS`。
+5. 自己的数字 ID 可用 [@userinfobot](https://t.me/userinfobot) 查询，写入 `SUPER_ADMIN_IDS`（建成 owner）。
+   其他人员可写入 `ADMIN_TELEGRAM_IDS`（建成权限较低的 admin）；两者都只在首次建号时生效，已存在的管理员不会被降级或覆盖。
 
 ### ⌨️ 群内管理员命令
 
