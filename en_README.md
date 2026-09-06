@@ -12,6 +12,12 @@
 
 > Telegram group governance: join verification, flood protection, rule filters, CAS, AI moderation, a trust state machine, scheduled messages, and a Web / Mini App console.
 
+![Login](docs/screenshots/login.png)
+
+![Dashboard](docs/screenshots/dashboard.png)
+
+The login page is a live capture. The dashboard uses local UI with sample data, not production records.
+
 ---
 
 ## 📜 Contents

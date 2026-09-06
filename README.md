@@ -12,6 +12,12 @@
 
 > 面向 Telegram 群组的治理系统：入群验证、洪泛防护、规则过滤、CAS、AI 审核、信任状态机、定时消息，以及 Web / Mini App 管理后台。策略在面板里配，运行状态可回看、可回滚。
 
+![登录页](docs/screenshots/login.png)
+
+![管理总览](docs/screenshots/dashboard.png)
+
+登录页是实拍。总览用本地面板 + 示意数据截的，不是生产数据。
+
 ---
 
 ## 📜 目录
