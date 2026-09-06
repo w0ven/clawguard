@@ -80,7 +80,7 @@ clawguard/
 │   └── migrations/                 # 00001 … 00031
 ├── web/                            # Next.js 管理后台
 ├── scripts/                        # 备份、恢复演练、生产升级
-├── docs/                           # 本设计说明与恢复演练
+├── docs/                           # DESIGN、本地开发、恢复演练
 ├── Caddyfile
 ├── docker-compose.yml
 └── .env.example
