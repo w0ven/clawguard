@@ -238,6 +238,19 @@ export const fieldDescriptors: FieldDescriptor[] = [
   },
   {
     tab: "filter",
+    path: ["filter", "regex", "action"],
+    label: "正则动作",
+    description: "",
+    kind: "select",
+    options: [
+      { label: "删除", value: "delete" },
+      { label: "删除 + 警告", value: "delete_warn" },
+      { label: "删除 + 禁言", value: "delete_mute" },
+      { label: "删除 + 封禁", value: "delete_ban" },
+    ],
+  },
+  {
+    tab: "filter",
     path: ["filter", "links", "enabled"],
     label: "链接过滤",
     description: "只允许白名单内的链接",
@@ -333,6 +346,19 @@ export const fieldDescriptors: FieldDescriptor[] = [
     label: "黑名单列表",
     description: "一行一个，或用逗号分隔词",
     kind: "textarea",
+  },
+  {
+    tab: "filter",
+    path: ["filter", "usernames", "action"],
+    label: "用户名动作",
+    description: "",
+    kind: "select",
+    options: [
+      { label: "删除", value: "delete" },
+      { label: "删除 + 警告", value: "delete_warn" },
+      { label: "删除 + 禁言", value: "delete_mute" },
+      { label: "删除 + 封禁", value: "delete_ban" },
+    ],
   },
   {
     tab: "filter",
@@ -752,7 +778,7 @@ const configFieldGroups: ConfigFieldGroupDescriptor[] = [
     tab: "filter",
     title: "正则过滤",
     parentPath: "filter.regex.enabled",
-    childPaths: ["filter.regex.patterns"],
+    childPaths: ["filter.regex.patterns", "filter.regex.action"],
   },
   {
     key: "filter.links",
@@ -781,7 +807,7 @@ const configFieldGroups: ConfigFieldGroupDescriptor[] = [
     tab: "filter",
     title: "用户名黑名单",
     parentPath: "filter.usernames.enabled",
-    childPaths: ["filter.usernames.blacklist"],
+    childPaths: ["filter.usernames.blacklist", "filter.usernames.action"],
   },
   {
     key: "filter.deleted_account",
@@ -1403,7 +1429,7 @@ export function GroupConfigEditor({ group, mergedPolicy }: Props) {
                 <CardHeader>
                   <CardTitle>欢迎语预览</CardTitle>
                   <p className="text-xs text-[var(--text-muted)] mt-0.5">
-                    示例用户「可乐」，群名即当前群
+                    用示例用户预览，群名即当前群
                   </p>
                 </CardHeader>
                 <CardBody>
@@ -3066,14 +3092,14 @@ function renderWelcomePreview(
 
   let result = esc(template);
   const replacements: Record<string, string> = {
-    "{user_mention}": `<a href="tg://user?id=6425070392" class="text-[var(--accent)]">可乐</a>`,
-    "{user_id}": "6425070392",
-    "{user_name}": "可乐",
+    "{user_mention}": `<a href="tg://user?id=123456789" class="text-[var(--accent)]">示例用户</a>`,
+    "{user_id}": "123456789",
+    "{user_name}": "示例用户",
     "{group_title}": esc(context.groupTitle),
     "{group_id}": String(context.groupId),
     "{member_count}": String(context.memberCount),
     "{rules_link}": esc(context.rulesLink || "https://example.com/rules"),
-    "{admin_list}": "@kele_admin @mod_team",
+    "{admin_list}": "@admin_one @admin_two",
     "{date}": "2026-04-19",
     "{time}": "02:45",
   };

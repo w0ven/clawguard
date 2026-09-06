@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
@@ -89,7 +90,7 @@ func main() {
 	}
 	resolver := ai.NewResolver(modelRegistry).WithStats(queries)
 
-	if err := seedAdmins(ctx, queries, cfg.AdminTelegramIDs); err != nil {
+	if err := seedAdmins(ctx, queries, cfg.SuperAdminIDs, cfg.AdminTelegramIDs); err != nil {
 		logger.Fatal("seed admins", zap.Error(err))
 	}
 
@@ -167,18 +168,63 @@ func main() {
 	}
 }
 
-func seedAdmins(ctx context.Context, queries *store.Queries, ids []int64) error {
-	for _, id := range ids {
-		if id == 0 {
+// seedAdmins ensures the bootstrap accounts exist on startup.
+//
+// SUPER_ADMIN_IDS seed as role "owner"; ADMIN_TELEGRAM_IDS seed as role "admin".
+//
+// Backward compatibility: older releases seeded ADMIN_TELEGRAM_IDS as "owner".
+// Seeding is therefore create-only for the role. An admin row that already
+// exists keeps its stored role, so an existing owner is never demoted here and
+// role changes made in the web console are never reverted on restart. Only
+// SUPER_ADMIN_IDS may promote an existing non-owner row to "owner", so a
+// locked-out operator can always recover owner access via the environment.
+func seedAdmins(ctx context.Context, queries *store.Queries, superAdminIDs, adminIDs []int64) error {
+	seeded := make(map[int64]bool, len(superAdminIDs)+len(adminIDs))
+
+	for _, id := range superAdminIDs {
+		if id == 0 || seeded[id] {
 			continue
 		}
-		if _, err := queries.UpsertAdmin(ctx, store.UpsertAdminParams{
-			TelegramID: id,
-			Role:       "owner",
-			GroupScope: []byte("[]"),
-		}); err != nil {
+		seeded[id] = true
+		if err := seedAdmin(ctx, queries, id, "owner"); err != nil {
 			return err
 		}
 	}
+
+	for _, id := range adminIDs {
+		if id == 0 || seeded[id] {
+			continue
+		}
+		seeded[id] = true
+		if err := seedAdmin(ctx, queries, id, "admin"); err != nil {
+			return err
+		}
+	}
+
 	return nil
+}
+
+func seedAdmin(ctx context.Context, queries *store.Queries, id int64, role string) error {
+	existing, err := queries.GetAdminByTelegramID(ctx, id)
+	switch {
+	case err == nil:
+		// Only promote to owner; never demote or overwrite a console-managed role.
+		if role != "owner" || existing.Role == "owner" {
+			return nil
+		}
+		_, err := queries.UpdateAdminRole(ctx, store.UpdateAdminRoleParams{
+			ID:   existing.ID,
+			Role: "owner",
+		})
+		return err
+	case errors.Is(err, pgx.ErrNoRows):
+		_, err := queries.UpsertAdmin(ctx, store.UpsertAdminParams{
+			TelegramID: id,
+			Role:       role,
+			GroupScope: []byte("[]"),
+		})
+		return err
+	default:
+		return err
+	}
 }

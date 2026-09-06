@@ -216,3 +216,75 @@ func TestValidatePartialPolicyRequiresCompleteScoreBandsWhenPresent(t *testing.T
 		t.Fatal("partial score_bands overlay that does not cover 0-100 was accepted")
 	}
 }
+
+func TestFilterDefaultsBackfillRegexAndUsernameActions(t *testing.T) {
+	// A config saved before these fields existed omits both actions. The merge
+	// must backfill delete_warn so behaviour matches the pre-fix fallback.
+	policy, err := MergePolicyDocuments([]byte(`{
+		"filter": {
+			"regex": {"enabled": true, "patterns": ["\\d{6,}"]},
+			"usernames": {"enabled": true, "blacklist": ["spammer"]}
+		}
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := policy.Filter.Regex.Action; got != "delete_warn" {
+		t.Fatalf("filter.regex.action = %q, want delete_warn backfill", got)
+	}
+	if got := policy.Filter.Usernames.Action; got != "delete_warn" {
+		t.Fatalf("filter.usernames.action = %q, want delete_warn backfill", got)
+	}
+	if err := ValidateGuardPolicy(policy); err != nil {
+		t.Fatalf("backfilled policy is invalid: %v", err)
+	}
+}
+
+func TestFilterRuleActionsInheritThroughGlobalAndGroupOverlays(t *testing.T) {
+	global := []byte(`{"filter":{"regex":{"action":"delete_ban"},"usernames":{"action":"delete_mute"}}}`)
+
+	// Group omits both actions and therefore inherits the global values.
+	inherited, err := MergePolicyDocuments(global, []byte(`{"filter":{"regex":{"enabled":true}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := inherited.Filter.Regex.Action; got != "delete_ban" {
+		t.Fatalf("inherited filter.regex.action = %q, want delete_ban", got)
+	}
+	if got := inherited.Filter.Usernames.Action; got != "delete_mute" {
+		t.Fatalf("inherited filter.usernames.action = %q, want delete_mute", got)
+	}
+
+	// Group overrides win over the global layer.
+	overridden, err := MergePolicyDocuments(global, []byte(`{"filter":{"regex":{"action":"delete"},"usernames":{"action":"warn"}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := overridden.Filter.Regex.Action; got != "delete" {
+		t.Fatalf("overridden filter.regex.action = %q, want delete", got)
+	}
+	if got := overridden.Filter.Usernames.Action; got != "warn" {
+		t.Fatalf("overridden filter.usernames.action = %q, want warn", got)
+	}
+}
+
+func TestValidateGuardPolicyRejectsUnsupportedRuleActions(t *testing.T) {
+	policy := DefaultPolicy
+	policy.Filter.Regex.Action = "delete_everything_typo"
+	if err := ValidateGuardPolicy(policy); err == nil {
+		t.Fatal("invalid filter.regex.action was accepted")
+	}
+
+	policy = DefaultPolicy
+	policy.Filter.Usernames.Action = "delete_everything_typo"
+	if err := ValidateGuardPolicy(policy); err == nil {
+		t.Fatal("invalid filter.usernames.action was accepted")
+	}
+}
+
+func TestValidatePolicyDocumentAcceptsRuleActionFields(t *testing.T) {
+	raw := []byte(`{"filter":{"regex":{"action":"delete_ban"},"usernames":{"action":"delete_mute"}}}`)
+	if err := ValidatePolicyDocument(raw); err != nil {
+		t.Fatalf("rule action fields were rejected by document validation: %v", err)
+	}
+}

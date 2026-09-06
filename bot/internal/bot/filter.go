@@ -66,6 +66,7 @@ func checkMessage(_ context.Context, msg *tele.Message, policy config.FilterConf
 					Hit:         true,
 					Reason:      "filter_regex",
 					MatchedRule: trimmed,
+					Action:      policy.Regex.Action,
 				}
 			}
 		}
@@ -82,6 +83,7 @@ func checkMessage(_ context.Context, msg *tele.Message, policy config.FilterConf
 					Hit:         true,
 					Reason:      "filter_username",
 					MatchedRule: blocked,
+					Action:      policy.Usernames.Action,
 				}
 			}
 		}

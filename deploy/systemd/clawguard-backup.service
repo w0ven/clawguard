@@ -4,10 +4,12 @@ Requires=docker.service
 After=docker.service
 
 [Service]
+# Adjust these three paths to wherever you cloned clawguard, then run
+# `systemctl daemon-reload`. systemd requires absolute paths here.
 Type=oneshot
-WorkingDirectory=/root/clawguard
-EnvironmentFile=-/root/clawguard/.env
-ExecStart=/root/clawguard/scripts/backup.sh
+WorkingDirectory=/opt/clawguard
+EnvironmentFile=-/opt/clawguard/.env
+ExecStart=/opt/clawguard/scripts/backup.sh
 Nice=10
 IOSchedulingClass=best-effort
 IOSchedulingPriority=7

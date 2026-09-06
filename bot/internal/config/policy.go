@@ -133,6 +133,7 @@ type FilterKeywordPolicy struct {
 type FilterRegexPolicy struct {
 	Enabled  bool     `json:"enabled"`
 	Patterns []string `json:"patterns"`
+	Action   string   `json:"action"`
 }
 
 type FilterLinksPolicy struct {
@@ -145,6 +146,7 @@ type FilterLinksPolicy struct {
 type FilterUsernamePolicy struct {
 	Enabled   bool     `json:"enabled"`
 	Blacklist []string `json:"blacklist"`
+	Action    string   `json:"action"`
 }
 
 type FilterNewUserPolicy struct {
@@ -300,6 +302,7 @@ var DefaultPolicy = GuardPolicy{
 		},
 		Regex: FilterRegexPolicy{
 			Enabled: false,
+			Action:  "delete_warn",
 		},
 		Links: FilterLinksPolicy{
 			Enabled:      true,
@@ -309,6 +312,7 @@ var DefaultPolicy = GuardPolicy{
 		},
 		Usernames: FilterUsernamePolicy{
 			Enabled: false,
+			Action:  "delete_warn",
 		},
 		DeletedAccount: FilterDeletedAccountPolicy{
 			Enabled: true,
@@ -588,6 +592,12 @@ func applyFilterDefaults(policy *FilterConfig) {
 	}
 	if policy.Links.Action == "" {
 		policy.Links.Action = DefaultPolicy.Filter.Links.Action
+	}
+	if policy.Regex.Action == "" {
+		policy.Regex.Action = DefaultPolicy.Filter.Regex.Action
+	}
+	if policy.Usernames.Action == "" {
+		policy.Usernames.Action = DefaultPolicy.Filter.Usernames.Action
 	}
 	if policy.NewUser.DurationHours <= 0 {
 		policy.NewUser.DurationHours = DefaultPolicy.Filter.NewUser.DurationHours

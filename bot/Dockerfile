@@ -13,9 +13,13 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /out/migrate ./cmd/migrate
 
 FROM alpine:3.20
 
+# wget and grep are BusyBox applets already present in alpine; the compose
+# healthcheck relies on them. Keep them working when trimming this image.
 RUN apk add --no-cache ca-certificates tzdata font-dejavu ffmpeg \
     && addgroup -S -g 10001 clawguard \
-    && adduser -S -D -H -u 10001 -G clawguard clawguard
+    && adduser -S -D -H -u 10001 -G clawguard clawguard \
+    && command -v wget >/dev/null \
+    && command -v grep >/dev/null
 
 WORKDIR /app
 

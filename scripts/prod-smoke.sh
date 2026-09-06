@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -u
 
-APP_DIR=${APP_DIR:-/root/clawguard}
+# Defaults to the repository root this script lives in; override with APP_DIR.
+APP_DIR=${APP_DIR:-$(cd "$(dirname "$0")/.." && pwd)}
 COMPOSE_FILE=docker-compose.yml
 SINCE=5m
 WEBHOOK_LOG_WINDOW=24h
@@ -15,7 +16,7 @@ usage() {
   cat <<'EOF'
 Usage: scripts/prod-smoke.sh [--since 5m] [--webhook-log-window 24h] [--url https://your-domain.example] [--compose docker-compose.yml]
 
-Runs production smoke checks from /root/clawguard by default. Override the
+Runs production smoke checks from the repository root by default. Override the
 directory with APP_DIR=/path/to/clawguard.
 EOF
 }
