@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import Link from "next/link";
+import { GuardedLink } from "@/components/guarded-link";
 import { Card, CardBody, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Select } from "@/components/ui/select";
@@ -158,12 +158,12 @@ export function LiveFeed() {
               <span className="text-[var(--text-muted)]">
                 {event.detail || event.extra}
               </span>
-              <Link
+              <GuardedLink
                 href={meta.href}
                 className="ml-auto text-[var(--accent)]"
               >
                 详情
-              </Link>
+              </GuardedLink>
             </div>
           );
         })}

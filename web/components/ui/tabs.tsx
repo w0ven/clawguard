@@ -13,7 +13,7 @@ export function Tabs({ tabs, value, onValueChange, className }: TabsProps) {
   return (
     <div
       className={cn(
-        "inline-flex items-center gap-1 rounded-lg border border-[var(--border)] bg-[var(--surface-2)] p-1",
+        "inline-flex max-w-full items-center gap-1 overflow-x-auto rounded-xl border border-[var(--border)] bg-[var(--surface-2)] p-1",
         className,
       )}
     >
@@ -25,7 +25,7 @@ export function Tabs({ tabs, value, onValueChange, className }: TabsProps) {
             type="button"
             onClick={() => onValueChange(tab.value)}
             className={cn(
-              "rounded-md px-3 py-1.5 text-sm transition-colors",
+              "min-h-9 shrink-0 rounded-lg px-3 py-1.5 text-sm transition-colors focus-visible:ring-2 focus-visible:ring-[var(--ring)]",
               active
                 ? "bg-[var(--surface)] text-[var(--text)] shadow-sm"
                 : "text-[var(--text-muted)] hover:text-[var(--text)]",

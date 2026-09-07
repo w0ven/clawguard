@@ -25,6 +25,7 @@ import {
   saveGlobalConfigSection,
 } from "@/lib/global-config";
 import { useToast } from "@/components/providers";
+import { useDirtyGuard, useDirtyNavigation } from "@/components/dirty-guard";
 import { AdKillerPanel } from "@/components/adkiller-panel";
 import {
   Pencil,
@@ -128,7 +129,7 @@ function SelectBox({
 }) {
   return (
     <select
-      className="h-9 w-full rounded-md border border-[var(--border)] bg-[var(--surface)] px-3 text-sm disabled:opacity-60"
+      className="h-10 w-full rounded-xl border border-[var(--input-border)] bg-[var(--input-bg)] px-3 text-sm text-[var(--input-color)] disabled:opacity-60"
       value={value}
       onChange={(e) => onChange(e.target.value)}
       disabled={disabled}
@@ -164,6 +165,7 @@ function asRecord(value: unknown): Record<string, unknown> {
 
 export default function LLMAdminPage() {
   const { pushToast } = useToast();
+  const { confirmNavigation } = useDirtyNavigation();
   const [tab, setTab] = useState<"providers" | "models" | "stats" | "settings" | "adkiller">("providers");
   const [providers, setProviders] = useState<Provider[]>([]);
   const [models, setModels] = useState<Model[]>([]);
@@ -236,7 +238,10 @@ export default function LLMAdminPage() {
         <Tabs
           tabs={tabs}
           value={tab}
-          onValueChange={(v) => setTab(v as typeof tab)}
+          onValueChange={(v) => {
+            if (!confirmNavigation("当前模型编辑草稿尚未保存，确定切换场景吗？")) return;
+            setTab(v as typeof tab);
+          }}
         />
       </div>
 
@@ -278,6 +283,7 @@ function ProviderPanel({
   onChanged: () => Promise<void>;
   pushToast: ToastFn;
 }) {
+  const { confirmNavigation } = useDirtyNavigation();
   const [showForm, setShowForm] = useState(false);
   const [editingProvider, setEditingProvider] = useState<Provider | null>(null);
 
@@ -313,6 +319,7 @@ function ProviderPanel({
         <CardTitle>Providers</CardTitle>
         <Button
           onClick={() => {
+            if ((showForm || editingProvider) && !confirmNavigation("Provider 草稿尚未保存，确定关闭编辑吗？")) return;
             setEditingProvider(null);
             setShowForm((v) => !v);
           }}
@@ -377,6 +384,7 @@ function ProviderPanel({
                       variant="secondary"
                       size="sm"
                       onClick={() => {
+                        if (!confirmNavigation("Provider 草稿尚未保存，确定切换编辑对象吗？")) return;
                         setEditingProvider(p);
                         setShowForm(false);
                       }}
@@ -425,6 +433,16 @@ function ProviderForm({
   );
   const [enabled, setEnabled] = useState(provider?.enabled ?? true);
   const [saving, setSaving] = useState(false);
+  const formDirty =
+    key !== (provider?.key ?? "") ||
+    label !== (provider?.label ?? "") ||
+    type !== (provider?.type ?? "openai") ||
+    baseURL !== (provider?.base_url ?? "") ||
+    apiKey !== "" ||
+    timeoutMs !== (provider?.timeout_ms ?? 8000) ||
+    extraHeaders !== (provider?.extra_headers ? JSON.stringify(provider.extra_headers, null, 2) : "") ||
+    enabled !== (provider?.enabled ?? true);
+  const confirmFormNavigation = useDirtyGuard(formDirty, "Provider 草稿尚未保存，确定离开吗？");
 
   useEffect(() => {
     setKey(provider?.key ?? "");
@@ -488,6 +506,7 @@ function ProviderForm({
 
   return (
     <div className="mb-4 rounded-md border border-[var(--border)] bg-[var(--surface-2)] p-4">
+      <fieldset disabled={saving} className="min-w-0 border-0 p-0">
       <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
         <Field label="Key (唯一标识，英文/数字)">
           <Input
@@ -578,7 +597,7 @@ function ProviderForm({
           启用
         </label>
         <div className="flex gap-2">
-          <Button type="button" variant="secondary" onClick={onCancel}>
+          <Button type="button" variant="secondary" onClick={() => { if (confirmFormNavigation()) onCancel(); }}>
             取消
           </Button>
           <Button onClick={submit} disabled={saving}>
@@ -586,6 +605,7 @@ function ProviderForm({
           </Button>
         </div>
       </div>
+      </fieldset>
     </div>
   );
 }
@@ -603,6 +623,7 @@ function ModelPanel({
   onChanged: () => Promise<void>;
   pushToast: ToastFn;
 }) {
+  const { confirmNavigation } = useDirtyNavigation();
   const [showForm, setShowForm] = useState(false);
   const [editingModel, setEditingModel] = useState<Model | null>(null);
   const [testingRef, setTestingRef] = useState<string | null>(null);
@@ -701,6 +722,7 @@ function ModelPanel({
         <CardTitle>Models</CardTitle>
         <Button
           onClick={() => {
+            if ((showForm || editingModel) && !confirmNavigation("Model 草稿尚未保存，确定关闭编辑吗？")) return;
             setEditingModel(null);
             setShowForm((v) => !v);
           }}
@@ -794,6 +816,7 @@ function ModelPanel({
                         size="sm"
                         disabled={testingRef === m.ref}
                         onClick={() => {
+                          if (!confirmNavigation("Model 草稿尚未保存，确定切换编辑对象吗？")) return;
                           setEditingModel(m);
                           setShowForm(false);
                         }}
@@ -884,6 +907,20 @@ function ModelForm({
     model?.probe_interval_seconds ?? 0,
   );
   const [saving, setSaving] = useState(false);
+  const formDirty =
+    providerKey !== (model?.provider_key ?? providers[0]?.key ?? "") ||
+    modelKey !== (model?.model_key ?? "") ||
+    label !== (model?.label ?? "") ||
+    apiFormat !== (model?.api_format ?? "openai_chat") ||
+    priority !== (model?.priority ?? 100) ||
+    caps !== (model?.capability_tags ?? ["moderation"]).join(", ") ||
+    supportsVision !== (model?.supports_vision ?? false) ||
+    supportsJSON !== (model?.supports_json ?? true) ||
+    supportsTools !== (model?.supports_tools ?? false) ||
+    enabled !== (model?.enabled ?? true) ||
+    probeEnabled !== (model?.probe_enabled ?? true) ||
+    probeInterval !== (model?.probe_interval_seconds ?? 0);
+  const confirmFormNavigation = useDirtyGuard(formDirty, "Model 草稿尚未保存，确定离开吗？");
 
   useEffect(() => {
     setProviderKey(model?.provider_key ?? providers[0]?.key ?? "");
@@ -948,6 +985,7 @@ function ModelForm({
 
   return (
     <div className="mb-4 rounded-md border border-[var(--border)] bg-[var(--surface-2)] p-4">
+      <fieldset disabled={saving} className="min-w-0 border-0 p-0">
       <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
         <Field
           label="Provider"
@@ -1131,7 +1169,7 @@ function ModelForm({
           启用
         </label>
         <div className="flex gap-2">
-          <Button type="button" variant="secondary" onClick={onCancel}>
+          <Button type="button" variant="secondary" onClick={() => { if (confirmFormNavigation()) onCancel(); }}>
             取消
           </Button>
           <Button onClick={submit} disabled={saving || !providerKey || !modelKey}>
@@ -1139,6 +1177,7 @@ function ModelForm({
           </Button>
         </div>
       </div>
+      </fieldset>
     </div>
   );
 }
@@ -1156,6 +1195,11 @@ function SettingsPanel({
   const [autoDegrade, setAutoDegrade] = useState(settings.auto_degrade);
   const [interval, setInterval] = useState(settings.probe_interval_seconds || 120);
   const [saving, setSaving] = useState(false);
+  const settingsDirty =
+    probeEnabled !== settings.probe_enabled ||
+    autoDegrade !== settings.auto_degrade ||
+    interval !== (settings.probe_interval_seconds || 120);
+  useDirtyGuard(settingsDirty, "探活设置尚有未保存修改，确定离开吗？");
 
   useEffect(() => {
     setProbeEnabled(settings.probe_enabled);
@@ -1210,6 +1254,7 @@ function SettingsPanel({
         <CardTitle>探活设置</CardTitle>
       </CardHeader>
       <CardBody>
+        <fieldset disabled={saving} className="min-w-0 border-0 p-0">
         <div className="grid gap-4 md:grid-cols-2">
           <div className="flex flex-col gap-3">
             <label className="flex items-center gap-2 text-sm">
@@ -1246,13 +1291,14 @@ function SettingsPanel({
         </div>
 
         <div className="mt-4 flex flex-wrap gap-2">
-          <Button onClick={save} disabled={saving}>
-            {saving ? "保存中…" : "保存设置"}
+          <Button onClick={save} disabled={saving || !settingsDirty}>
+            {saving ? "保存中…" : settingsDirty ? "保存设置" : "已保存"}
           </Button>
           <Button type="button" variant="secondary" onClick={runNow}>
             立即跑一轮
           </Button>
         </div>
+        </fieldset>
       </CardBody>
     </Card>
   );

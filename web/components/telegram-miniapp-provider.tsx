@@ -31,6 +31,9 @@ export function TelegramMiniAppProvider({ children }: { children: ReactNode }) {
     app.ready();
     app.expand();
     const handleBack = () => {
+      // DirtyGuardProvider owns the single history confirmation. Calling
+      // confirmNavigation here would ask once before router.back() and again
+      // when the resulting popstate reaches the guard.
       if (pathname === "/dashboard") router.replace("/dashboard");
       else router.back();
     };

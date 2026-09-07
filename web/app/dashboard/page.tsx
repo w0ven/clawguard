@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import Link from "next/link";
+import { GuardedLink } from "@/components/guarded-link";
 import { AdminShell } from "@/components/admin-shell";
 import { Card, CardHeader, CardTitle, CardBody } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -243,12 +243,12 @@ export default function DashboardPage() {
               最近 10 条记录
             </p>
           </div>
-          <Link
+          <GuardedLink
             href="/violations"
             className="inline-flex items-center gap-1 text-xs text-[var(--accent)] hover:underline"
           >
             全部 <ArrowRight className="h-3 w-3" />
-          </Link>
+          </GuardedLink>
         </CardHeader>
         {violations.length === 0 ? (
           <div className="px-5 py-12 text-center text-sm text-[var(--text-muted)]">

@@ -1,7 +1,7 @@
 "use client";
 
 import type React from "react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardBody, CardHeader, CardTitle } from "@/components/ui/card";
@@ -21,6 +21,7 @@ import { apiFetch } from "@/lib/api";
 import type { Group, Nullable } from "@/lib/types";
 import { validateHttpURL } from "@/lib/url";
 import { useToast } from "@/components/providers";
+import { useDirtyGuard } from "@/components/dirty-guard";
 
 type ScheduledButton = {
   text: string;
@@ -90,12 +91,24 @@ export function ScheduledMessagesEditor({ group }: { group: Group }) {
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [form, setForm] = useState<FormState | null>(null);
+  const [initialForm, setInitialForm] = useState<FormState | null>(null);
   const [timeInput, setTimeInput] = useState("");
   const [historyFor, setHistoryFor] = useState<ScheduledMessage | null>(null);
   const [runs, setRuns] = useState<ScheduledRun[]>([]);
   const [runsLoading, setRunsLoading] = useState(false);
+  const formTriggerRef = useRef<HTMLButtonElement | null>(null);
 
   const reachedLimit = items.length >= limit;
+  const formDirty = Boolean(
+    form &&
+      initialForm &&
+      (JSON.stringify(form) !== JSON.stringify(initialForm) || timeInput.trim() !== ""),
+  );
+  const confirmFormNavigation = useDirtyGuard(
+    formDirty,
+    "定时消息草稿尚未保存，确定离开吗？",
+    "scheduled-messages",
+  );
 
   useEffect(() => {
     loadItems();
@@ -117,26 +130,38 @@ export function ScheduledMessagesEditor({ group }: { group: Group }) {
     }
   }
 
-  function openCreate() {
+  function openCreate(trigger?: HTMLButtonElement) {
+    if (trigger) {
+      formTriggerRef.current = trigger;
+    }
     if (reachedLimit) {
       pushToast("每个群最多创建 20 条定时消息", "error");
       return;
     }
-    setForm({ ...emptyForm, buttons: [], daily_times: ["09:00"] });
+    const nextForm = { ...emptyForm, buttons: [], daily_times: ["09:00"] };
+    setForm(nextForm);
+    setInitialForm(nextForm);
+    setTimeInput("");
   }
 
-  function openEdit(item: ScheduledMessage) {
-    setForm({
+  function openEdit(item: ScheduledMessage, trigger?: HTMLButtonElement) {
+    if (trigger) {
+      formTriggerRef.current = trigger;
+    }
+    const nextForm = {
       id: item.id,
       name: item.name,
       schedule_type: item.schedule_type,
       interval_minutes: item.interval_minutes ?? 60,
-      daily_times: item.daily_times.length > 0 ? item.daily_times : ["09:00"],
+      daily_times: item.daily_times.length > 0 ? [...item.daily_times] : ["09:00"],
       content: item.content,
-      buttons: item.buttons ?? [],
+      buttons: (item.buttons ?? []).map((button) => ({ ...button })),
       auto_delete_seconds: item.auto_delete_seconds,
       enabled: item.enabled,
-    });
+    };
+    setForm(nextForm);
+    setInitialForm(nextForm);
+    setTimeInput("");
   }
 
   async function saveForm() {
@@ -168,6 +193,8 @@ export function ScheduledMessagesEditor({ group }: { group: Group }) {
       });
       pushToast(form.id ? "已更新定时消息" : "已创建定时消息", "success");
       setForm(null);
+      setInitialForm(null);
+      setTimeInput("");
       await loadItems();
     } catch (error) {
       pushToast(error instanceof Error ? error.message : "保存失败", "error");
@@ -218,6 +245,14 @@ export function ScheduledMessagesEditor({ group }: { group: Group }) {
     }
   }
 
+  function closeForm() {
+    if (confirmFormNavigation()) {
+      setForm(null);
+      setInitialForm(null);
+      setTimeInput("");
+    }
+  }
+
   function addDailyTime() {
     if (!form) return;
     const value = timeInput.trim();
@@ -243,7 +278,11 @@ export function ScheduledMessagesEditor({ group }: { group: Group }) {
                 绑定当前群发送 MarkdownV2 文本，支持间隔发送、每日北京时间定点和链接按钮。
               </p>
             </div>
-            <Button onClick={openCreate} disabled={reachedLimit} title={reachedLimit ? "每个群最多 20 条" : undefined}>
+            <Button
+              onClick={(event) => openCreate(event.currentTarget)}
+              disabled={reachedLimit}
+              title={reachedLimit ? "每个群最多 20 条" : undefined}
+            >
               新建定时消息
             </Button>
           </div>
@@ -279,7 +318,13 @@ export function ScheduledMessagesEditor({ group }: { group: Group }) {
                     <TableCell>{formatBeijing(item.last_run_at)}</TableCell>
                     <TableCell>
                       <div className="flex flex-wrap gap-2">
-                        <Button size="sm" variant="secondary" onClick={() => openEdit(item)}>编辑</Button>
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          onClick={(event) => openEdit(item, event.currentTarget)}
+                        >
+                          编辑
+                        </Button>
                         <Button size="sm" variant="outline" onClick={() => runNow(item)}>立即试发</Button>
                         <Button size="sm" variant="ghost" onClick={() => openHistory(item)}>查看历史</Button>
                         <Button size="sm" variant="danger" onClick={() => deleteItem(item)}>删除</Button>
@@ -302,8 +347,9 @@ export function ScheduledMessagesEditor({ group }: { group: Group }) {
           onTimeInputChange={setTimeInput}
           onAddTime={addDailyTime}
           onChange={setForm}
-          onClose={() => setForm(null)}
+          onClose={closeForm}
           onSave={saveForm}
+          returnFocusRef={formTriggerRef}
         />
       ) : null}
 
@@ -328,6 +374,7 @@ function EditorDialog({
   onChange,
   onClose,
   onSave,
+  returnFocusRef,
 }: {
   form: FormState;
   saving: boolean;
@@ -337,19 +384,93 @@ function EditorDialog({
   onChange: (value: FormState) => void;
   onClose: () => void;
   onSave: () => void;
+  returnFocusRef: { current: HTMLButtonElement | null };
 }) {
   const title = form.id ? "编辑定时消息" : "新建定时消息";
   const dailyText = useMemo(() => form.daily_times.join("、"), [form.daily_times]);
+  const dialogRef = useRef<HTMLDivElement | null>(null);
+  const onCloseRef = useRef(onClose);
+  const savingRef = useRef(saving);
+  onCloseRef.current = onClose;
+  savingRef.current = saving;
+
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    if (!dialog) {
+      return;
+    }
+    const focusableSelector =
+      'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [href], [tabindex]:not([tabindex="-1"])';
+    const focusableElements = () =>
+      Array.from(dialog.querySelectorAll<HTMLElement>(focusableSelector)).filter(
+        (element) => element.getAttribute("aria-hidden") !== "true",
+      );
+    const initialTarget =
+      focusableElements().find((element) =>
+        element.matches("input, select, textarea"),
+      ) ?? focusableElements()[0];
+    (initialTarget ?? dialog).focus();
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        if (!savingRef.current) {
+          onCloseRef.current();
+        }
+        return;
+      }
+      if (event.key !== "Tab") {
+        return;
+      }
+      const elements = focusableElements();
+      if (elements.length === 0) {
+        event.preventDefault();
+        dialog.focus();
+        return;
+      }
+      const first = elements[0];
+      const last = elements[elements.length - 1];
+      const active = document.activeElement;
+      if (event.shiftKey) {
+        if (active === first || !dialog.contains(active)) {
+          event.preventDefault();
+          last.focus();
+        }
+      } else if (active === last || !dialog.contains(active)) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("keydown", handleKeyDown);
+      const trigger = returnFocusRef.current;
+      if (trigger && document.contains(trigger)) {
+        trigger.focus();
+      }
+    };
+  }, [returnFocusRef]);
 
   return (
     <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 p-4">
-      <Card className="max-h-[90vh] w-full max-w-3xl overflow-y-auto shadow-xl">
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="scheduled-editor-dialog-title"
+        tabIndex={-1}
+        className="max-h-[90vh] w-full max-w-3xl overflow-y-auto rounded-2xl outline-none"
+      >
+      <Card className="shadow-xl">
         <CardHeader>
           <div className="flex items-center justify-between gap-3">
-            <CardTitle>{title}</CardTitle>
-            <Button variant="ghost" size="sm" onClick={onClose}>关闭</Button>
+            <CardTitle id="scheduled-editor-dialog-title">{title}</CardTitle>
+            <Button variant="ghost" size="sm" onClick={onClose} disabled={saving}>关闭</Button>
           </div>
         </CardHeader>
+        <fieldset disabled={saving} className="min-w-0 border-0 p-0">
         <CardBody className="space-y-4">
           <Field label="名称">
             <Input value={form.name} onChange={(e) => onChange({ ...form, name: e.target.value })} placeholder="例如：每日群公告" />
@@ -415,7 +536,9 @@ function EditorDialog({
             <Button onClick={onSave} disabled={saving}>{saving ? "保存中…" : "保存"}</Button>
           </div>
         </CardBody>
+        </fieldset>
       </Card>
+      </div>
     </div>
   );
 }
