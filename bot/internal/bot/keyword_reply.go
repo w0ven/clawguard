@@ -23,7 +23,12 @@ const keywordReplyCooldownReleaseTimeout = 3 * time.Second
 // maybeKeywordReply is a side effect only. Match, cooldown, Redis errors,
 // and send failures must never abort the rest of moderation.
 func (s *Service) maybeKeywordReply(ctx context.Context, msg *tele.Message, policy config.GuardPolicy) {
-	if _, err := s.tryKeywordReply(ctx, msg, policy); err != nil {
+	_ = s.maybeKeywordReplyWithResult(ctx, msg, policy)
+}
+
+func (s *Service) maybeKeywordReplyWithResult(ctx context.Context, msg *tele.Message, policy config.GuardPolicy) bool {
+	matched, err := s.tryKeywordReply(ctx, msg, policy)
+	if err != nil {
 		chatID := int64(0)
 		msgID := 0
 		if msg != nil {
@@ -34,6 +39,7 @@ func (s *Service) maybeKeywordReply(ctx context.Context, msg *tele.Message, poli
 		}
 		s.logger.Warn("keyword reply failed, continue moderation", zap.Error(err), zap.Int64("chat_id", chatID), zap.Int("message_id", msgID))
 	}
+	return matched
 }
 
 func (s *Service) tryKeywordReply(ctx context.Context, msg *tele.Message, policy config.GuardPolicy) (matched bool, err error) {

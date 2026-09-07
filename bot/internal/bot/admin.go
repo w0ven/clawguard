@@ -96,6 +96,10 @@ func (s *Service) Redis() redis.Cmdable {
 	return s.redis
 }
 
+func (s *Service) Assistant() *GroupAssistant {
+	return s.assistant
+}
+
 func (s *Service) LeaveChat(chatID int64) error {
 	if chatID == 0 {
 		return nil

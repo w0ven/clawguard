@@ -4,6 +4,8 @@ import { useEffect, useState } from "react";
 import { useParams } from "next/navigation";
 import { AdminShell } from "@/components/admin-shell";
 import { GroupConfigEditor } from "@/components/group-config-editor";
+import { GuardedLink } from "@/components/guarded-link";
+import { Button } from "@/components/ui/button";
 import { Card, CardBody } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { apiFetch } from "@/lib/api";
@@ -50,6 +52,11 @@ export default function GroupDetailPage() {
     <AdminShell
       title={group?.title ?? "群详情"}
       subtitle={`Chat ID: ${params.chatId}。可在各策略页按字段选择“继承全局”或写入群级覆盖。`}
+      actions={
+        <GuardedLink href={`/groups/${params.chatId}/assistant`}>
+          <Button type="button" variant="secondary" size="sm">打开群助手</Button>
+        </GuardedLink>
+      }
     >
       {loading && (
         <Card><CardBody className="flex items-center gap-3 py-12 text-sm text-[var(--text-muted)]"><span className="h-2 w-2 animate-pulse rounded-full bg-[var(--accent)]" />正在加载群策略…</CardBody></Card>

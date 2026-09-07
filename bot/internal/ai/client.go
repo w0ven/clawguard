@@ -6,8 +6,81 @@ import (
 )
 
 type Message struct {
-	Role    string `json:"role"`
-	Content any    `json:"content"`
+	Role       string     `json:"role"`
+	Content    any        `json:"content"`
+	Name       string     `json:"name,omitempty"`
+	ToolCallID string     `json:"tool_call_id,omitempty"`
+	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
+}
+
+// ToolDefinition is the provider-neutral read-only tool schema used by the
+// assistant. It deliberately does not expose a service, database, or bot
+// object to the model.
+type ToolDefinition struct {
+	Type     string       `json:"type"`
+	Function ToolFunction `json:"function"`
+}
+
+type ToolFunction struct {
+	Name        string         `json:"name"`
+	Description string         `json:"description"`
+	Parameters  map[string]any `json:"parameters"`
+}
+
+type ToolCall struct {
+	ID       string `json:"id"`
+	Type     string `json:"type"`
+	Function struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+	} `json:"function"`
+}
+
+type ToolChatRequest struct {
+	Model        string
+	SystemPrompt string
+	Messages     []Message
+	Tools        []ToolDefinition
+	MaxTokens    int
+	Temperature  float64
+	Timeout      time.Duration
+}
+
+type ToolChatResult struct {
+	Model            string
+	Content          string
+	ToolCalls        []ToolCall
+	FinishReason     string
+	LatencyMs        int
+	PromptTokens     int
+	CompletionTokens int
+}
+
+type ToolCallingClient interface {
+	ChatWithTools(context.Context, ToolChatRequest) (*ToolChatResult, error)
+}
+
+// ProviderError preserves only transport metadata needed by the pool router.
+// Response bodies are not retained, preventing provider secrets or prompts from
+// leaking into health status and logs.
+type ProviderError struct {
+	StatusCode int
+	RetryAfter time.Duration
+	Err        error
+}
+
+func (e *ProviderError) Error() string {
+	if e == nil || e.Err == nil {
+		return "provider request failed"
+	}
+	return e.Err.Error()
+}
+
+func (e *ProviderError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
 }
 
 type CheckRequest struct {

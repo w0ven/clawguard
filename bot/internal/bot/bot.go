@@ -30,47 +30,49 @@ import (
 )
 
 type Service struct {
-	cfg                config.Config
-	logger             *zap.Logger
-	queries            *store.Queries
-	redis              redis.Cmdable
-	casClient          *casclient.Client
-	aiProviders        ai.ProviderRegistry
-	aiModels           ai.ModelRegistry
-	aiResolver         *ai.Resolver
-	aiModerator        *ai.Moderator
-	adkiller           *adkiller.Client
-	bot                *tele.Bot
-	sender             telegramSender
-	sendLimiter        *SendLimiter
-	lifecycleCtx       context.Context
-	lifecycleCancel    context.CancelFunc
-	wg                 sync.WaitGroup
-	verifyBtn          tele.Btn
-	verifyMathBtn      tele.Btn
-	verifyRandBtn      tele.Btn
-	verifyAdminBtn     tele.Btn
-	startedAt          time.Time
-	lastUpdateAt       atomic.Value
-	lastAIOKAt         atomic.Value
-	lastAIFailAt       atomic.Value
-	lastAIError        atomic.Value
-	bioCheckInFlight   sync.Map
-	userActionLocks    sync.Map
-	messageDeleteLocks sync.Map
-	joinEventLocks     sync.Map
-	updateExecutions   sync.Map
-	membershipSessions sync.Map
-	authorizedGroups   sync.Map
-	authorizedGroupAt  sync.Map
-	policySnapshots    sync.Map
-	policySnapshotAt   sync.Map
-	chatAdmins         sync.Map
-	systemState        atomic.Value
-	systemStateAt      atomic.Int64
-	runtimeGuardsOnce  sync.Once
-	joinProtector      *joinProtector
-	cleanupBreaker     *telegramCleanupBreaker
+	cfg                  config.Config
+	logger               *zap.Logger
+	queries              *store.Queries
+	redis                redis.Cmdable
+	casClient            *casclient.Client
+	aiProviders          ai.ProviderRegistry
+	aiModels             ai.ModelRegistry
+	aiResolver           *ai.Resolver
+	aiModerator          *ai.Moderator
+	adkiller             *adkiller.Client
+	bot                  *tele.Bot
+	sender               telegramSender
+	sendLimiter          *SendLimiter
+	lifecycleCtx         context.Context
+	lifecycleCancel      context.CancelFunc
+	wg                   sync.WaitGroup
+	verifyBtn            tele.Btn
+	verifyMathBtn        tele.Btn
+	verifyRandBtn        tele.Btn
+	verifyAdminBtn       tele.Btn
+	startedAt            time.Time
+	lastUpdateAt         atomic.Value
+	lastAIOKAt           atomic.Value
+	lastAIFailAt         atomic.Value
+	lastAIError          atomic.Value
+	bioCheckInFlight     sync.Map
+	userActionLocks      sync.Map
+	messageDeleteLocks   sync.Map
+	joinEventLocks       sync.Map
+	updateExecutions     sync.Map
+	membershipSessions   sync.Map
+	authorizedGroups     sync.Map
+	authorizedGroupAt    sync.Map
+	policySnapshots      sync.Map
+	policySnapshotAt     sync.Map
+	chatAdmins           sync.Map
+	systemState          atomic.Value
+	systemStateAt        atomic.Int64
+	runtimeGuardsOnce    sync.Once
+	joinProtector        *joinProtector
+	cleanupBreaker       *telegramCleanupBreaker
+	assistant            *GroupAssistant
+	assistantEligibility sync.Map
 }
 
 type buttonPayload struct {
@@ -242,6 +244,7 @@ func New(ctx context.Context, cfg config.Config, logger *zap.Logger, queries *st
 	svc.aiResolver = resolver
 	svc.aiModerator = ai.NewModerator(ctx, logger, rdb, queries, providers, models, resolver, svc)
 	svc.adkiller = adkiller.NewClient(adkiller.DefaultBaseURL, logger)
+	svc.assistant = NewGroupAssistant(svc)
 	if err := svc.ReloadAdKillerSecret(ctx); err != nil {
 		logger.Warn("load adkiller secret failed", zap.Error(err))
 	}
@@ -258,7 +261,7 @@ func (s *Service) RegisterWebhook(ctx context.Context) error {
 	if err := s.bot.SetWebhook(&tele.Webhook{
 		Endpoint:       &tele.WebhookEndpoint{PublicURL: s.cfg.WebhookURL()},
 		SecretToken:    s.cfg.WebhookSecret,
-		AllowedUpdates: []string{"message", "edited_message", "callback_query", "chat_member", "my_chat_member"},
+		AllowedUpdates: []string{"message", "edited_message", "channel_post", "edited_channel_post", "callback_query", "chat_member", "my_chat_member"},
 	}); err != nil {
 		return fmt.Errorf("set webhook: %w", err)
 	}
@@ -439,6 +442,9 @@ func (s *Service) registerHandlers() {
 	})
 	s.bot.Handle(tele.OnEdited, func(c tele.Context) error {
 		return s.runHandler("edited", c, s.handleEditedMessage)
+	})
+	s.bot.Handle(tele.OnPinned, func(c tele.Context) error {
+		return s.runHandler("pinned", c, s.assistant.handlePinned)
 	})
 	s.bot.Handle(tele.OnPhoto, func(c tele.Context) error {
 		return s.runHandler("photo", c, s.handleIncomingMessage)
