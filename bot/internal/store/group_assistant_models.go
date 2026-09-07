@@ -4,49 +4,69 @@ import "time"
 
 // GroupAssistantPolicy is independent from GuardPolicy and moderation records.
 type GroupAssistantPolicy struct {
-	ChatID            int64
-	Version           int64
-	ChatEnabled       bool
-	LearningEnabled   bool
-	TriggerMode       string
-	FollowupWindowSec int32
-	MaxFollowupTurns  int32
-	ChatModelRef      string
-	LearningModelRef  string
-	Temperature       float64
-	SystemPrompt      string
-	HistoryLimit      int32
-	RetentionDays     int32
-	CollectionPolicy  string
-	ToolAllowlist     []string
-	AllowDomains      []string
-	MaxQueueDepth     int32
-	MaxQueueWaitSec   int32
-	UpdatedBy         *int64
-	CreatedAt         time.Time
-	UpdatedAt         time.Time
+	ChatID                    int64
+	Version                   int64
+	ChatEnabled               bool
+	LearningEnabled           bool
+	TriggerMode               string
+	FollowupWindowSec         int32
+	MaxFollowupTurns          int32
+	ChatModelRef              string
+	LearningModelRef          string
+	Temperature               float64
+	SystemPrompt              string
+	HistoryLimit              int32
+	RetentionDays             int32
+	CollectionPolicy          string
+	ToolAllowlist             []string
+	AllowDomains              []string
+	MaxQueueDepth             int32
+	MaxQueueWaitSec           int32
+	ProactiveInterjectEnabled bool
+	ProactiveColdTopicEnabled bool
+	ColdTopicIdleMinutes      int32
+	ColdTopicQuietStart       int32
+	ColdTopicQuietEnd         int32
+	MimicTargetUserID         int64
+	MimicTargetUserName       string
+	MimicProfileText          string
+	MimicSampleCount          int32
+	MimicDistilledAtCount     int32
+	UpdatedBy                 *int64
+	CreatedAt                 time.Time
+	UpdatedAt                 time.Time
 }
 
 type UpsertGroupAssistantPolicyParams struct {
-	ChatID            int64
-	ExpectedVersion   int64
-	ChatEnabled       bool
-	LearningEnabled   bool
-	TriggerMode       string
-	FollowupWindowSec int32
-	MaxFollowupTurns  int32
-	ChatModelRef      string
-	LearningModelRef  string
-	Temperature       float64
-	SystemPrompt      string
-	HistoryLimit      int32
-	RetentionDays     int32
-	CollectionPolicy  string
-	ToolAllowlist     []string
-	AllowDomains      []string
-	MaxQueueDepth     int32
-	MaxQueueWaitSec   int32
-	UpdatedBy         *int64
+	ChatID                    int64
+	ExpectedVersion           int64
+	ChatEnabled               bool
+	LearningEnabled           bool
+	TriggerMode               string
+	FollowupWindowSec         int32
+	MaxFollowupTurns          int32
+	ChatModelRef              string
+	LearningModelRef          string
+	Temperature               float64
+	SystemPrompt              string
+	HistoryLimit              int32
+	RetentionDays             int32
+	CollectionPolicy          string
+	ToolAllowlist             []string
+	AllowDomains              []string
+	MaxQueueDepth             int32
+	MaxQueueWaitSec           int32
+	ProactiveInterjectEnabled bool
+	ProactiveColdTopicEnabled bool
+	ColdTopicIdleMinutes      int32
+	ColdTopicQuietStart       int32
+	ColdTopicQuietEnd         int32
+	MimicTargetUserID         int64
+	MimicTargetUserName       string
+	MimicProfileText          string
+	MimicSampleCount          int32
+	MimicDistilledAtCount     int32
+	UpdatedBy                 *int64
 }
 
 type GroupAssistantPool struct {
@@ -243,6 +263,21 @@ type CreateGroupAssistantConflictParams struct {
 	SourceSnippet      string
 }
 
+type GroupAssistantStyleSample struct {
+	ID        int64
+	ChatID    int64
+	UserID    int64
+	Content   string
+	CreatedAt time.Time
+}
+
+type GroupAssistantRecentSender struct {
+	SenderID     int64
+	SenderName   string
+	MessageCount int64
+	LastSeenAt   time.Time
+}
+
 type GroupAssistantDispatch struct {
 	ID         int64
 	ChatID     int64
@@ -255,6 +290,12 @@ type GroupAssistantDispatch struct {
 	ErrorText  string
 	LatencyMs  *int32
 	CreatedAt  time.Time
+}
+
+type CreateGroupAssistantStyleSampleParams struct {
+	ChatID  int64
+	UserID  int64
+	Content string
 }
 
 type CreateGroupAssistantDispatchParams struct {

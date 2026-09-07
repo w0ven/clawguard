@@ -34,6 +34,7 @@ func (s *Server) registerGroupAssistantRoutes(admin *echo.Group) {
 	group.GET("/model-pool", s.handleGetGroupAssistantPool)
 	group.PUT("/model-pool", s.handlePutGroupAssistantPool)
 	group.GET("/tools", s.handleListGroupAssistantTools)
+	group.GET("/recent-senders", s.handleListGroupAssistantRecentSenders)
 	group.GET("/memories", s.handleListGroupAssistantMemories)
 	group.POST("/memories", s.handleCreateGroupAssistantMemory)
 	group.GET("/memories/:id", s.handleGetGroupAssistantMemory)
@@ -88,7 +89,7 @@ func defaultGroupAssistantPolicy(chatID int64) store.GroupAssistantPolicy {
 	return store.GroupAssistantPolicy{ChatID: chatID, Version: 0, TriggerMode: "mention_or_reply", FollowupWindowSec: 300,
 		MaxFollowupTurns: 5, Temperature: 0.3, HistoryLimit: 30, RetentionDays: 7,
 		CollectionPolicy: "history_7d_and_long_term_summary", ToolAllowlist: []string{"knowledge_query", "conversation_recall", "webfetch_readonly"}, AllowDomains: []string{},
-		MaxQueueDepth: 10, MaxQueueWaitSec: 15}
+		MaxQueueDepth: 10, MaxQueueWaitSec: 15, ColdTopicIdleMinutes: 180, ColdTopicQuietStart: 0, ColdTopicQuietEnd: 8}
 }
 
 func serializeGroupAssistantPolicy(v store.GroupAssistantPolicy) map[string]any {
@@ -99,6 +100,10 @@ func serializeGroupAssistantPolicy(v store.GroupAssistantPolicy) map[string]any 
 		"system_prompt": v.SystemPrompt, "history_limit": v.HistoryLimit, "retention_days": v.RetentionDays,
 		"collection_policy": v.CollectionPolicy, "tool_allowlist": v.ToolAllowlist, "allow_domains": v.AllowDomains,
 		"max_queue_depth": v.MaxQueueDepth, "max_queue_wait_sec": v.MaxQueueWaitSec,
+		"proactive_interject_enabled": v.ProactiveInterjectEnabled, "proactive_cold_topic_enabled": v.ProactiveColdTopicEnabled,
+		"cold_topic_idle_minutes": v.ColdTopicIdleMinutes, "cold_topic_quiet_start": v.ColdTopicQuietStart, "cold_topic_quiet_end": v.ColdTopicQuietEnd,
+		"mimic_target_user_id": v.MimicTargetUserID, "mimic_target_user_name": v.MimicTargetUserName, "mimic_profile_text": v.MimicProfileText,
+		"mimic_sample_count": v.MimicSampleCount, "mimic_distilled_at_count": v.MimicDistilledAtCount,
 		"updated_by": v.UpdatedBy, "created_at": v.CreatedAt, "updated_at": v.UpdatedAt,
 	}
 }
@@ -131,31 +136,76 @@ func (s *Server) handleGetGroupAssistant(c echo.Context) error {
 	} else if !errors.Is(poolErr, pgx.ErrNoRows) {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "load assistant pool failed"})
 	}
+	readiness := s.botService.Assistant().ChatReadiness(c.Request().Context(), chatID)
 	return c.JSON(http.StatusOK, map[string]any{"policy": serializeGroupAssistantPolicy(policy), "model_pool": poolResponse,
-		"defaults": map[string]any{"disabled": true, "retention_days": 7, "history_retention": "7 days", "remote_quota": "unknown"}})
+		"readiness": readiness,
+		"defaults":  map[string]any{"disabled": true, "retention_days": 7, "history_retention": "7 days", "remote_quota": "unknown"}})
 }
 
 type groupAssistantPolicyRequest struct {
-	ExpectedVersion   int64    `json:"expected_version"`
-	ChatEnabled       bool     `json:"chat_enabled"`
-	LearningEnabled   bool     `json:"learning_enabled"`
-	TriggerMode       string   `json:"trigger_mode"`
-	FollowupWindowSec int32    `json:"followup_window_sec"`
-	MaxFollowupTurns  int32    `json:"max_followup_turns"`
-	ChatModelRef      string   `json:"chat_model_ref"`
-	LearningModelRef  string   `json:"learning_model_ref"`
-	Temperature       float64  `json:"temperature"`
-	SystemPrompt      string   `json:"system_prompt"`
-	HistoryLimit      int32    `json:"history_limit"`
-	RetentionDays     int32    `json:"retention_days"`
-	CollectionPolicy  string   `json:"collection_policy"`
-	ToolAllowlist     []string `json:"tool_allowlist"`
-	AllowDomains      []string `json:"allow_domains"`
-	MaxQueueDepth     int32    `json:"max_queue_depth"`
-	MaxQueueWaitSec   int32    `json:"max_queue_wait_sec"`
+	ExpectedVersion           int64    `json:"expected_version"`
+	ChatEnabled               bool     `json:"chat_enabled"`
+	LearningEnabled           bool     `json:"learning_enabled"`
+	TriggerMode               string   `json:"trigger_mode"`
+	FollowupWindowSec         int32    `json:"followup_window_sec"`
+	MaxFollowupTurns          int32    `json:"max_followup_turns"`
+	ChatModelRef              string   `json:"chat_model_ref"`
+	LearningModelRef          string   `json:"learning_model_ref"`
+	Temperature               float64  `json:"temperature"`
+	SystemPrompt              string   `json:"system_prompt"`
+	HistoryLimit              int32    `json:"history_limit"`
+	RetentionDays             int32    `json:"retention_days"`
+	CollectionPolicy          string   `json:"collection_policy"`
+	ToolAllowlist             []string `json:"tool_allowlist"`
+	AllowDomains              []string `json:"allow_domains"`
+	MaxQueueDepth             int32    `json:"max_queue_depth"`
+	MaxQueueWaitSec           int32    `json:"max_queue_wait_sec"`
+	ProactiveInterjectEnabled bool     `json:"proactive_interject_enabled"`
+	ProactiveColdTopicEnabled bool     `json:"proactive_cold_topic_enabled"`
+	ColdTopicIdleMinutes      *int32   `json:"cold_topic_idle_minutes"`
+	ColdTopicQuietStart       *int32   `json:"cold_topic_quiet_start"`
+	ColdTopicQuietEnd         *int32   `json:"cold_topic_quiet_end"`
+	MimicTargetUserID         int64    `json:"mimic_target_user_id"`
+	MimicTargetUserName       string   `json:"mimic_target_user_name"`
+	MimicProfileText          string   `json:"mimic_profile_text"`
+	MimicSampleCount          int32    `json:"mimic_sample_count"`
+	MimicDistilledAtCount     int32    `json:"mimic_distilled_at_count"`
 }
 
 func validateGroupAssistantPolicyRequest(v *groupAssistantPolicyRequest) error {
+	idleMinutes := int32(180)
+	quietStart, quietEnd := int32(0), int32(8)
+	if v.ColdTopicIdleMinutes != nil {
+		idleMinutes = *v.ColdTopicIdleMinutes
+	}
+	if v.ColdTopicQuietStart != nil {
+		quietStart = *v.ColdTopicQuietStart
+	}
+	if v.ColdTopicQuietEnd != nil {
+		quietEnd = *v.ColdTopicQuietEnd
+	}
+	if idleMinutes < 180 {
+		return fmt.Errorf("cold_topic_idle_minutes must be at least 180")
+	}
+	if quietStart < 0 || quietStart > 23 || quietEnd < 0 || quietEnd > 23 {
+		return fmt.Errorf("cold_topic quiet hours out of range")
+	}
+	v.ColdTopicIdleMinutes = &idleMinutes
+	v.ColdTopicQuietStart = &quietStart
+	v.ColdTopicQuietEnd = &quietEnd
+	if v.MimicTargetUserID < 0 {
+		return fmt.Errorf("mimic_target_user_id cannot be negative")
+	}
+	if len([]rune(v.MimicTargetUserName)) > 80 || len([]rune(v.MimicProfileText)) > 1200 {
+		return fmt.Errorf("mimic profile or target name too long")
+	}
+	if v.MimicSampleCount < 0 || v.MimicSampleCount > 1000 || v.MimicDistilledAtCount < 0 || v.MimicDistilledAtCount > 1000 {
+		return fmt.Errorf("mimic counters out of range")
+	}
+	if v.MimicTargetUserID == 0 {
+		v.MimicTargetUserName, v.MimicProfileText = "", ""
+		v.MimicSampleCount, v.MimicDistilledAtCount = 0, 0
+	}
 	if v.TriggerMode == "" {
 		v.TriggerMode = "mention_or_reply"
 	}
@@ -216,6 +266,75 @@ func validateGroupAssistantPolicyRequest(v *groupAssistantPolicyRequest) error {
 	return nil
 }
 
+func autoAssistantEndpointID(task, modelRef string, existing map[string]struct{}) string {
+	digest := sha256.Sum256([]byte(task + "\x00" + strings.TrimSpace(modelRef)))
+	base := fmt.Sprintf("auto-%s-%x", task, digest[:6])
+	id := base
+	for i := 2; ; i++ {
+		if _, exists := existing[id]; !exists {
+			return id
+		}
+		id = fmt.Sprintf("%s-%d", base, i)
+	}
+}
+
+func buildAutoAssistantPool(current store.GroupAssistantPool, poolErr error, chatModelRef, learningModelRef string) (assistantbot.AssistantPoolConfig, int64, bool, error) {
+	cfg := assistantbot.AssistantPoolConfig{Strategy: "primary-overflow", TaskAssignments: map[string]assistantbot.AssistantTaskAssignment{}, Endpoints: []assistantbot.AssistantPoolEndpoint{}}
+	version := int64(0)
+	poolExists := poolErr == nil
+	if poolErr != nil && !errors.Is(poolErr, pgx.ErrNoRows) {
+		return cfg, 0, false, poolErr
+	}
+	if poolExists {
+		version = current.Version
+		if len(current.Config) > 0 {
+			if err := json.Unmarshal(current.Config, &cfg); err != nil {
+				return cfg, version, true, fmt.Errorf("invalid stored assistant pool: %w", err)
+			}
+		}
+		if cfg.Strategy == "" {
+			cfg.Strategy = "primary-overflow"
+		}
+		if cfg.TaskAssignments == nil {
+			cfg.TaskAssignments = map[string]assistantbot.AssistantTaskAssignment{}
+		}
+		if cfg.Endpoints == nil {
+			cfg.Endpoints = []assistantbot.AssistantPoolEndpoint{}
+		}
+	}
+	refs := []struct {
+		task string
+		ref  string
+	}{
+		{task: "chat", ref: strings.TrimSpace(chatModelRef)},
+		{task: "learning", ref: strings.TrimSpace(learningModelRef)},
+	}
+	ids := make(map[string]struct{}, len(cfg.Endpoints))
+	for _, endpoint := range cfg.Endpoints {
+		ids[endpoint.ID] = struct{}{}
+	}
+	changed := false
+	for _, item := range refs {
+		if item.ref == "" {
+			continue
+		}
+		assignment := cfg.TaskAssignments[item.task]
+		if strings.TrimSpace(assignment.Primary) != "" {
+			continue
+		}
+		id := autoAssistantEndpointID(item.task, item.ref, ids)
+		ids[id] = struct{}{}
+		cfg.Endpoints = append(cfg.Endpoints, assistantbot.AssistantPoolEndpoint{
+			ID: id, Name: item.ref, ModelRef: item.ref, Role: "primary", Priority: 0,
+			MaxConcurrency: 2, TimeoutMs: 30000, CooldownSeconds: 30, SupportsTools: item.task == "chat",
+		})
+		assignment.Primary = id
+		cfg.TaskAssignments[item.task] = assignment
+		changed = true
+	}
+	return cfg, version, changed, nil
+}
+
 func (s *Server) handlePutGroupAssistant(c echo.Context) error {
 	admin, chatID, err := s.assistantAccess(c)
 	if err != nil {
@@ -233,7 +352,10 @@ func (s *Server) handlePutGroupAssistant(c echo.Context) error {
 	}
 	if req.ChatModelRef != "" {
 		if err := s.botService.Assistant().ValidateModelRef(req.ChatModelRef, true); err != nil {
-			return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid chat_model_ref: " + err.Error()})
+			if req.ChatEnabled {
+				return c.JSON(http.StatusBadRequest, map[string]string{"error": "还不能启用聊天，请先选择已声明能调用技能的聊天模型。"})
+			}
+			return c.JSON(http.StatusBadRequest, map[string]string{"error": "聊天模型不可用，请选择已启用且已声明能调用技能的模型"})
 		}
 	}
 	if req.LearningModelRef != "" {
@@ -241,27 +363,68 @@ func (s *Server) handlePutGroupAssistant(c echo.Context) error {
 			return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid learning_model_ref: " + err.Error()})
 		}
 	}
-	updated, err := s.botService.Assistant().Policy(c.Request().Context(), chatID)
-	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+	updated, policyErr := s.botService.Assistant().Policy(c.Request().Context(), chatID)
+	if policyErr != nil && !errors.Is(policyErr, pgx.ErrNoRows) {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "load assistant policy failed"})
+	}
+	chatModelRef := strings.TrimSpace(req.ChatModelRef)
+	learningModelRef := strings.TrimSpace(req.LearningModelRef)
+	currentPool, poolErr := s.botService.Assistant().Pool(c.Request().Context(), chatID)
+	autoCfg, poolVersion, autoPool, err := buildAutoAssistantPool(currentPool, poolErr, chatModelRef, learningModelRef)
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "模型池配置无效，请重新保存模型设置"})
+	}
+	readiness := s.botService.Assistant().ChatReadinessForPool(autoCfg)
+	if req.ChatEnabled && !readiness.CanChat {
+		blocker := "还不能启用聊天，请先选择已声明能调用技能的聊天模型。"
+		if len(readiness.Blockers) > 0 {
+			blocker = readiness.Blockers[0]
+		}
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": blocker})
 	}
 	arg := store.UpsertGroupAssistantPolicyParams{ChatID: chatID, ExpectedVersion: req.ExpectedVersion,
 		ChatEnabled: req.ChatEnabled, LearningEnabled: req.LearningEnabled, TriggerMode: req.TriggerMode,
-		FollowupWindowSec: req.FollowupWindowSec, MaxFollowupTurns: req.MaxFollowupTurns, ChatModelRef: strings.TrimSpace(req.ChatModelRef),
-		LearningModelRef: strings.TrimSpace(req.LearningModelRef), Temperature: req.Temperature, SystemPrompt: strings.TrimSpace(req.SystemPrompt),
+		FollowupWindowSec: req.FollowupWindowSec, MaxFollowupTurns: req.MaxFollowupTurns, ChatModelRef: chatModelRef,
+		LearningModelRef: learningModelRef, Temperature: req.Temperature, SystemPrompt: strings.TrimSpace(req.SystemPrompt),
 		HistoryLimit: req.HistoryLimit, RetentionDays: req.RetentionDays, CollectionPolicy: strings.TrimSpace(req.CollectionPolicy),
 		ToolAllowlist: req.ToolAllowlist, AllowDomains: req.AllowDomains, MaxQueueDepth: req.MaxQueueDepth, MaxQueueWaitSec: req.MaxQueueWaitSec,
-		UpdatedBy: &admin.TelegramID}
+		ProactiveInterjectEnabled: req.ProactiveInterjectEnabled, ProactiveColdTopicEnabled: req.ProactiveColdTopicEnabled,
+		ColdTopicIdleMinutes: *req.ColdTopicIdleMinutes, ColdTopicQuietStart: *req.ColdTopicQuietStart, ColdTopicQuietEnd: *req.ColdTopicQuietEnd,
+		MimicTargetUserID: req.MimicTargetUserID, MimicTargetUserName: strings.TrimSpace(req.MimicTargetUserName), MimicProfileText: strings.TrimSpace(req.MimicProfileText),
+		MimicSampleCount: req.MimicSampleCount, MimicDistilledAtCount: req.MimicDistilledAtCount, UpdatedBy: &admin.TelegramID}
 	if arg.CollectionPolicy == "" {
 		arg.CollectionPolicy = "history_7d_and_long_term_summary"
 	}
-	if arg.ExpectedVersion == 0 && err == nil {
+	if req.ExpectedVersion == 0 && policyErr == nil {
 		return c.JSON(http.StatusConflict, map[string]string{"error": "assistant policy already exists; submit expected_version"})
 	}
-	result, err := s.botService.Queries().UpsertGroupAssistantPolicy(c.Request().Context(), arg)
+	var result store.GroupAssistantPolicy
+	save := func(q *store.Queries) error {
+		var saveErr error
+		result, saveErr = q.UpsertGroupAssistantPolicy(c.Request().Context(), arg)
+		if saveErr != nil {
+			return saveErr
+		}
+		if autoPool {
+			raw, encodeErr := jsonMarshal(autoCfg)
+			if encodeErr != nil {
+				return encodeErr
+			}
+			_, saveErr = q.UpsertGroupAssistantPool(c.Request().Context(), store.UpsertGroupAssistantPoolParams{
+				ChatID: chatID, ExpectedVersion: poolVersion, Strategy: autoCfg.Strategy, Config: raw, UpdatedBy: &admin.TelegramID,
+			})
+		}
+		return saveErr
+	}
+	if autoPool {
+		err = s.botService.Queries().Transact(c.Request().Context(), save)
+	} else {
+		err = save(s.botService.Queries())
+	}
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return c.JSON(http.StatusConflict, map[string]any{"error": "assistant policy version conflict", "current": serializeGroupAssistantPolicy(updated)})
+			current := serializeGroupAssistantPolicy(updated)
+			return c.JSON(http.StatusConflict, map[string]any{"error": "assistant policy version conflict", "current": current})
 		}
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "save assistant policy failed"})
 	}
@@ -339,7 +502,7 @@ func (s *Server) handleGetGroupAssistantStatus(c echo.Context) error {
 	status, err := s.botService.Assistant().Status(c.Request().Context(), chatID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return c.JSON(http.StatusOK, map[string]any{"chat_id": chatID, "active_strategy": "primary-overflow", "endpoints_status": []any{}, "queue_depth": 0,
-			"remote_quota_note": "未知（未观测）"})
+			"remote_quota_note": "未知（未观测）", "can_chat": false, "blockers": []string{"还不能回复：先选聊天模型"}})
 	}
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "load assistant status failed"})
@@ -376,6 +539,26 @@ func toolEnabled(list []string, name string) bool {
 		}
 	}
 	return false
+}
+
+func (s *Server) handleListGroupAssistantRecentSenders(c echo.Context) error {
+	_, chatID, err := s.assistantAccess(c)
+	if err != nil {
+		return assistantAccessResponse(c, err)
+	}
+	limit := parseAssistantLimit(c.QueryParam("limit"), 50)
+	items, err := s.botService.Queries().ListGroupAssistantRecentSenders(c.Request().Context(), chatID, limit)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "list recent senders failed"})
+	}
+	senders := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		senders = append(senders, map[string]any{
+			"user_id": item.SenderID, "user_name": item.SenderName,
+			"message_count": item.MessageCount, "last_seen_at": item.LastSeenAt,
+		})
+	}
+	return c.JSON(http.StatusOK, map[string]any{"chat_id": chatID, "senders": senders})
 }
 
 func serializeAssistantMemory(v store.GroupAssistantMemory) map[string]any {
