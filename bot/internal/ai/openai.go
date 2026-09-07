@@ -53,19 +53,22 @@ func NewOpenAICompatibleClient(baseURL, apiKey string, timeout time.Duration, ex
 }
 
 type chatCompletionRequest struct {
-	Model       string    `json:"model"`
-	Messages    []Message `json:"messages"`
-	Temperature float64   `json:"temperature"`
-	MaxTokens   int       `json:"max_tokens,omitempty"`
+	Model       string           `json:"model"`
+	Messages    []Message        `json:"messages"`
+	Temperature float64          `json:"temperature"`
+	MaxTokens   int              `json:"max_tokens,omitempty"`
+	Tools       []ToolDefinition `json:"tools,omitempty"`
 }
 
 type chatCompletionResponse struct {
 	Model   string `json:"model"`
 	Choices []struct {
 		Message struct {
-			Role    string `json:"role"`
-			Content string `json:"content"`
+			Role      string     `json:"role"`
+			Content   string     `json:"content"`
+			ToolCalls []ToolCall `json:"tool_calls,omitempty"`
 		} `json:"message"`
+		FinishReason string `json:"finish_reason"`
 	} `json:"choices"`
 	Usage struct {
 		PromptTokens     int `json:"prompt_tokens"`
@@ -110,8 +113,8 @@ func (c *OpenAICompatibleClient) Check(ctx context.Context, req CheckRequest) (*
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 300 {
-		payload, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return nil, fmt.Errorf("llm status %d: %s", resp.StatusCode, strings.TrimSpace(string(payload)))
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1024))
+		return nil, providerHTTPError(resp, fmt.Errorf("llm status %d", resp.StatusCode))
 	}
 
 	var decoded chatCompletionResponse
@@ -206,8 +209,8 @@ func (c *OpenAICompatibleClient) Probe(ctx context.Context, modelKey string) (in
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 300 {
-		payload, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return 0, fmt.Errorf("probe status %d: %s", resp.StatusCode, strings.TrimSpace(string(payload)))
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 512))
+		return 0, providerHTTPError(resp, fmt.Errorf("probe status %d", resp.StatusCode))
 	}
 
 	var decoded chatCompletionResponse
@@ -272,8 +275,8 @@ func (c *OpenAICompatibleClient) Chat(ctx context.Context, req CheckRequest) (*C
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 300 {
-		payload, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return nil, fmt.Errorf("chat status %d: %s", resp.StatusCode, strings.TrimSpace(string(payload)))
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1024))
+		return nil, providerHTTPError(resp, fmt.Errorf("chat status %d", resp.StatusCode))
 	}
 	var decoded chatCompletionResponse
 	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
