@@ -16,6 +16,11 @@ export default function RootLayout({
   return (
     <html lang="zh-CN" suppressHydrationWarning>
       <head>
+        <script
+          dangerouslySetInnerHTML={{
+            __html: `(() => { try { const allowed = ["emerald", "ocean", "graphite"]; const stored = window.localStorage.getItem("clawguard-ui-theme"); const theme = allowed.includes(stored || "") ? stored : "emerald"; document.documentElement.dataset.theme = theme; document.documentElement.style.colorScheme = theme === "graphite" ? "dark" : "light"; } catch (_) { document.documentElement.dataset.theme = "emerald"; document.documentElement.style.colorScheme = "light"; } })();`,
+          }}
+        />
         <link
           rel="stylesheet"
           href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"

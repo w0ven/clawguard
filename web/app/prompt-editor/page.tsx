@@ -21,6 +21,7 @@ import {
   saveGlobalConfigSection,
 } from "@/lib/global-config";
 import { useToast } from "@/components/providers";
+import { useDirtyGuard } from "@/components/dirty-guard";
 import { Copy, Eye, Play, Save } from "lucide-react";
 
 type AIConfigShape = {
@@ -131,6 +132,7 @@ export default function PromptEditorPage() {
 
   const messageDirty = messageRules !== originalMessage;
   const bioDirty = bioRules !== originalBio;
+  useDirtyGuard(messageDirty || bioDirty, "Prompt 草稿尚有未保存修改，确定离开吗？");
 
   function switchTestScene(scene: "message" | "bio") {
     setTestScene(scene);

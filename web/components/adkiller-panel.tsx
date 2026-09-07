@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Card, CardBody, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -15,6 +15,7 @@ import {
   saveGlobalConfigSection,
 } from "@/lib/global-config";
 import { useToast } from "@/components/providers";
+import { useDirtyGuard } from "@/components/dirty-guard";
 import type { Group } from "@/lib/types";
 
 type ToastFn = (message: string, tone?: "success" | "error") => void;
@@ -94,6 +95,7 @@ export function AdKillerPanel({ pushToast }: { pushToast?: ToastFn }) {
   const [saving, setSaving] = useState(false);
   const [groups, setGroups] = useState<Group[]>([]);
   const [config, setConfig] = useState<AdKillerConfig>(parseConfig({}));
+  const [initialConfig, setInitialConfig] = useState<AdKillerConfig>(parseConfig({}));
   const [keySet, setKeySet] = useState(false);
   const [keyHint, setKeyHint] = useState("");
   const [keyDraft, setKeyDraft] = useState("");
@@ -101,6 +103,8 @@ export function AdKillerPanel({ pushToast }: { pushToast?: ToastFn }) {
   const [testText, setTestText] = useState("");
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState("");
+  const configRef = useRef(config);
+  configRef.current = config;
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -114,7 +118,9 @@ export function AdKillerPanel({ pushToast }: { pushToast?: ToastFn }) {
       ]);
       setKeySet(Boolean(secret.api_key_set));
       setKeyHint(secret.api_key_hint ?? "");
-      setConfig(parseConfig(asRecord(asRecord(global.config).ai).adkiller));
+      const nextConfig = parseConfig(asRecord(asRecord(global.config).ai).adkiller);
+      setConfig(nextConfig);
+      setInitialConfig(nextConfig);
       setGroups(groupPayload.groups ?? []);
     } catch (error) {
       notify(error instanceof Error ? error.message : "加载 AdKiller 失败", "error");
@@ -128,6 +134,13 @@ export function AdKillerPanel({ pushToast }: { pushToast?: ToastFn }) {
   }, [load]);
 
   const selectedCount = config.enabled_chat_ids.length;
+  const configDirty = JSON.stringify(config) !== JSON.stringify(initialConfig);
+  const dirty = configDirty || keyDraft.trim() !== "";
+  useDirtyGuard(
+    dirty,
+    "AdKiller 草稿尚未保存，确定离开吗？",
+    "adkiller",
+  );
   const groupTitle = useMemo(() => {
     const map = new Map(groups.map((group) => [group.chat_id, group.title]));
     return (chatID: number) => map.get(chatID) || String(chatID);
@@ -175,6 +188,7 @@ export function AdKillerPanel({ pushToast }: { pushToast?: ToastFn }) {
   }
 
   async function saveSettings() {
+    const submittedConfig = config;
     setSaving(true);
     try {
       const payload = await saveGlobalConfigSection("adkiller", {
@@ -188,7 +202,15 @@ export function AdKillerPanel({ pushToast }: { pushToast?: ToastFn }) {
           },
         },
       });
-      setConfig(parseConfig(asRecord(asRecord(payload.config).ai).adkiller));
+      const nextConfig = parseConfig(asRecord(asRecord(payload.config).ai).adkiller);
+      const latestDraft = configRef.current;
+      const hasNewerDraft =
+        JSON.stringify(latestDraft) !== JSON.stringify(submittedConfig);
+      // The response represents the snapshot sent above. If the user edited
+      // while it was in flight, keep that newer draft and mark it dirty against
+      // the acknowledged server snapshot instead of overwriting it.
+      setInitialConfig(nextConfig);
+      setConfig(hasNewerDraft ? latestDraft : nextConfig);
       notify("AdKiller 设置已保存", "success");
     } catch (error) {
       notify(
@@ -309,6 +331,11 @@ export function AdKillerPanel({ pushToast }: { pushToast?: ToastFn }) {
 
   return (
     <div className="space-y-4">
+      <fieldset
+        aria-disabled={saving}
+        aria-busy={saving}
+        className="min-w-0 space-y-4 border-0 p-0"
+      >
       <Card>
         <CardHeader>
           <CardTitle>AdKiller 前置广告检测</CardTitle>
@@ -319,6 +346,7 @@ export function AdKillerPanel({ pushToast }: { pushToast?: ToastFn }) {
           </p>
           <label className="flex items-center gap-2 text-sm">
             <Switch
+              aria-disabled={saving}
               checked={config.enabled}
               onCheckedChange={(enabled) =>
                 setConfig((current) => ({ ...current, enabled }))
@@ -333,6 +361,7 @@ export function AdKillerPanel({ pushToast }: { pushToast?: ToastFn }) {
                 type="number"
                 min={100}
                 max={10000}
+                aria-disabled={saving}
                 value={config.timeout_ms}
                 onChange={(event) =>
                   setConfig((current) => ({
@@ -345,6 +374,7 @@ export function AdKillerPanel({ pushToast }: { pushToast?: ToastFn }) {
             <label className="flex flex-col gap-1 text-sm">
               <span>失败策略</span>
               <Select
+                aria-disabled={saving}
                 value={config.on_failure}
                 onChange={(event) =>
                   setConfig((current) => ({
@@ -379,6 +409,7 @@ export function AdKillerPanel({ pushToast }: { pushToast?: ToastFn }) {
                 type="number"
                 min={0}
                 max={100}
+                aria-disabled={saving}
                 value={band.min_score}
                 onChange={(event) =>
                   updateBand(index, {
@@ -390,6 +421,7 @@ export function AdKillerPanel({ pushToast }: { pushToast?: ToastFn }) {
                 type="number"
                 min={0}
                 max={100}
+                aria-disabled={saving}
                 value={band.max_score}
                 onChange={(event) =>
                   updateBand(index, {
@@ -398,6 +430,7 @@ export function AdKillerPanel({ pushToast }: { pushToast?: ToastFn }) {
                 }
               />
               <Select
+                aria-disabled={saving}
                 value={band.action}
                 onChange={(event) =>
                   updateBand(index, { action: event.target.value })
@@ -408,13 +441,20 @@ export function AdKillerPanel({ pushToast }: { pushToast?: ToastFn }) {
                 type="button"
                 variant="ghost"
                 onClick={() => removeBand(index)}
-                disabled={config.score_bands.length <= 1}
+                aria-disabled={saving}
+                disabled={saving || config.score_bands.length <= 1}
               >
                 删除
               </Button>
             </div>
           ))}
-          <Button type="button" variant="secondary" onClick={addBand}>
+          <Button
+            type="button"
+            variant="secondary"
+            aria-disabled={saving}
+            onClick={addBand}
+            disabled={saving}
+          >
             增加分段
           </Button>
         </CardBody>
@@ -440,6 +480,7 @@ export function AdKillerPanel({ pushToast }: { pushToast?: ToastFn }) {
                     className="flex items-center gap-2 text-sm"
                   >
                     <Switch
+                      aria-disabled={saving}
                       checked={checked}
                       onCheckedChange={(next) =>
                         toggleChat(group.chat_id, next)
@@ -461,6 +502,7 @@ export function AdKillerPanel({ pushToast }: { pushToast?: ToastFn }) {
           </Button>
         </CardBody>
       </Card>
+      </fieldset>
 
       <Card>
         <CardHeader>

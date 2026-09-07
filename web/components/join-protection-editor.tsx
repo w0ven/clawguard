@@ -19,6 +19,7 @@ import {
 import { apiFetch } from "@/lib/api";
 import type { JoinProtectionPolicy, JoinProtectionRuntimeStatus } from "@/lib/types";
 import { useToast } from "@/components/providers";
+import { useDirtyGuard } from "@/components/dirty-guard";
 import { Button } from "@/components/ui/button";
 import { Card, CardBody, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -168,15 +169,11 @@ export function JoinProtectionEditor({ chatId }: Props) {
     () => Boolean(initial && draft && JSON.stringify(initial) !== JSON.stringify(draft)),
     [initial, draft],
   );
-
-  useEffect(() => {
-    if (!dirty) return;
-    const warnBeforeLeave = (event: BeforeUnloadEvent) => {
-      event.preventDefault();
-    };
-    window.addEventListener("beforeunload", warnBeforeLeave);
-    return () => window.removeEventListener("beforeunload", warnBeforeLeave);
-  }, [dirty]);
+  useDirtyGuard(
+    dirty,
+    "入群防护草稿尚未保存，确定离开吗？",
+    "join-protection",
+  );
 
   function updateNumber(key: NumberField, raw: string) {
     const value = Number(raw);
@@ -221,7 +218,7 @@ export function JoinProtectionEditor({ chatId }: Props) {
   const advancedFields = fieldDefinitions.filter((field) => field.advanced);
 
   return (
-    <div className="space-y-5 pb-20">
+    <fieldset disabled={saving} className="min-w-0 space-y-5 border-0 p-0 pb-20">
       <Card>
         <CardHeader>
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -306,7 +303,7 @@ export function JoinProtectionEditor({ chatId }: Props) {
         <Button className="w-full sm:w-auto" variant="secondary" size="lg" disabled={!defaults || saving} onClick={() => { if (defaults) { setError(null); setDraft({ ...defaults }); } }}><RotateCcw className="h-4 w-4" />恢复默认值</Button>
         <Button className="w-full sm:w-auto" size="lg" disabled={!dirty || saving || Boolean(validationError)} onClick={save}><Save className="h-4 w-4" />{saving ? "保存中…" : dirty ? "保存配置" : "已保存"}</Button>
       </div>
-    </div>
+    </fieldset>
   );
 }
 

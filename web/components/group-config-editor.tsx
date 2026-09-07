@@ -38,6 +38,7 @@ import type {
   ProfileCheckLog,
 } from "@/lib/types";
 import { useToast } from "@/components/providers";
+import { useDirtyGuard, useDirtyNavigation } from "@/components/dirty-guard";
 import { ScheduledMessagesEditor } from "@/components/scheduled-messages-editor";
 import { JoinProtectionEditor } from "@/components/join-protection-editor";
 import { Save, ChevronDown, ChevronRight } from "lucide-react";
@@ -706,19 +707,37 @@ export const fieldDescriptors: FieldDescriptor[] = [
 ];
 
 const tabs = [
-  { value: "basic", label: "基础" },
-  { value: "verify", label: "验证" },
+  { value: "basic", label: "群概览" },
+  { value: "verify", label: "验证与资料" },
   { value: "join-protection", label: "入群防护" },
-  { value: "filter", label: "过滤" },
+  { value: "filter", label: "消息过滤" },
   { value: "replies", label: "关键词回复" },
   { value: "warnings", label: "警告" },
   { value: "anti-spam", label: "反垃圾" },
-  { value: "ai", label: "AI" },
+  { value: "ai", label: "AI 审核" },
   { value: "feedback", label: "动作反馈" },
-  { value: "logging", label: "日志" },
-  { value: "audit", label: "审计" },
+  { value: "logging", label: "运行日志" },
+  { value: "audit", label: "变更审计" },
   { value: "scheduled", label: "定时消息" },
 ];
+
+const INDEPENDENT_TABS = new Set(["scheduled", "join-protection"]);
+
+const configScenes = [
+  { value: "overview", label: "群概览", tabs: ["basic"] },
+  { value: "membership", label: "入群与资料", tabs: ["verify", "join-protection"] },
+  { value: "content", label: "内容与处置", tabs: ["filter", "replies", "warnings"] },
+  { value: "automation", label: "群运营", tabs: ["anti-spam", "scheduled"] },
+  { value: "intelligence", label: "AI 与反馈", tabs: ["ai", "feedback"] },
+  { value: "records", label: "记录与诊断", tabs: ["logging", "audit"] },
+] as const;
+
+function tabsForScene(scene: string) {
+  const selected = configScenes.find((item) => item.value === scene) ?? configScenes[1];
+  return selected.tabs
+    .map((value) => tabs.find((tab) => tab.value === value))
+    .filter((tab): tab is (typeof tabs)[number] => Boolean(tab));
+}
 
 type ConfigFieldGroupDescriptor = {
   key: string;
@@ -970,6 +989,8 @@ function truncateText(value: string, maxLength: number) {
 
 export function GroupConfigEditor({ group, mergedPolicy }: Props) {
   const { pushToast } = useToast();
+  const { confirmNavigation } = useDirtyNavigation();
+  const [activeScene, setActiveScene] = useState("membership");
   const [activeTab, setActiveTab] = useState("verify");
   const [initialConfig, setInitialConfig] = useState<Record<string, unknown>>(
     group.config ?? {},
@@ -1032,6 +1053,10 @@ export function GroupConfigEditor({ group, mergedPolicy }: Props) {
           return { value, label };
         });
         setLLMModelOptions(options);
+        // Normalize stale refs in both snapshots so loading model metadata does
+        // not manufacture a dirty draft before the user edits anything.
+        const normalizedInitial = cleanStaleAIModelRefs(group.config ?? {}, options);
+        setInitialConfig(normalizedInitial);
         setDraft((current) => cleanStaleAIModelRefs(current, options));
         setLLMOptionsError(null);
       })
@@ -1104,6 +1129,52 @@ export function GroupConfigEditor({ group, mergedPolicy }: Props) {
     () => JSON.stringify(initialConfig) !== JSON.stringify(draft),
     [draft, initialConfig],
   );
+  useDirtyGuard(isDirty, "群策略尚有未保存修改，确定离开吗？", "group-policy");
+
+  function independentTabMessage(tab: string) {
+    return tab === "scheduled"
+      ? "定时消息草稿尚未保存，确定切换吗？"
+      : "入群防护草稿尚未保存，确定切换吗？";
+  }
+
+  function independentTabScope(tab: string) {
+    return tab === "scheduled" ? "scheduled-messages" : "join-protection";
+  }
+
+  function changeTab(nextTab: string) {
+    if (nextTab === activeTab) {
+      return;
+    }
+    if (
+      INDEPENDENT_TABS.has(activeTab) &&
+      !confirmNavigation(
+        independentTabMessage(activeTab),
+        independentTabScope(activeTab),
+      )
+    ) {
+      return;
+    }
+    setActiveTab(nextTab);
+  }
+
+  function changeScene(nextScene: string) {
+    const nextTab = tabsForScene(nextScene)[0]?.value;
+    if (!nextTab) {
+      return;
+    }
+    if (
+      nextTab !== activeTab &&
+      INDEPENDENT_TABS.has(activeTab) &&
+      !confirmNavigation(
+        independentTabMessage(activeTab),
+        independentTabScope(activeTab),
+      )
+    ) {
+      return;
+    }
+    setActiveScene(nextScene);
+    setActiveTab(nextTab);
+  }
 
   const tabFields = fieldDescriptors
     .filter((f) => f.tab === activeTab)
@@ -1274,6 +1345,12 @@ export function GroupConfigEditor({ group, mergedPolicy }: Props) {
     );
   }
 
+  function discardConfig() {
+    if (!isDirty || window.confirm("放弃当前群策略草稿？未保存修改将被丢弃。")) {
+      setDraft(structuredClone(initialConfig) as Record<string, unknown>);
+    }
+  }
+
   async function saveConfig() {
     setSaving(true);
     try {
@@ -1333,7 +1410,27 @@ export function GroupConfigEditor({ group, mergedPolicy }: Props) {
 
   return (
     <div className="space-y-5 pb-20">
-      <Tabs tabs={tabs} value={activeTab} onValueChange={setActiveTab} className="max-w-full flex-wrap" />
+      <section className="space-y-3 rounded-2xl border border-[var(--border)] bg-[var(--surface-2)]/60 p-3 md:p-4" aria-label="配置场景">
+        <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+          <div>
+            <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-[var(--accent)]">策略工作区</p>
+            <p className="mt-1 text-xs text-[var(--text-muted)]">按任务场景查看配置；日志与策略保存边界分开。</p>
+          </div>
+          <Badge tone={isDirty ? "warning" : "success"}>{isDirty ? "有未保存修改" : "已同步"}</Badge>
+        </div>
+        <Tabs
+          tabs={configScenes.map(({ value, label }) => ({ value, label }))}
+          value={activeScene}
+          onValueChange={changeScene}
+          className="w-full"
+        />
+        <Tabs
+          tabs={tabsForScene(activeScene)}
+          value={activeTab}
+          onValueChange={changeTab}
+          className="w-full border-0 bg-transparent p-0"
+        />
+      </section>
 
       {activeTab === "basic" && (
         <div className="grid gap-4 md:grid-cols-2">
@@ -1361,25 +1458,29 @@ export function GroupConfigEditor({ group, mergedPolicy }: Props) {
             </CardBody>
           </Card>
 
-          <Card>
-            <CardHeader>
-              <CardTitle>原始覆盖配置</CardTitle>
-            </CardHeader>
-            <CardBody>
-              <pre className="max-h-96 overflow-x-auto rounded-md border border-[var(--border)] bg-[var(--surface-2)] p-3 text-xs leading-relaxed">
-                {JSON.stringify(group.config ?? {}, null, 2)}
-              </pre>
-            </CardBody>
-          </Card>
-
           <Card className="md:col-span-2">
-            <CardHeader>
-              <CardTitle>合并后生效策略</CardTitle>
-            </CardHeader>
             <CardBody>
-              <pre className="max-h-[400px] overflow-x-auto rounded-md border border-[var(--border)] bg-[var(--surface-2)] p-3 text-xs leading-relaxed">
-                {JSON.stringify(mergedPolicyState, null, 2)}
-              </pre>
+              <details className="group">
+                <summary className="flex cursor-pointer list-none items-center justify-between gap-3 text-sm font-semibold">
+                  <span>高级诊断 · 原始 JSON 与合并策略</span>
+                  <span className="text-xs font-normal text-[var(--text-muted)] group-open:hidden">展开查看</span>
+                  <span className="hidden text-xs font-normal text-[var(--text-muted)] group-open:inline">收起</span>
+                </summary>
+                <div className="mt-4 grid gap-4 xl:grid-cols-2">
+                  <div>
+                    <p className="mb-2 text-xs text-[var(--text-muted)]">当前群级覆盖（保存原样保留未知字段）</p>
+                    <pre className="max-h-96 overflow-auto rounded-xl border border-[var(--border)] bg-[var(--surface-2)] p-3 text-xs leading-relaxed">
+                      {JSON.stringify(draft, null, 2)}
+                    </pre>
+                  </div>
+                  <div>
+                    <p className="mb-2 text-xs text-[var(--text-muted)]">合并后有效策略（只读诊断）</p>
+                    <pre className="max-h-96 overflow-auto rounded-xl border border-[var(--border)] bg-[var(--surface-2)] p-3 text-xs leading-relaxed">
+                      {JSON.stringify(mergedPolicyState, null, 2)}
+                    </pre>
+                  </div>
+                </div>
+              </details>
             </CardBody>
           </Card>
         </div>
@@ -1389,7 +1490,8 @@ export function GroupConfigEditor({ group, mergedPolicy }: Props) {
         activeTab !== "audit" &&
         activeTab !== "scheduled" &&
         activeTab !== "join-protection" && (
-          <div className="space-y-3">
+          <fieldset disabled={saving} className="min-w-0 border-0 p-0">
+            <div className="space-y-3">
             {tabFields.map((field) => {
               const group = getConfigFieldGroup(field);
               if (!group) {
@@ -1491,7 +1593,8 @@ export function GroupConfigEditor({ group, mergedPolicy }: Props) {
                 }}
               />
             )}
-          </div>
+            </div>
+          </fieldset>
         )}
 
       {activeTab === "scheduled" && <ScheduledMessagesEditor group={group} />}
@@ -1561,17 +1664,18 @@ export function GroupConfigEditor({ group, mergedPolicy }: Props) {
 
       {/* sticky save */}
       {activeTab !== "scheduled" && activeTab !== "join-protection" && (
-        <div className="fixed bottom-6 right-6 z-20">
-          <Button
-            onClick={saveConfig}
-            disabled={!isDirty || saving}
-            variant={isDirty ? "primary" : "secondary"}
-            size="lg"
-            className="shadow-lg"
-          >
-            <Save className="h-4 w-4" />
-            {saving ? "保存中…" : isDirty ? "保存配置" : "已保存"}
-          </Button>
+        <div className="glass-savebar miniapp-savebar fixed inset-x-3 bottom-4 z-20 flex items-center justify-between gap-3 rounded-2xl px-3 py-2.5 md:inset-x-auto md:bottom-6 md:left-[calc(17rem+2rem)] md:right-8 md:px-4">
+          <div className="min-w-0">
+            <p className="truncate text-sm font-semibold">{isDirty ? "群策略草稿" : "群策略已保存"}</p>
+            <p className="hidden text-xs text-[var(--text-muted)] sm:block">{isDirty ? "切换主题或场景不会丢失草稿" : "只保存当前群策略，不会提交定时消息等独立资源"}</p>
+          </div>
+          <div className="flex shrink-0 items-center gap-2">
+            <Button type="button" variant="ghost" size="sm" onClick={discardConfig} disabled={!isDirty || saving}>放弃</Button>
+            <Button onClick={saveConfig} disabled={!isDirty || saving} variant={isDirty ? "primary" : "secondary"} size="sm">
+              <Save className="h-4 w-4" />
+              {saving ? "保存中…" : isDirty ? "保存策略" : "已保存"}
+            </Button>
+          </div>
         </div>
       )}
     </div>
@@ -1602,6 +1706,32 @@ type ConfigFieldGroupProps = ConfigFieldCommonProps & {
   childFields: FieldDescriptor[];
 };
 
+function formatEffectiveValue(value: unknown) {
+  if (value === undefined) return "未设置";
+  if (value === null) return "空值";
+  if (typeof value === "boolean") return value ? "开启" : "关闭";
+  if (typeof value === "number") return String(value);
+  if (typeof value === "string") return value.trim() === "" ? "空字符串" : value;
+  if (Array.isArray(value)) return value.length === 0 ? "空列表" : `${value.length} 项`;
+  if (typeof value === "object") {
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return "对象";
+    }
+  }
+  return String(value);
+}
+
+function ConfigFieldMeta({ value, inherited }: { value: unknown; inherited: boolean }) {
+  return (
+    <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-[var(--text-muted)]">
+      <span>有效值：<strong className="font-medium text-[var(--text)]">{formatEffectiveValue(value)}</strong></span>
+      <span className="rounded-full bg-[var(--surface-2)] px-2 py-0.5">来源：{inherited ? "全局继承" : "群级自定义"}</span>
+    </div>
+  );
+}
+
 function ConfigFieldCard({
   field,
   draft,
@@ -1625,6 +1755,7 @@ function ConfigFieldCard({
                 {field.description}
               </p>
             )}
+            <ConfigFieldMeta value={value} inherited={inherited} />
           </div>
           <ConfigInheritanceToggle
             inherited={inherited}
@@ -1662,6 +1793,7 @@ function ConfigFieldGroup({
     ? getEffectiveValue(draft, mergedPolicy, parentField.path)
     : undefined;
   const description = group.description ?? parentField?.description;
+  const [expanded, setExpanded] = useState(false);
 
   return (
     <Card className="border-[var(--border-strong)] bg-[var(--surface)]">
@@ -1681,6 +1813,7 @@ function ConfigFieldGroup({
                 {description}
               </p>
             )}
+            {parentField && <ConfigFieldMeta value={parentValue} inherited={parentInherited} />}
           </div>
 
           {parentField && (
@@ -1702,25 +1835,38 @@ function ConfigFieldGroup({
         </div>
 
         {childFields.length > 0 && (
-          <div className="border-l-2 border-[var(--accent)]/40 pl-4">
-            <div className="rounded-md border border-[var(--border)] bg-[var(--surface-2)]">
-              <div className="divide-y divide-[var(--border)]">
-                {childFields.map((field) => (
-                  <ConfigFieldChildRow
-                    key={fieldPathKey(field.path)}
-                    field={field}
-                    badge={group.childBadges?.[fieldPathKey(field.path)]}
-                    draft={draft}
-                    mergedPolicy={mergedPolicy}
-                    modelOptions={modelOptions}
-                    modelOptionsError={modelOptionsError}
-                    onToggleInherited={onToggleInherited}
-                    onChange={onChange}
-                  />
-                ))}
+          <>
+            <button
+              type="button"
+              aria-expanded={expanded}
+              onClick={() => setExpanded((current) => !current)}
+              className="flex min-h-10 w-full items-center justify-center gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface-2)] px-3 text-xs font-medium text-[var(--text-muted)] hover:text-[var(--text)]"
+            >
+              {expanded ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+              {expanded ? "收起详细设置" : `展开详细设置（${childFields.length} 项）`}
+            </button>
+            {expanded && (
+              <div className="border-l-2 border-[var(--accent)]/40 pl-4">
+                <div className="rounded-xl border border-[var(--border)] bg-[var(--surface-2)]">
+                  <div className="divide-y divide-[var(--border)]">
+                    {childFields.map((field) => (
+                      <ConfigFieldChildRow
+                        key={fieldPathKey(field.path)}
+                        field={field}
+                        badge={group.childBadges?.[fieldPathKey(field.path)]}
+                        draft={draft}
+                        mergedPolicy={mergedPolicy}
+                        modelOptions={modelOptions}
+                        modelOptionsError={modelOptionsError}
+                        onToggleInherited={onToggleInherited}
+                        onChange={onChange}
+                      />
+                    ))}
+                  </div>
+                </div>
               </div>
-            </div>
-          </div>
+            )}
+          </>
         )}
       </CardBody>
     </Card>
@@ -1759,6 +1905,7 @@ function ConfigFieldChildRow({
             {field.description}
           </p>
         )}
+        <ConfigFieldMeta value={value} inherited={inherited} />
         <ConfigInheritanceToggle
           inherited={inherited}
           onChange={(checked) => onToggleInherited(field, checked)}

@@ -14,9 +14,28 @@
 
 ![Login](docs/screenshots/login.png)
 
-![Dashboard](docs/screenshots/dashboard.png)
+<details>
+<summary>Console and mobile screenshots</summary>
 
-The login page is a live capture. The dashboard uses local UI with sample data, not production records.
+**Dashboard (emerald)**
+
+![Dashboard (emerald)](docs/screenshots/dashboard.png)
+
+**Group configuration (ocean blue)**
+
+![Group configuration (ocean blue)](docs/screenshots/group-config.png)
+
+**Model management (graphite)**
+
+![Model management (graphite)](docs/screenshots/graphite-models.png)
+
+**Mobile**
+
+![Mobile](docs/screenshots/mobile-group.png)
+
+</details>
+
+The login page is a live capture. The console screenshots above are from the actual Next React UI using a local test fixture and simulated data, not production records; the mobile / Mini App view shows layout and SDK simulation only and does not represent a real Telegram test.
 
 ---
 

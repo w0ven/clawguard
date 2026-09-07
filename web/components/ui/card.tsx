@@ -8,7 +8,7 @@ export function Card({
   return (
     <div
       className={cn(
-        "rounded-lg border border-[var(--border)] bg-[var(--surface)]",
+        "glass-panel rounded-2xl border border-[var(--border)] bg-[var(--surface)]",
         className,
       )}
       {...props}
@@ -23,7 +23,7 @@ export function CardHeader({
   return (
     <div
       className={cn(
-        "flex flex-col gap-1 border-b border-[var(--border)] px-5 py-4",
+        "flex flex-col gap-1 border-b border-[var(--border)] px-5 py-4 md:px-6 md:py-5",
         className,
       )}
       {...props}
@@ -59,5 +59,5 @@ export function CardBody({
   className,
   ...props
 }: React.HTMLAttributes<HTMLDivElement>) {
-  return <div className={cn("px-5 py-4", className)} {...props} />;
+  return <div className={cn("px-5 py-4 md:px-6 md:py-5", className)} {...props} />;
 }

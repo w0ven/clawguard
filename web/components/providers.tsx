@@ -3,6 +3,8 @@
 import type { ReactNode } from "react";
 import { createContext, useCallback, useContext, useMemo, useState } from "react";
 import { ToastViewport } from "@/components/ui/toast";
+import { DirtyGuardProvider } from "@/components/dirty-guard";
+import { ThemeProvider } from "@/components/theme-provider";
 import { TelegramMiniAppProvider } from "@/components/telegram-miniapp-provider";
 
 type ToastItem = {
@@ -32,10 +34,14 @@ export function Providers({ children }: { children: ReactNode }) {
 
   return (
     <ToastContext.Provider value={value}>
-      <TelegramMiniAppProvider>
-        {children}
-        <ToastViewport items={items} />
-      </TelegramMiniAppProvider>
+      <ThemeProvider>
+        <DirtyGuardProvider>
+          <TelegramMiniAppProvider>
+            {children}
+            <ToastViewport items={items} />
+          </TelegramMiniAppProvider>
+        </DirtyGuardProvider>
+      </ThemeProvider>
     </ToastContext.Provider>
   );
 }

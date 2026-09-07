@@ -1,4 +1,5 @@
-import { expect, test } from "@playwright/test";
+// Original access assertions unchanged; isolate network using test-only fixtures.
+import { expect, test } from "./ui-fixtures";
 
 test("login page renders without horizontal overflow", async ({ page }) => {
   await page.goto("/");

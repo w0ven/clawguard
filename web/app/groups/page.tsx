@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import Link from "next/link";
+import { GuardedLink } from "@/components/guarded-link";
 import { AdminShell } from "@/components/admin-shell";
 import { Card, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -49,12 +49,12 @@ export default function GroupsPage() {
       subtitle="查看 Bot 管理的群组"
       actions={
         canEditGlobal ? (
-          <Link href="/groups/global-config">
+          <GuardedLink href="/groups/global-config">
             <Button variant="secondary">
               <Settings className="h-3.5 w-3.5" />
               全局策略
             </Button>
-          </Link>
+          </GuardedLink>
         ) : null
       }
     >
@@ -82,12 +82,12 @@ export default function GroupsPage() {
               {groups.map((g) => (
                 <TableRow key={g.chat_id}>
                   <TableCell>
-                    <Link
+                    <GuardedLink
                       href={`/groups/${g.chat_id}`}
                       className="font-medium text-[var(--accent)] hover:underline"
                     >
                       {g.title}
-                    </Link>
+                    </GuardedLink>
                   </TableCell>
                   <TableCell className="tabular-nums text-[var(--text-muted)]">
                     {g.chat_id}
@@ -102,12 +102,12 @@ export default function GroupsPage() {
                     </Badge>
                   </TableCell>
                   <TableCell>
-                    <Link
+                    <GuardedLink
                       href={`/groups/${g.chat_id}`}
                       className="text-[var(--text-muted)] hover:text-[var(--text)]"
                     >
                       <ChevronRight className="h-4 w-4" />
-                    </Link>
+                    </GuardedLink>
                   </TableCell>
                 </TableRow>
               ))}

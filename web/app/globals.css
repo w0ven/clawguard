@@ -2,48 +2,127 @@
 @tailwind components;
 @tailwind utilities;
 
-:root {
+/* ClawGuard semantic theme tokens. Components intentionally consume these
+   aliases so a theme change never requires a second page implementation. */
+:root,
+[data-theme="emerald"] {
   color-scheme: light;
-  --bg: #fafafa;
-  --surface: #ffffff;
-  --surface-2: #f4f4f5;
-  --border: #e4e4e7;
-  --border-strong: #d4d4d8;
-  --text: #09090b;
-  --text-muted: #71717a;
-  --text-subtle: #a1a1aa;
-  --accent: #2563eb;
-  --accent-hover: #1d4ed8;
-  --accent-soft: #dbeafe;
-  --success: #16a34a;
-  --success-soft: #dcfce7;
-  --warning: #d97706;
-  --warning-soft: #fef3c7;
-  --danger: #dc2626;
-  --danger-soft: #fee2e2;
-  --ring: rgba(37, 99, 235, 0.35);
+  --bg: #edf2ef;
+  --surface: rgba(255, 255, 255, 0.72);
+  --surface-2: rgba(232, 239, 233, 0.62);
+  --border: rgba(61, 103, 87, 0.18);
+  --border-strong: rgba(61, 103, 87, 0.34);
+  --text: #18342f;
+  --text-muted: #627970;
+  --text-subtle: #81968b;
+  --accent: #13765f;
+  --accent-hover: #09624d;
+  --accent-soft: rgba(19, 118, 95, 0.13);
+  --success: #27794f;
+  --success-soft: #e2f0e7;
+  --warning: #956f28;
+  --warning-soft: #f6eddb;
+  --danger: #ac5246;
+  --danger-soft: #f9e6e2;
+  --ring: rgba(57, 168, 135, 0.36);
+  --bg-page: #edf2ef;
+  --glass: rgba(255, 255, 255, 0.68);
+  --line: rgba(61, 103, 87, 0.15);
+  --shadow: 0 12px 40px -25px rgba(21, 57, 44, 0.26);
+  --sidebar-grad: linear-gradient(155deg, rgba(28, 65, 54, 0.97), rgba(20, 46, 41, 0.95));
+  --topbar-bg: rgba(246, 249, 242, 0.78);
+  --ambient-1: #b8d6c7;
+  --ambient-2: #d9d9bc;
+  --focus-ring: #39a887;
+  --input-bg: rgba(252, 254, 251, 0.84);
+  --input-border: rgba(188, 208, 195, 0.7);
+  --input-color: #315441;
+  --dialog-bg: rgba(247, 251, 243, 0.98);
+  --savebar-bg: rgba(248, 252, 243, 0.95);
+  --table-th-bg: rgba(232, 239, 233, 0.56);
+  --table-hover: rgba(246, 250, 246, 0.72);
+  --disabled-bg: #eff3f0;
+  --disabled-color: #64776e;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #0a0a0b;
-    --surface: #111113;
-    --surface-2: #1a1a1d;
-    --border: #27272a;
-    --border-strong: #3f3f46;
-    --text: #fafafa;
-    --text-muted: #a1a1aa;
-    --text-subtle: #71717a;
-    --accent: #3b82f6;
-    --accent-hover: #60a5fa;
-    --accent-soft: rgba(59, 130, 246, 0.15);
-    --success: #22c55e;
-    --success-soft: rgba(34, 197, 94, 0.15);
-    --warning: #f59e0b;
-    --warning-soft: rgba(245, 158, 11, 0.15);
-    --danger: #ef4444;
-    --danger-soft: rgba(239, 68, 68, 0.15);
-  }
+[data-theme="ocean"] {
+  color-scheme: light;
+  --bg: #eaf1f7;
+  --surface: rgba(255, 255, 255, 0.8);
+  --surface-2: rgba(226, 237, 247, 0.7);
+  --border: rgba(56, 114, 153, 0.19);
+  --border-strong: rgba(56, 114, 153, 0.36);
+  --text: #142838;
+  --text-muted: #577085;
+  --text-subtle: #718a9d;
+  --accent: #0284c7;
+  --accent-hover: #0369a1;
+  --accent-soft: rgba(2, 132, 199, 0.13);
+  --success: #1d6e52;
+  --success-soft: #dcefe7;
+  --warning: #956623;
+  --warning-soft: #f6eddb;
+  --danger: #b93838;
+  --danger-soft: #f9e3e3;
+  --ring: rgba(56, 189, 248, 0.4);
+  --bg-page: #eaf1f7;
+  --glass: rgba(255, 255, 255, 0.78);
+  --line: rgba(56, 114, 153, 0.16);
+  --shadow: 0 12px 40px -25px rgba(18, 59, 90, 0.22);
+  --sidebar-grad: linear-gradient(155deg, rgba(16, 44, 71, 0.98), rgba(12, 33, 56, 0.96));
+  --topbar-bg: rgba(240, 246, 252, 0.82);
+  --ambient-1: #b9d8ee;
+  --ambient-2: #c4e4df;
+  --focus-ring: #38bdf8;
+  --input-bg: rgba(253, 254, 255, 0.9);
+  --input-border: rgba(165, 195, 222, 0.7);
+  --input-color: #1a3c57;
+  --dialog-bg: rgba(244, 248, 253, 0.99);
+  --savebar-bg: rgba(240, 247, 254, 0.97);
+  --table-th-bg: rgba(226, 237, 247, 0.62);
+  --table-hover: rgba(239, 246, 253, 0.82);
+  --disabled-bg: #e8eef4;
+  --disabled-color: #6d859a;
+}
+
+[data-theme="graphite"] {
+  color-scheme: dark;
+  --bg: #0d1117;
+  --surface: rgba(24, 29, 36, 0.88);
+  --surface-2: rgba(31, 36, 44, 0.9);
+  --border: rgba(255, 255, 255, 0.1);
+  --border-strong: rgba(255, 255, 255, 0.18);
+  --text: #eceff2;
+  --text-muted: #95a3b2;
+  --text-subtle: #758394;
+  --accent: #38bdf8;
+  --accent-hover: #7dd3fc;
+  --accent-soft: rgba(56, 189, 248, 0.16);
+  --success: #3fb950;
+  --success-soft: rgba(46, 160, 67, 0.18);
+  --warning: #e3b341;
+  --warning-soft: rgba(210, 153, 34, 0.18);
+  --danger: #f85149;
+  --danger-soft: rgba(248, 81, 73, 0.18);
+  --ring: rgba(56, 189, 248, 0.42);
+  --bg-page: #0d1117;
+  --glass: rgba(24, 29, 36, 0.82);
+  --line: rgba(255, 255, 255, 0.08);
+  --shadow: 0 16px 45px -15px rgba(0, 0, 0, 0.65);
+  --sidebar-grad: linear-gradient(155deg, rgba(21, 26, 34, 0.99), rgba(13, 16, 22, 0.98));
+  --topbar-bg: rgba(17, 22, 29, 0.88);
+  --ambient-1: #1f3045;
+  --ambient-2: #242432;
+  --focus-ring: #38bdf8;
+  --input-bg: #161b22;
+  --input-border: rgba(255, 255, 255, 0.18);
+  --input-color: #f0f3f6;
+  --dialog-bg: rgba(22, 27, 34, 0.99);
+  --savebar-bg: rgba(22, 27, 34, 0.98);
+  --table-th-bg: rgba(255, 255, 255, 0.05);
+  --table-hover: rgba(255, 255, 255, 0.045);
+  --disabled-bg: #1f242c;
+  --disabled-color: #6e7681;
 }
 
 * {
@@ -54,7 +133,7 @@ html,
 body {
   margin: 0;
   padding: 0;
-  background: var(--bg);
+  background: var(--bg-page, var(--bg));
   color: var(--text);
   font-family: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
     "Helvetica Neue", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
@@ -63,10 +142,48 @@ body {
   -moz-osx-font-smoothing: grayscale;
 }
 
+html {
+  min-width: 320px;
+  background: var(--bg-page, var(--bg));
+}
+
 body {
   min-height: 100vh;
   font-size: 14px;
   line-height: 1.5;
+  overflow-x: hidden;
+}
+
+body::before,
+body::after {
+  content: "";
+  position: fixed;
+  z-index: -1;
+  pointer-events: none;
+  border-radius: 999px;
+  filter: blur(82px);
+  opacity: 0.6;
+}
+
+body::before {
+  width: 34rem;
+  height: 32rem;
+  right: -10rem;
+  top: -15rem;
+  background: var(--ambient-1);
+}
+
+body::after {
+  width: 29rem;
+  height: 26rem;
+  left: 28%;
+  bottom: -15rem;
+  background: var(--ambient-2);
+}
+
+[data-theme="graphite"] body::before,
+[data-theme="graphite"] body::after {
+  opacity: 0.42;
 }
 
 a {
@@ -82,40 +199,208 @@ textarea {
   color: inherit;
 }
 
+button {
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: not-allowed;
+}
+
 :focus-visible {
-  outline: 2px solid var(--accent);
+  outline: 3px solid var(--focus-ring, var(--accent));
   outline-offset: 2px;
-  border-radius: 6px;
+  border-radius: 7px;
 }
 
-/* utility */
-.ring-accent {
-  box-shadow: 0 0 0 3px var(--ring);
+::selection {
+  background: var(--accent-soft);
+  color: var(--text);
 }
 
-::-webkit-scrollbar {
-  width: 10px;
-  height: 10px;
+/* Shared glass primitives used by the self-built UI components and shell. */
+.glass-panel {
+  background: var(--glass);
+  border-color: var(--border);
+  box-shadow: var(--shadow);
+  -webkit-backdrop-filter: blur(18px);
+  backdrop-filter: blur(18px);
 }
 
-::-webkit-scrollbar-track {
-  background: transparent;
+.glass-topbar {
+  background: var(--topbar-bg);
+  -webkit-backdrop-filter: blur(20px);
+  backdrop-filter: blur(20px);
 }
 
-::-webkit-scrollbar-thumb {
-  background: var(--border-strong);
-  border-radius: 999px;
-  border: 2px solid var(--bg);
+.admin-shell {
+  position: relative;
+  isolation: isolate;
 }
 
-::-webkit-scrollbar-thumb:hover {
-  background: var(--text-subtle);
+.admin-sidebar {
+  background: var(--sidebar-grad);
+  color: #d6e5dc;
+  border-color: rgba(255, 255, 255, 0.18) !important;
+  box-shadow: 0 16px 50px -20px rgba(20, 54, 45, 0.42);
+  -webkit-backdrop-filter: blur(24px);
+  backdrop-filter: blur(24px);
 }
 
-/* code blocks */
-code {
+.admin-sidebar .admin-nav-link {
+  color: rgba(230, 242, 235, 0.78) !important;
+}
+
+.admin-sidebar .admin-nav-link:hover {
+  color: #fff !important;
+  background: rgba(255, 255, 255, 0.1) !important;
+}
+
+.admin-sidebar .admin-nav-link-active {
+  color: #fff !important;
+  background: rgba(214, 239, 223, 0.16) !important;
+  box-shadow: inset 0 0 0 1px rgba(214, 239, 223, 0.12);
+}
+
+[data-theme="graphite"] .admin-sidebar {
+  color: #c9d1d9;
+  box-shadow: 0 16px 50px -20px rgba(0, 0, 0, 0.72);
+}
+
+[data-theme="graphite"] .admin-sidebar .admin-nav-link {
+  color: rgba(201, 209, 217, 0.8) !important;
+}
+
+[data-theme="graphite"] .admin-sidebar .admin-nav-link-active {
+  color: #f0f6fc !important;
+  background: rgba(56, 139, 253, 0.18) !important;
+}
+
+.admin-nav-section {
+  color: rgba(214, 229, 220, 0.62);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+[data-theme="graphite"] .admin-nav-section {
+  color: rgba(201, 209, 217, 0.58);
+}
+
+.admin-main {
+  background: transparent !important;
+}
+
+.admin-header {
+  background: var(--topbar-bg) !important;
+  -webkit-backdrop-filter: blur(20px);
+  backdrop-filter: blur(20px);
+}
+
+.theme-switcher {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  min-width: 8rem;
+}
+
+.theme-switcher-compact {
+  min-width: 0;
+}
+
+.theme-select {
+  min-width: 5.7rem;
+  height: 2.25rem !important;
+  border-radius: 0.65rem !important;
+  background-color: var(--input-bg) !important;
+  border-color: var(--input-border) !important;
+  color: var(--input-color) !important;
+  font-size: 0.75rem !important;
+}
+
+.theme-switcher-compact .theme-select {
+  min-width: 4.9rem;
+  padding-left: 0.5rem;
+  padding-right: 2rem;
+}
+
+.theme-select-placeholder {
+  display: block;
+}
+
+.admin-sidebar .theme-select {
+  background-color: rgba(255, 255, 255, 0.08) !important;
+  border-color: rgba(255, 255, 255, 0.16) !important;
+  color: #f4fbf6 !important;
+}
+
+.admin-sidebar .theme-switcher > svg {
+  color: rgba(255, 255, 255, 0.72);
+}
+
+.glass-savebar {
+  background: var(--savebar-bg);
+  border: 1px solid var(--border-strong);
+  box-shadow: var(--shadow);
+  -webkit-backdrop-filter: blur(22px);
+  backdrop-filter: blur(22px);
+}
+
+/* Mini App navigation owns the viewport bottom edge. Keep the policy action
+   above it instead of raising z-index and making navigation untouchable. */
+@media (max-width: 767px) {
+  .miniapp-shell .miniapp-savebar {
+    bottom: calc(
+      3.5rem + max(var(--tg-safe-area-inset-bottom, 0px), 6px) + 0.75rem
+    );
+  }
+}
+
+/* Native controls remain high contrast in every theme, including disabled
+   inherited fields and dark dialog/table contexts. */
+input,
+select,
+textarea {
+  background: var(--input-bg);
+  border-color: var(--input-border);
+  color: var(--input-color);
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: var(--text-subtle);
+  opacity: 1;
+}
+
+input:disabled,
+select:disabled,
+textarea:disabled {
+  background: var(--disabled-bg) !important;
+  color: var(--disabled-color) !important;
+  border-style: dashed;
+  opacity: 1;
+}
+
+option {
+  background: var(--dialog-bg);
+  color: var(--text);
+}
+
+table thead {
+  background: var(--table-th-bg) !important;
+}
+
+tbody tr:hover {
+  background: var(--table-hover) !important;
+}
+
+code,
+pre {
   font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo,
     Consolas, "Liberation Mono", monospace;
+}
+
+code {
   font-size: 0.875em;
   background: var(--surface-2);
   padding: 2px 6px;
@@ -123,20 +408,8 @@ code {
   border: 1px solid var(--border);
 }
 
-html.telegram-miniapp {
-  color-scheme: var(--tg-color-scheme, light);
-  --bg: var(--tg-theme-secondary-bg-color, #f4f4f5);
-  --surface: var(--tg-theme-bg-color, #ffffff);
-  --surface-2: var(--tg-theme-section-bg-color, #f4f4f5);
-  --border: var(--tg-theme-section-separator-color, #e4e4e7);
-  --text: var(--tg-theme-text-color, #09090b);
-  --text-muted: var(--tg-theme-hint-color, #71717a);
-  --text-subtle: var(--tg-theme-subtitle-text-color, #a1a1aa);
-  --accent: var(--tg-theme-button-color, #2563eb);
-  --accent-hover: var(--tg-theme-button-color, #1d4ed8);
-  --accent-soft: color-mix(in srgb, var(--tg-theme-button-color, #2563eb) 15%, transparent);
-}
-
+/* Keep Telegram SDK capabilities and safe-area behavior, but do not let the
+   SDK color variables override an explicit ClawGuard theme selection. */
 html.telegram-miniapp,
 html.telegram-miniapp body {
   min-height: var(--tg-viewport-stable-height, 100vh);
@@ -174,5 +447,16 @@ html.telegram-miniapp body {
 
   .telegram-miniapp header p {
     line-height: 1.35;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
   }
 }
