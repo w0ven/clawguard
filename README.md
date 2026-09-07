@@ -14,9 +14,28 @@
 
 ![登录页](docs/screenshots/login.png)
 
-![管理总览](docs/screenshots/dashboard.png)
+<details>
+<summary>后台与移动端截图</summary>
 
-登录页是实拍。总览用本地面板 + 示意数据截的，不是生产数据。
+**总览（翠绿）**
+
+![总览（翠绿）](docs/screenshots/dashboard.png)
+
+**群配置（海蓝）**
+
+![群配置（海蓝）](docs/screenshots/group-config.png)
+
+**模型管理（石墨）**
+
+![模型管理（石墨）](docs/screenshots/graphite-models.png)
+
+**移动端**
+
+![移动端](docs/screenshots/mobile-group.png)
+
+</details>
+
+登录页是实拍。以上后台截图来自实际 Next React UI 的本地测试 fixture 和模拟数据，不是生产数据；移动端 / Mini App 画面仅为布局与 SDK 模拟，不代表真实 Telegram 实测。
 
 ---
 
