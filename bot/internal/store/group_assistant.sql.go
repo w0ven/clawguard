@@ -15,10 +15,19 @@ var (
 	ErrGroupAssistantSourceInvalid         = errors.New("group assistant source is no longer approved")
 )
 
+const (
+	groupAssistantStyleSampleWindow = 200
+	groupAssistantStyleDistillEvery = 50
+	groupAssistantStyleSampleCap    = 1000
+)
+
 const groupAssistantPolicyColumns = `chat_id, version, chat_enabled, learning_enabled, trigger_mode,
 	followup_window_sec, max_followup_turns, chat_model_ref, learning_model_ref, temperature,
 	system_prompt, history_limit, retention_days, collection_policy, tool_allowlist, allow_domains,
-	max_queue_depth, max_queue_wait_sec, updated_by, created_at, updated_at`
+	max_queue_depth, max_queue_wait_sec, proactive_interject_enabled, proactive_cold_topic_enabled,
+	cold_topic_idle_minutes, cold_topic_quiet_start, cold_topic_quiet_end, mimic_target_user_id,
+	mimic_target_user_name, mimic_profile_text, mimic_sample_count, mimic_distilled_at_count,
+	updated_by, created_at, updated_at`
 
 const getGroupAssistantPolicySQL = `SELECT ` + groupAssistantPolicyColumns + `
 FROM group_assistant_policies WHERE chat_id = $1`
@@ -26,26 +35,48 @@ FROM group_assistant_policies WHERE chat_id = $1`
 const insertGroupAssistantPolicySQL = `INSERT INTO group_assistant_policies
 (chat_id, chat_enabled, learning_enabled, trigger_mode, followup_window_sec, max_followup_turns,
  chat_model_ref, learning_model_ref, temperature, system_prompt, history_limit, retention_days,
- collection_policy, tool_allowlist, allow_domains, max_queue_depth, max_queue_wait_sec, updated_by)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+ collection_policy, tool_allowlist, allow_domains, max_queue_depth, max_queue_wait_sec,
+ proactive_interject_enabled, proactive_cold_topic_enabled, cold_topic_idle_minutes,
+ cold_topic_quiet_start, cold_topic_quiet_end, mimic_target_user_id, mimic_target_user_name,
+ mimic_profile_text, mimic_sample_count, mimic_distilled_at_count, updated_by)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28)
 ON CONFLICT (chat_id) DO NOTHING
 RETURNING ` + groupAssistantPolicyColumns
 
-const updateGroupAssistantPolicySQL = `UPDATE group_assistant_policies SET
-chat_enabled=$3, learning_enabled=$4, trigger_mode=$5, followup_window_sec=$6,
-max_followup_turns=$7, chat_model_ref=$8, learning_model_ref=$9, temperature=$10,
-system_prompt=$11, history_limit=$12, retention_days=$13, collection_policy=$14,
-tool_allowlist=$15, allow_domains=$16, max_queue_depth=$17, max_queue_wait_sec=$18,
-updated_by=$19, version=version+1, updated_at=NOW()
-WHERE chat_id=$1 AND version=$2
-RETURNING ` + groupAssistantPolicyColumns
+const updateGroupAssistantPolicySQL = `WITH old_target AS (
+	SELECT mimic_target_user_id FROM group_assistant_policies WHERE chat_id=$1
+), updated AS (
+	UPDATE group_assistant_policies SET
+	chat_enabled=$3, learning_enabled=$4, trigger_mode=$5, followup_window_sec=$6,
+	max_followup_turns=$7, chat_model_ref=$8, learning_model_ref=$9, temperature=$10,
+	system_prompt=$11, history_limit=$12, retention_days=$13, collection_policy=$14,
+	tool_allowlist=$15, allow_domains=$16, max_queue_depth=$17, max_queue_wait_sec=$18,
+	proactive_interject_enabled=$19, proactive_cold_topic_enabled=$20, cold_topic_idle_minutes=$21,
+	cold_topic_quiet_start=$22, cold_topic_quiet_end=$23, mimic_target_user_id=$24,
+	mimic_target_user_name=$25,
+	mimic_profile_text=CASE WHEN COALESCE((SELECT mimic_target_user_id FROM old_target), 0) <> $24 THEN '' ELSE $26 END,
+	mimic_sample_count=CASE WHEN COALESCE((SELECT mimic_target_user_id FROM old_target), 0) <> $24 THEN 0 ELSE $27 END,
+	mimic_distilled_at_count=CASE WHEN COALESCE((SELECT mimic_target_user_id FROM old_target), 0) <> $24 THEN 0 ELSE $28 END,
+	updated_by=$29, version=version+1, updated_at=NOW()
+	WHERE chat_id=$1 AND version=$2
+	RETURNING ` + groupAssistantPolicyColumns + `
+), cleared AS (
+	DELETE FROM group_assistant_style_samples
+	WHERE chat_id=$1 AND EXISTS (SELECT 1 FROM updated)
+	  AND COALESCE((SELECT mimic_target_user_id FROM old_target), 0) <> $24
+	RETURNING chat_id
+)
+SELECT * FROM updated`
 
 func scanGroupAssistantPolicy(row interface{ Scan(...any) error }) (GroupAssistantPolicy, error) {
 	var v GroupAssistantPolicy
 	err := row.Scan(&v.ChatID, &v.Version, &v.ChatEnabled, &v.LearningEnabled, &v.TriggerMode,
 		&v.FollowupWindowSec, &v.MaxFollowupTurns, &v.ChatModelRef, &v.LearningModelRef,
 		&v.Temperature, &v.SystemPrompt, &v.HistoryLimit, &v.RetentionDays, &v.CollectionPolicy,
-		&v.ToolAllowlist, &v.AllowDomains, &v.MaxQueueDepth, &v.MaxQueueWaitSec, &v.UpdatedBy,
+		&v.ToolAllowlist, &v.AllowDomains, &v.MaxQueueDepth, &v.MaxQueueWaitSec,
+		&v.ProactiveInterjectEnabled, &v.ProactiveColdTopicEnabled, &v.ColdTopicIdleMinutes,
+		&v.ColdTopicQuietStart, &v.ColdTopicQuietEnd, &v.MimicTargetUserID, &v.MimicTargetUserName,
+		&v.MimicProfileText, &v.MimicSampleCount, &v.MimicDistilledAtCount, &v.UpdatedBy,
 		&v.CreatedAt, &v.UpdatedAt)
 	return v, err
 }
@@ -55,10 +86,33 @@ func (q *Queries) GetGroupAssistantPolicy(ctx context.Context, chatID int64) (Gr
 }
 
 func (q *Queries) UpsertGroupAssistantPolicy(ctx context.Context, arg UpsertGroupAssistantPolicyParams) (GroupAssistantPolicy, error) {
+	// v1 callers do not know the v2 fields. Preserve their existing write shape
+	// while satisfying the v2 defaults and database checks.
+	if arg.ColdTopicIdleMinutes < 180 {
+		arg.ColdTopicIdleMinutes = 180
+	}
+	if arg.ColdTopicQuietStart < 0 || arg.ColdTopicQuietStart > 23 {
+		arg.ColdTopicQuietStart = 0
+	}
+	if arg.ColdTopicQuietEnd < 0 || arg.ColdTopicQuietEnd > 23 {
+		arg.ColdTopicQuietEnd = 8
+	}
+	if arg.MimicTargetUserID < 0 {
+		arg.MimicTargetUserID = 0
+	}
+	if arg.MimicSampleCount < 0 || arg.MimicSampleCount > 1000 {
+		arg.MimicSampleCount = 0
+	}
+	if arg.MimicDistilledAtCount < 0 || arg.MimicDistilledAtCount > 1000 {
+		arg.MimicDistilledAtCount = 0
+	}
 	params := []any{arg.ChatID, arg.ChatEnabled, arg.LearningEnabled, arg.TriggerMode, arg.FollowupWindowSec,
 		arg.MaxFollowupTurns, arg.ChatModelRef, arg.LearningModelRef, arg.Temperature, arg.SystemPrompt,
 		arg.HistoryLimit, arg.RetentionDays, arg.CollectionPolicy, arg.ToolAllowlist, arg.AllowDomains,
-		arg.MaxQueueDepth, arg.MaxQueueWaitSec, arg.UpdatedBy}
+		arg.MaxQueueDepth, arg.MaxQueueWaitSec, arg.ProactiveInterjectEnabled, arg.ProactiveColdTopicEnabled,
+		arg.ColdTopicIdleMinutes, arg.ColdTopicQuietStart, arg.ColdTopicQuietEnd, arg.MimicTargetUserID,
+		arg.MimicTargetUserName, arg.MimicProfileText, arg.MimicSampleCount, arg.MimicDistilledAtCount,
+		arg.UpdatedBy}
 	if arg.ExpectedVersion <= 0 {
 		v, err := scanGroupAssistantPolicy(q.db.QueryRow(ctx, insertGroupAssistantPolicySQL, params...))
 		if err == nil {
@@ -612,6 +666,123 @@ func (q *Queries) resolveGroupAssistantConflict(ctx context.Context, arg Resolve
 		return err
 	})
 	return out, err
+}
+
+func (q *Queries) AddGroupAssistantStyleSample(ctx context.Context, arg CreateGroupAssistantStyleSampleParams) (bool, int32, error) {
+	added := false
+	var count int32
+	err := q.Transact(ctx, func(tx *Queries) error {
+		var targetID int64
+		var currentCount int32
+		err := tx.db.QueryRow(ctx, `SELECT mimic_target_user_id,mimic_sample_count
+			FROM group_assistant_policies WHERE chat_id=$1 FOR UPDATE`, arg.ChatID).Scan(&targetID, &currentCount)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if targetID == 0 || targetID != arg.UserID || currentCount >= groupAssistantStyleSampleCap {
+			count = currentCount
+			return nil
+		}
+		if _, err := tx.db.Exec(ctx, `INSERT INTO group_assistant_style_samples (chat_id,user_id,content)
+			VALUES ($1,$2,$3)`, arg.ChatID, arg.UserID, arg.Content); err != nil {
+			return err
+		}
+		count = currentCount + 1
+		if _, err := tx.db.Exec(ctx, `UPDATE group_assistant_policies SET mimic_sample_count=$2,updated_at=NOW()
+			WHERE chat_id=$1`, arg.ChatID, count); err != nil {
+			return err
+		}
+		if _, err := tx.db.Exec(ctx, `DELETE FROM group_assistant_style_samples
+			WHERE chat_id=$1 AND id NOT IN (SELECT id FROM group_assistant_style_samples
+				WHERE chat_id=$1 ORDER BY created_at DESC,id DESC LIMIT `+itoa(groupAssistantStyleSampleWindow)+`)`, arg.ChatID); err != nil {
+			return err
+		}
+		added = true
+		return nil
+	})
+	if err != nil {
+		return false, count, err
+	}
+	return added && count > 0 && count%groupAssistantStyleDistillEvery == 0, count, nil
+}
+
+func (q *Queries) ListGroupAssistantStyleSamples(ctx context.Context, chatID, userID int64, limit int32) ([]GroupAssistantStyleSample, error) {
+	if limit <= 0 || limit > groupAssistantStyleSampleWindow {
+		limit = groupAssistantStyleSampleWindow
+	}
+	rows, err := q.db.Query(ctx, `SELECT id,chat_id,user_id,content,created_at
+		FROM group_assistant_style_samples WHERE chat_id=$1 AND user_id=$2
+		ORDER BY created_at ASC,id ASC LIMIT $3`, chatID, userID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]GroupAssistantStyleSample, 0, limit)
+	for rows.Next() {
+		var sample GroupAssistantStyleSample
+		if err := rows.Scan(&sample.ID, &sample.ChatID, &sample.UserID, &sample.Content, &sample.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, sample)
+	}
+	return out, rows.Err()
+}
+
+func (q *Queries) UpdateGroupAssistantMimicProfile(ctx context.Context, chatID, targetUserID int64, profile string, distilledCount int32) error {
+	_, err := q.db.Exec(ctx, `UPDATE group_assistant_policies SET mimic_profile_text=$3,
+		mimic_distilled_at_count=$4,updated_at=NOW()
+		WHERE chat_id=$1 AND mimic_target_user_id=$2`, chatID, targetUserID, profile, distilledCount)
+	return err
+}
+
+func (q *Queries) ListEnabledGroupAssistantColdPolicies(ctx context.Context) ([]GroupAssistantPolicy, error) {
+	rows, err := q.db.Query(ctx, `SELECT `+groupAssistantPolicyColumns+`
+		FROM group_assistant_policies WHERE chat_enabled=TRUE AND proactive_cold_topic_enabled=TRUE
+		ORDER BY chat_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]GroupAssistantPolicy, 0)
+	for rows.Next() {
+		policy, scanErr := scanGroupAssistantPolicy(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		out = append(out, policy)
+	}
+	return out, rows.Err()
+}
+
+func (q *Queries) GetLatestGroupAssistantUserMessage(ctx context.Context, chatID int64) (GroupAssistantMessage, error) {
+	return scanGroupAssistantMessage(q.db.QueryRow(ctx, `SELECT `+groupAssistantMessageColumns+`
+		FROM group_assistant_messages WHERE chat_id=$1 AND role='user' AND approved=TRUE AND delivered=TRUE
+		AND expires_at>NOW() ORDER BY created_at DESC,id DESC LIMIT 1`, chatID))
+}
+
+func (q *Queries) ListGroupAssistantRecentSenders(ctx context.Context, chatID int64, limit int32) ([]GroupAssistantRecentSender, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	rows, err := q.db.Query(ctx, `SELECT sender_id,MAX(sender_name),COUNT(*)::BIGINT,MAX(created_at)
+		FROM group_assistant_messages WHERE chat_id=$1 AND role='user' AND approved=TRUE AND delivered=TRUE
+		AND expires_at>NOW() AND sender_id<>0 GROUP BY sender_id ORDER BY MAX(created_at) DESC LIMIT $2`, chatID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]GroupAssistantRecentSender, 0, limit)
+	for rows.Next() {
+		var sender GroupAssistantRecentSender
+		if err := rows.Scan(&sender.SenderID, &sender.SenderName, &sender.MessageCount, &sender.LastSeenAt); err != nil {
+			return nil, err
+		}
+		out = append(out, sender)
+	}
+	return out, rows.Err()
 }
 
 func (q *Queries) InsertGroupAssistantDispatch(ctx context.Context, arg CreateGroupAssistantDispatchParams) (GroupAssistantDispatch, error) {

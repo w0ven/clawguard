@@ -47,6 +47,16 @@ export type AssistantPolicy = {
   allow_domains: string[];
   max_queue_depth: number;
   max_queue_wait_sec: number;
+  proactive_interject_enabled?: boolean;
+  proactive_cold_topic_enabled?: boolean;
+  cold_topic_idle_minutes?: number;
+  cold_topic_quiet_start?: number;
+  cold_topic_quiet_end?: number;
+  mimic_target_user_id?: number;
+  mimic_target_user_name?: string;
+  mimic_profile_text?: string;
+  mimic_sample_count?: number;
+  mimic_distilled_at_count?: number;
   updated_by?: number | null;
   created_at?: string;
   updated_at?: string;
@@ -90,10 +100,56 @@ export type AssistantDefaults = {
   remote_quota: string;
 };
 
+export type AssistantPolicyWrite = {
+  chat_enabled: boolean;
+  learning_enabled: boolean;
+  trigger_mode: string;
+  followup_window_sec: number;
+  max_followup_turns: number;
+  chat_model_ref: string;
+  learning_model_ref: string;
+  temperature: number;
+  system_prompt: string;
+  history_limit: number;
+  retention_days: number;
+  collection_policy: string;
+  tool_allowlist: AssistantToolName[];
+  allow_domains: string[];
+  max_queue_depth: number;
+  max_queue_wait_sec: number;
+  proactive_interject_enabled: boolean;
+  proactive_cold_topic_enabled: boolean;
+  cold_topic_idle_minutes: number;
+  cold_topic_quiet_start: number;
+  cold_topic_quiet_end: number;
+  mimic_target_user_id: number;
+  mimic_target_user_name: string;
+  mimic_profile_text: string;
+  mimic_sample_count: number;
+  mimic_distilled_at_count: number;
+};
+
+export type AssistantReadiness = {
+  can_chat?: boolean;
+  blockers?: string[];
+  chat_primary_model_ref?: string;
+  tools_declared?: boolean;
+  [key: string]: unknown;
+};
+
+export type AssistantRecentSender = {
+  user_id: number;
+  user_name: string;
+  message_count?: number;
+  last_seen_at?: string;
+  [key: string]: unknown;
+};
+
 export type AssistantOverview = {
   policy: AssistantPolicy;
   model_pool: AssistantPool;
   defaults: AssistantDefaults;
+  readiness?: AssistantReadiness;
 };
 
 export type AssistantEndpointStatus = {
@@ -260,6 +316,10 @@ export type RegistryModel = {
   supports_vision: boolean;
   supports_json: boolean;
   supports_tools: boolean;
+  tools_declared?: boolean;
+  supports_tools_declared?: boolean;
+  tool_capability?: "declared" | "unsupported" | "unspecified" | string;
+  tool_support?: "declared" | "unsupported" | "unspecified" | string;
   capability_tags: string[];
   priority: number;
 };
@@ -274,7 +334,7 @@ export function fetchAssistantOverview(chatId: number) {
 
 export function saveAssistantPolicy(
   chatId: number,
-  policy: Omit<AssistantPolicy, "chat_id" | "version" | "updated_by" | "created_at" | "updated_at">,
+  policy: AssistantPolicyWrite,
   expectedVersion: number,
 ) {
   return apiFetch<{ policy: AssistantPolicy }>(assistantPath(chatId), {
@@ -311,6 +371,13 @@ export function fetchAssistantStatus(chatId: number, signal?: AbortSignal) {
 
 export function fetchAssistantTools(chatId: number) {
   return apiFetch<AssistantToolsResponse>(assistantPath(chatId, "/tools"));
+}
+
+export function fetchAssistantRecentSenders(chatId: number, signal?: AbortSignal) {
+  return apiFetch<{ chat_id: number; senders: AssistantRecentSender[] } | AssistantRecentSender[]>(
+    assistantPath(chatId, "/recent-senders"),
+    { signal },
+  );
 }
 
 export function fetchAssistantMemories(

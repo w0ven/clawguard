@@ -159,13 +159,66 @@ func TestAssistantVerificationAPIPostgres(t *testing.T) {
 		request(t, "PUT", "", policy+` {}`, 400)
 		request(t, "PUT", "", strings.Replace(policy, `"expected_version":0`, `"expected_version":0,"chat_id":-3002`, 1), 400)
 		request(t, "PUT", "", policy, 200)
+		var autoPoolRaw []byte
+		if e := db.QueryRow(ctx, `SELECT config FROM group_assistant_pools WHERE chat_id=-3001`).Scan(&autoPoolRaw); e != nil {
+			t.Fatal("auto pool was not created", e)
+		}
+		var autoPoolCfg struct {
+			TaskAssignments map[string]struct {
+				Primary string `json:"primary"`
+			} `json:"task_assignments"`
+		}
+		if e := json.Unmarshal(autoPoolRaw, &autoPoolCfg); e != nil || autoPoolCfg.TaskAssignments["chat"].Primary == "" {
+			t.Fatalf("auto chat primary missing cfg=%s err=%v", autoPoolRaw, e)
+		}
 		request(t, "PUT", "", policy, 409)
 		request(t, "PUT", "", strings.Replace(policy, `"expected_version":0`, `"expected_version":1`, 1), 200)
 	})
+	t.Run("MimicTargetChangeClearsSamples", func(t *testing.T) {
+		before, e := q.GetGroupAssistantPolicy(ctx, -3001)
+		if e != nil {
+			t.Fatal(e)
+		}
+		if _, e = db.Exec(ctx, `UPDATE group_assistant_policies SET mimic_target_user_id=811,mimic_target_user_name='old',mimic_profile_text='old profile',mimic_sample_count=1,mimic_distilled_at_count=0 WHERE chat_id=-3001`); e != nil {
+			t.Fatal(e)
+		}
+		if _, e = db.Exec(ctx, `INSERT INTO group_assistant_style_samples(chat_id,user_id,content) VALUES(-3001,811,'old sample')`); e != nil {
+			t.Fatal(e)
+		}
+		before, e = q.GetGroupAssistantPolicy(ctx, -3001)
+		if e != nil {
+			t.Fatal(e)
+		}
+		arg := store.UpsertGroupAssistantPolicyParams{
+			ChatID: before.ChatID, ExpectedVersion: before.Version, ChatEnabled: before.ChatEnabled, LearningEnabled: before.LearningEnabled,
+			TriggerMode: before.TriggerMode, FollowupWindowSec: before.FollowupWindowSec, MaxFollowupTurns: before.MaxFollowupTurns,
+			ChatModelRef: before.ChatModelRef, LearningModelRef: before.LearningModelRef, Temperature: before.Temperature, SystemPrompt: before.SystemPrompt,
+			HistoryLimit: before.HistoryLimit, RetentionDays: before.RetentionDays, CollectionPolicy: before.CollectionPolicy, ToolAllowlist: before.ToolAllowlist,
+			AllowDomains: before.AllowDomains, MaxQueueDepth: before.MaxQueueDepth, MaxQueueWaitSec: before.MaxQueueWaitSec,
+			ProactiveInterjectEnabled: before.ProactiveInterjectEnabled, ProactiveColdTopicEnabled: before.ProactiveColdTopicEnabled,
+			ColdTopicIdleMinutes: before.ColdTopicIdleMinutes, ColdTopicQuietStart: before.ColdTopicQuietStart, ColdTopicQuietEnd: before.ColdTopicQuietEnd,
+			MimicTargetUserID: 812, MimicTargetUserName: "new", MimicProfileText: "", MimicSampleCount: 0, MimicDistilledAtCount: 0, UpdatedBy: before.UpdatedBy,
+		}
+		if _, e = q.UpsertGroupAssistantPolicy(ctx, arg); e != nil {
+			t.Fatal("target CAS update", e)
+		}
+		var sampleCount int
+		if e = db.QueryRow(ctx, `SELECT count(*) FROM group_assistant_style_samples WHERE chat_id=-3001`).Scan(&sampleCount); e != nil || sampleCount != 0 {
+			t.Fatalf("samples not cleared count=%d err=%v", sampleCount, e)
+		}
+		got, e := q.GetGroupAssistantPolicy(ctx, -3001)
+		if e != nil || got.MimicTargetUserID != 812 || got.MimicProfileText != "" || got.MimicSampleCount != 0 {
+			t.Fatalf("new mimic state %+v err=%v", got, e)
+		}
+	})
 	pool := `{"expected_version":0,"strategy":"primary-overflow","task_assignments":{"chat":{"primary":"main","backups":[]},"learning":{"primary":"learn","backups":[]}},"endpoints":[{"id":"main","model_ref":"fake:tools","role":"primary","priority":0,"max_concurrency":2,"timeout_ms":1000,"cooldown_duration_sec":1},{"id":"learn","model_ref":"fake:text","role":"primary","priority":1,"max_concurrency":1,"timeout_ms":1000,"cooldown_duration_sec":1}],"max_queue_depth":2,"max_queue_wait_sec":1}`
 	t.Run("PoolToolsStatusDispatchHistory", func(t *testing.T) {
-		request(t, "PUT", "/model-pool", pool, 200)
-		request(t, "PUT", "/model-pool", pool, 409)
+		// Policy PUT with chat_model_ref auto-created the chat/learning
+		// primaries in the same transaction; replace that pool with the
+		// explicit fixture using its current CAS version.
+		poolBody := strings.Replace(pool, `"expected_version":0`, `"expected_version":1`, 1)
+		request(t, "PUT", "/model-pool", poolBody, 200)
+		request(t, "PUT", "/model-pool", poolBody, 409)
 		for _, path := range []string{"/model-pool", "/tools", "/status", "/history", "/dispatches", "/conflicts"} {
 			request(t, "GET", path, "", 200)
 		}

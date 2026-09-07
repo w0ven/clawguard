@@ -8,14 +8,11 @@ import {
   useRef,
   useState,
 } from "react";
-import { useRouter } from "next/navigation";
 import {
   AlertTriangle,
   Bot,
   Check,
-  Clock3,
   Database,
-  ExternalLink,
   History,
   Info,
   Loader2,
@@ -31,6 +28,7 @@ import {
   Wrench,
   X,
 } from "lucide-react";
+import { useRouter } from "next/navigation";
 import { AdminShell } from "@/components/admin-shell";
 import { GuardedLink } from "@/components/guarded-link";
 import { useDirtyGuard, useDirtyNavigation } from "@/components/dirty-guard";
@@ -55,26 +53,28 @@ import {
   fetchAssistantMemories,
   fetchAssistantOverview,
   fetchAssistantPool,
+  fetchAssistantRecentSenders,
   fetchAssistantStatus,
   fetchAssistantTools,
   fetchRegistryModels,
   forgetAssistantMemory,
   resolveAssistantConflict,
   saveAssistantPolicy,
-  saveAssistantPool,
   updateAssistantMemory,
   type AssistantConflict,
   type AssistantDefaults,
   type AssistantDispatch,
   type AssistantHistoryMessage,
-  type AssistantLastDispatch,
   type AssistantMemory,
+  type AssistantMemorySource,
   type AssistantMemoryValidScope,
   type AssistantMemoryVersion,
+  type AssistantOverview,
   type AssistantPolicy,
+  type AssistantPolicyWrite,
   type AssistantPool,
-  type AssistantPoolConfig,
-  type AssistantPoolEndpoint,
+  type AssistantRecentSender,
+  type AssistantReadiness,
   type AssistantStatus,
   type AssistantToolName,
   type AssistantToolsResponse,
@@ -89,23 +89,28 @@ const TOOL_NAMES: AssistantToolName[] = [
 ];
 
 const TOOL_LABELS: Record<AssistantToolName, string> = {
-  knowledge_query: "群知识查询",
-  conversation_recall: "保留期历史检索",
-  webfetch_readonly: "白名单网页读取",
+  knowledge_query: "查群知识",
+  conversation_recall: "回忆近期聊天",
+  webfetch_readonly: "读指定网页",
 };
 
-type AssistantTab = "overview" | "chat" | "memory" | "pool" | "tools";
+const TOOL_DESCRIPTIONS: Record<AssistantToolName, string> = {
+  knowledge_query: "只检索当前群已授权的事实和约定，不跨群读取。",
+  conversation_recall: "只回忆当前群保留期内、已审核送达的聊天上下文。",
+  webfetch_readonly: "只读取管理员登记的公开网页，受域名和超时限制。",
+};
+
+type AssistantSection = "start" | "speech" | "memory" | "models" | "skills";
 type MemoryFilter = "active" | "base" | "learned" | "pending" | "expired" | "inactive";
+type ToolCapability = "declared" | "unsupported" | "unspecified";
 
-type PolicyDraft = Omit<
-  AssistantPolicy,
-  "chat_id" | "version" | "updated_by" | "created_at" | "updated_at"
->;
+type PolicyDraft = AssistantPolicyWrite;
 
-type PoolDraft = {
-  version: number;
-  strategy: string;
-  config: AssistantPoolConfig;
+type ReadinessView = {
+  canChat: boolean;
+  blockers: string[];
+  selectedModel: RegistryModel | null;
+  capability: ToolCapability | null;
 };
 
 const MEMORY_SCOPE_OPTIONS = [
@@ -136,23 +141,28 @@ function normalizeMemoryScope(value: string): AssistantMemoryValidScope | "" {
   const trimmed = value.trim();
   if (isAssistantMemoryValidScope(trimmed)) return trimmed;
   const aliases: Record<string, AssistantMemoryValidScope> = {
-    "今天": "today",
-    "本群": "current_group",
-    "本群公开规则": "current_group",
-    "群内": "current_group",
-    "本周有效": "this_week",
-    "本月有效": "this_month",
-    "长期": "long_term",
-    "长期有效": "long_term",
-    "永久": "long_term",
-    "每周": "weekly",
-    "保留窗口": "retention_window",
+    今天: "today",
+    本群: "current_group",
+    本群公开规则: "current_group",
+    群内: "current_group",
+    本周有效: "this_week",
+    本月有效: "this_month",
+    长期: "long_term",
+    长期有效: "long_term",
+    永久: "long_term",
+    每周: "weekly",
+    保留窗口: "retention_window",
   };
   return aliases[trimmed] ?? "";
 }
 
 function isAbortError(error: unknown) {
-  return Boolean(error && typeof error === "object" && "name" in error && (error as { name?: string }).name === "AbortError");
+  return Boolean(
+    error &&
+      typeof error === "object" &&
+      "name" in error &&
+      (error as { name?: string }).name === "AbortError",
+  );
 }
 
 function useModalFocusTrap(onEscape: () => void) {
@@ -176,7 +186,8 @@ function useModalFocusTrap(onEscape: () => void) {
       }
       if (event.key !== "Tab") return;
       const focusable = Array.from(dialog.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)).filter(
-        (element) => element.offsetWidth > 0 || element.offsetHeight > 0 || element === document.activeElement,
+        (element) =>
+          element.offsetWidth > 0 || element.offsetHeight > 0 || element === document.activeElement,
       );
       if (focusable.length === 0) {
         event.preventDefault();
@@ -203,52 +214,6 @@ function useModalFocusTrap(onEscape: () => void) {
   return dialogRef;
 }
 
-function emptyTaskAssignment() {
-  return { primary: "", backups: [] };
-}
-
-function normalizePool(pool: AssistantPool, policy: AssistantPolicy): PoolDraft {
-  const raw = pool.config ?? ({} as AssistantPoolConfig);
-  return {
-    version: pool.version ?? 0,
-    strategy: pool.strategy || "primary-overflow",
-    config: {
-      task_assignments: {
-        chat: raw.task_assignments?.chat ?? emptyTaskAssignment(),
-        learning: raw.task_assignments?.learning ?? emptyTaskAssignment(),
-      },
-      endpoints: Array.isArray(raw.endpoints) ? raw.endpoints : [],
-      max_queue_depth: Number.isFinite(raw.max_queue_depth)
-        ? raw.max_queue_depth
-        : policy.max_queue_depth,
-      max_queue_wait_sec: Number.isFinite(raw.max_queue_wait_sec)
-        ? raw.max_queue_wait_sec
-        : policy.max_queue_wait_sec,
-    },
-  };
-}
-
-function policyDraft(policy: AssistantPolicy): PolicyDraft {
-  return {
-    chat_enabled: policy.chat_enabled,
-    learning_enabled: policy.learning_enabled,
-    trigger_mode: policy.trigger_mode,
-    followup_window_sec: policy.followup_window_sec,
-    max_followup_turns: policy.max_followup_turns,
-    chat_model_ref: policy.chat_model_ref,
-    learning_model_ref: policy.learning_model_ref,
-    temperature: policy.temperature,
-    system_prompt: policy.system_prompt,
-    history_limit: policy.history_limit,
-    retention_days: policy.retention_days,
-    collection_policy: policy.collection_policy,
-    tool_allowlist: policy.tool_allowlist ?? [],
-    allow_domains: policy.allow_domains ?? [],
-    max_queue_depth: policy.max_queue_depth,
-    max_queue_wait_sec: policy.max_queue_wait_sec,
-  };
-}
-
 function formatDate(value?: string | null) {
   if (!value) return "未知";
   const date = new Date(value);
@@ -266,7 +231,7 @@ function formatDateTimeLocal(value?: string | null) {
   if (!value) return "";
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "";
-  const pad = (n: number) => String(n).padStart(2, "0");
+  const pad = (number: number) => String(number).padStart(2, "0");
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
@@ -276,20 +241,253 @@ function toISOStringOrNull(value: string) {
   return Number.isNaN(date.getTime()) ? null : date.toISOString();
 }
 
-function valueOrUnknown(value: unknown) {
-  if (value === null || value === undefined || value === "") return "未知";
-  return String(value);
-}
-
-function statusTone(status: string): "success" | "warning" | "danger" | "default" {
-  if (status === "healthy") return "success";
-  if (status === "cooldown" || status === "half_open") return "warning";
-  if (status === "unhealthy") return "danger";
-  return "default";
-}
-
 function errorText(error: unknown, fallback: string) {
   return error instanceof Error && error.message ? error.message : fallback;
+}
+
+function displayServerText(value: unknown) {
+  const text = String(value ?? "");
+  const translated = text.replace(/\b(?:Assistant scope|Source of truth|thread_id|sender_id|SupportsTools|knowledge_query|conversation_recall|webfetch_readonly|primary-overflow|CAS)\b/gi, "群助手设置");
+  if (!translated) return "服务端暂时没有更多说明。";
+  if (/Fixture /i.test(translated) || /[\u3400-\u9fff]/.test(translated)) return translated;
+  return "服务端暂时没有更多说明。";
+}
+
+function valueOrUnknown(value: unknown) {
+  return value === null || value === undefined || value === "" ? "未知" : String(value);
+}
+
+function retentionLabel(value: unknown) {
+  const text = valueOrUnknown(value);
+  const matched = text.match(/^(\d+)\s*days?$/i);
+  return matched ? `${matched[1]} 天` : text;
+}
+
+function safeNumber(value: unknown, fallback: number) {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim() && Number.isFinite(Number(value))) return Number(value);
+  return fallback;
+}
+
+function policyDraft(policy: AssistantPolicy): PolicyDraft {
+  return {
+    chat_enabled: Boolean(policy.chat_enabled),
+    learning_enabled: Boolean(policy.learning_enabled),
+    trigger_mode: policy.trigger_mode || "mention_or_reply",
+    followup_window_sec: safeNumber(policy.followup_window_sec, 300),
+    max_followup_turns: safeNumber(policy.max_followup_turns, 5),
+    chat_model_ref: policy.chat_model_ref || "",
+    learning_model_ref: policy.learning_model_ref || "",
+    temperature: safeNumber(policy.temperature, 0.3),
+    system_prompt: policy.system_prompt || "",
+    history_limit: safeNumber(policy.history_limit, 30),
+    retention_days: safeNumber(policy.retention_days, 7),
+    collection_policy: policy.collection_policy || "history_7d_and_long_term_summary",
+    tool_allowlist: Array.isArray(policy.tool_allowlist) ? [...policy.tool_allowlist] : [],
+    allow_domains: Array.isArray(policy.allow_domains) ? [...policy.allow_domains] : [],
+    max_queue_depth: safeNumber(policy.max_queue_depth, 10),
+    max_queue_wait_sec: safeNumber(policy.max_queue_wait_sec, 15),
+    proactive_interject_enabled: Boolean(policy.proactive_interject_enabled),
+    proactive_cold_topic_enabled: Boolean(policy.proactive_cold_topic_enabled),
+    cold_topic_idle_minutes: Math.max(180, safeNumber(policy.cold_topic_idle_minutes, 180)),
+    cold_topic_quiet_start: safeNumber(policy.cold_topic_quiet_start, 0),
+    cold_topic_quiet_end: safeNumber(policy.cold_topic_quiet_end, 8),
+    mimic_target_user_id: safeNumber(policy.mimic_target_user_id, 0),
+    mimic_target_user_name: policy.mimic_target_user_name || "",
+    mimic_profile_text: policy.mimic_profile_text || "",
+    mimic_sample_count: safeNumber(policy.mimic_sample_count, 0),
+    mimic_distilled_at_count: safeNumber(policy.mimic_distilled_at_count, 0),
+  };
+}
+
+function normalizePool(pool: AssistantPool | null | undefined): AssistantPool | null {
+  if (!pool) return null;
+  const config = pool.config ?? {
+    task_assignments: {},
+    endpoints: [],
+    max_queue_depth: 0,
+    max_queue_wait_sec: 0,
+  };
+  return {
+    ...pool,
+    config: {
+      task_assignments: config.task_assignments ?? {},
+      endpoints: Array.isArray(config.endpoints) ? config.endpoints : [],
+      max_queue_depth: safeNumber(config.max_queue_depth, 0),
+      max_queue_wait_sec: safeNumber(config.max_queue_wait_sec, 0),
+    },
+  };
+}
+
+function modelCapability(model: RegistryModel): ToolCapability {
+  const extended = model as RegistryModel & {
+    tool_capability?: string;
+    tool_support?: string;
+  };
+  const explicit = extended.tool_capability ?? extended.tool_support;
+  if (explicit === "yes" || explicit === "declared" || explicit === "supported") return "declared";
+  if (explicit === "no" || explicit === "unsupported" || explicit === "not_supported") return "unsupported";
+  if (model.tools_declared === true || model.supports_tools_declared === true) {
+    return model.supports_tools ? "declared" : "unsupported";
+  }
+  if (model.tools_declared === false || model.supports_tools_declared === false) {
+    return model.supports_tools ? "declared" : "unsupported";
+  }
+  if (model.supports_tools) return "declared";
+  const tags = Array.isArray(model.capability_tags) ? model.capability_tags : [];
+  if (tags.some((tag) => ["no_tools", "tools_unsupported", "tool_calling_disabled"].includes(tag))) {
+    return "unsupported";
+  }
+  return "unspecified";
+}
+
+function capabilityLabel(capability: ToolCapability) {
+  if (capability === "declared") return "已声明支持技能";
+  if (capability === "unsupported") return "确定不支持技能";
+  return "尚未声明技能";
+}
+
+function modelLabel(model: RegistryModel) {
+  return `${model.label || model.ref} · ${capabilityLabel(modelCapability(model))}`;
+}
+
+function readinessBlockerText(value: string) {
+  const lower = value.toLowerCase();
+  if (lower.includes("chat_model") || lower.includes("no model") || value.includes("先选聊天模型")) {
+    return "还不能回复：请先选择聊天模型。";
+  }
+  if (lower.includes("supports_tools") || lower.includes("tool") || value.includes("技能")) {
+    return "聊天模型还没有可用的技能调用声明，请去模型管理打开「支持工具调用」声明，或换一个已声明的模型。";
+  }
+  if (lower.includes("enabled") || value.includes("启用")) {
+    return "群助手还没有完成启用条件，请检查群授权和聊天模型。";
+  }
+  return value.replace(/\b(?:Assistant scope|Source of truth|thread_id|sender_id|SupportsTools|knowledge_query|conversation_recall|webfetch_readonly|primary-overflow|CAS)\b/gi, "群助手设置");
+}
+
+function getReadiness(
+  draft: PolicyDraft,
+  readiness: AssistantReadiness | undefined,
+  models: RegistryModel[],
+): ReadinessView {
+  const selectedModel = models.find((model) => model.ref === draft.chat_model_ref) ?? null;
+  const capability = selectedModel ? modelCapability(selectedModel) : null;
+  const blockers: string[] = [];
+  if (!draft.chat_model_ref) {
+    blockers.push("还不能回复：请先选择聊天模型。");
+  } else if (!selectedModel) {
+    blockers.push("当前聊天模型不在可用模型清单中，请去模型管理确认模型已启用。");
+  } else if (capability === "unspecified") {
+    blockers.push("这个模型还没声明能调用技能，请去模型管理打开「支持工具调用」声明，或换一个已声明的模型。");
+  } else if (capability === "unsupported") {
+    blockers.push("这个模型确定不能调用技能，不能作为聊天模型；请换一个已声明支持技能的模型。");
+  }
+  const serverBlockers = Array.isArray(readiness?.blockers) ? readiness.blockers : [];
+  for (const blocker of serverBlockers) {
+    const raw = String(blocker);
+    const lower = raw.toLowerCase();
+    const isModelBlocker = lower.includes("chat_model") || lower.includes("no model") || raw.includes("先选聊天模型") || raw.includes("选择聊天模型");
+    const isToolBlocker = lower.includes("supports_tools") || lower.includes("tool") || raw.includes("技能");
+    if ((draft.chat_model_ref && isModelBlocker) || (capability === "declared" && isToolBlocker)) continue;
+    const translated = readinessBlockerText(raw);
+    if (translated && !blockers.includes(translated)) blockers.push(translated);
+  }
+  return {
+    canChat: blockers.length === 0,
+    blockers,
+    selectedModel,
+    capability,
+  };
+}
+
+function memoryTypeLabel(value: string) {
+  if (value === "base") return "基础";
+  if (value === "learned") return "学到的";
+  if (value === "pending") return "待处理";
+  return value === "" ? "未知" : value === "inactive" ? "已忘记" : value === "expired" ? "已过期" : "其他";
+}
+
+function authorityLabel(value: string) {
+  const labels: Record<string, string> = {
+    admin_base: "管理员基础事实",
+    admin_explicit: "管理员更正",
+    admin_explicit_correction: "管理员更正",
+    admin_conflict_accept: "管理员确认",
+    pinned_announcement: "群置顶",
+    telegram_approved_message: "群里已审核消息",
+    learned_fact: "学习沉淀",
+    unknown: "未知",
+  };
+  return labels[value] ?? (value ? "其他来源" : "未知");
+}
+
+function sourceLabel(value: string) {
+  const labels: Record<string, string> = {
+    admin_base: "管理员写的",
+    admin_explicit: "管理员更正",
+    admin_explicit_correction: "管理员更正",
+    admin_conflict_accept: "管理员确认",
+    pinned_announcement: "群置顶",
+    telegram_message: "群里聊到的",
+    telegram_approved_message: "群里已审核消息",
+    telegram_admin_explicit_correction: "管理员更正",
+    telegram_edited_message: "群里编辑过的消息",
+    learned_fact: "学习沉淀",
+    unknown: "来源未知",
+  };
+  return labels[value] ?? (value ? "其他来源" : "来源未知");
+}
+
+function scopeLabel(value: string) {
+  const found = MEMORY_SCOPE_OPTIONS.find((item) => item.value === value);
+  return found?.label ?? (value ? "其他范围" : "未知");
+}
+
+function verificationLabel(value?: string) {
+  if (!value) return "未知";
+  if (value === "server_verified" || value === "verified") return "服务端已确认";
+  if (value === "unknown") return "未知";
+  return "已记录";
+}
+
+function taskLabel(value: string) {
+  if (value === "chat") return "聊天回复";
+  if (value === "learning") return "学习整理";
+  return "其他任务";
+}
+
+function localLimitLabel(value?: string) {
+  if (!value || value === "local") return "本地限制";
+  return displayServerText(value);
+}
+
+function statusLabel(value: string) {
+  const labels: Record<string, string> = {
+    healthy: "正常",
+    cooldown: "冷却中",
+    half_open: "恢复探测",
+    unhealthy: "异常",
+    unknown: "未知",
+    ok: "成功",
+    success: "成功",
+    failed: "失败",
+    pending: "待处理",
+    accepted: "已接受",
+    rejected: "已拒绝",
+  };
+  return labels[value] ?? (value ? "其他状态" : "未知");
+}
+
+function sourceType(source: AssistantMemorySource) {
+  return sourceLabel(source.source_type || source.type || "");
+}
+
+function sourceMessageId(source: AssistantMemorySource) {
+  return source.source_message_id ?? source.message_id ?? null;
+}
+
+function sourceChatId(source: AssistantMemorySource) {
+  return source.source_chat_id ?? source.chat_id ?? null;
 }
 
 function ApiState({
@@ -306,7 +504,7 @@ function ApiState({
       <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-[var(--warning)]" />
       <div className="min-w-0 flex-1">
         <p className="font-medium">{label}</p>
-        <p className="mt-1 text-xs text-[var(--text-muted)]">{error ?? "无数据"}</p>
+        <p className="mt-1 text-xs text-[var(--text-muted)]">{error ? displayServerText(error) : "没有返回数据。"}</p>
       </div>
       {onRetry && (
         <Button type="button" variant="secondary" size="sm" onClick={onRetry}>
@@ -337,7 +535,15 @@ function Field({
   );
 }
 
-function SectionTitle({ icon: Icon, title, description }: { icon: React.ElementType; title: string; description?: string }) {
+function SectionTitle({
+  icon: Icon,
+  title,
+  description,
+}: {
+  icon: React.ElementType;
+  title: string;
+  description?: string;
+}) {
   return (
     <div className="mb-4 flex items-start gap-3">
       <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-[var(--accent-soft)] text-[var(--accent)]">
@@ -351,21 +557,76 @@ function SectionTitle({ icon: Icon, title, description }: { icon: React.ElementT
   );
 }
 
+function StatusTile({
+  label,
+  value,
+  detail,
+  tone = "default",
+}: {
+  label: string;
+  value: string;
+  detail: string;
+  tone?: "success" | "warning" | "danger" | "default";
+}) {
+  return (
+    <div className="rounded-xl border border-[var(--border)] bg-[var(--surface-2)] p-3">
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <span className="text-xs text-[var(--text-muted)]">{label}</span>
+        <Badge tone={tone}>{value}</Badge>
+      </div>
+      <p className="text-[11px] leading-relaxed text-[var(--text-subtle)]">{detail}</p>
+    </div>
+  );
+}
+
+function SaveBar({
+  dirty,
+  saving,
+  onSave,
+  onCancel,
+  scope,
+}: {
+  dirty: boolean;
+  saving: boolean;
+  onSave: () => void;
+  onCancel: () => void;
+  scope: string;
+}) {
+  return (
+    <div className="miniapp-savebar sticky bottom-3 z-10 flex flex-col gap-3 rounded-2xl border border-[var(--border)] bg-[var(--savebar-bg)] p-3 shadow-xl backdrop-blur-xl sm:flex-row sm:items-center sm:justify-between">
+      <div className="flex items-center gap-2 text-xs text-[var(--text-muted)]">
+        <Save className="h-4 w-4" />
+        {dirty ? `${scope}有未保存修改` : `${scope}与服务端一致`}
+      </div>
+      <div className="flex gap-2">
+        <Button type="button" variant="secondary" size="sm" disabled={!dirty || saving} onClick={onCancel}>
+          <RotateCcw className="h-3.5 w-3.5" />取消草稿
+        </Button>
+        <Button type="button" size="sm" disabled={!dirty || saving} onClick={onSave}>
+          {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
+          {saving ? "保存中…" : "保存设置"}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 export function GroupAssistantWorkspace({ chatId }: { chatId: number }) {
   const { pushToast } = useToast();
   const { confirmNavigation } = useDirtyNavigation();
   const router = useRouter();
   const [group, setGroup] = useState<Group | null>(null);
   const [groups, setGroups] = useState<Group[]>([]);
-  const [overview, setOverview] = useState<{ policy: AssistantPolicy; model_pool: AssistantPool; defaults: AssistantDefaults } | null>(null);
+  const [overview, setOverview] = useState<AssistantOverview | null>(null);
+  const [pool, setPool] = useState<AssistantPool | null>(null);
   const [settingsDraft, setSettingsDraft] = useState<PolicyDraft | null>(null);
   const [settingsSnapshot, setSettingsSnapshot] = useState<PolicyDraft | null>(null);
-  const [poolDraft, setPoolDraft] = useState<PoolDraft | null>(null);
-  const [poolSnapshot, setPoolSnapshot] = useState<PoolDraft | null>(null);
   const [status, setStatus] = useState<AssistantStatus | null>(null);
   const [tools, setTools] = useState<AssistantToolsResponse | null>(null);
   const [models, setModels] = useState<RegistryModel[]>([]);
+  const [recentSenders, setRecentSenders] = useState<AssistantRecentSender[]>([]);
   const [registryError, setRegistryError] = useState<string | null>(null);
+  const [recentSendersError, setRecentSendersError] = useState<string | null>(null);
   const [statusError, setStatusError] = useState<string | null>(null);
   const [toolsError, setToolsError] = useState<string | null>(null);
   const [dispatches, setDispatches] = useState<AssistantDispatch[]>([]);
@@ -373,18 +634,19 @@ export function GroupAssistantWorkspace({ chatId }: { chatId: number }) {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<ApiError | Error | null>(null);
   const [savingSettings, setSavingSettings] = useState(false);
-  const [savingPool, setSavingPool] = useState(false);
-  const [tab, setTab] = useState<AssistantTab>("overview");
+  const [section, setSection] = useState<AssistantSection>("start");
   const [lastSavedMessage, setLastSavedMessage] = useState<string | null>(null);
 
-  const settingsDirty = Boolean(settingsDraft && settingsSnapshot && JSON.stringify(settingsDraft) !== JSON.stringify(settingsSnapshot));
-  const poolDirty = Boolean(poolDraft && poolSnapshot && JSON.stringify(poolDraft) !== JSON.stringify(poolSnapshot));
-  useDirtyGuard(settingsDirty, "群助手聊天与学习配置尚未保存，确定离开吗？", "assistant-settings");
-  useDirtyGuard(poolDirty, "群助手模型池草稿尚未保存，确定离开吗？", "assistant-pool");
+  const settingsDirty = Boolean(
+    settingsDraft &&
+      settingsSnapshot &&
+      JSON.stringify(settingsDraft) !== JSON.stringify(settingsSnapshot),
+  );
+  useDirtyGuard(settingsDirty, "群助手设置还有未保存修改，确定离开吗？", "assistant-settings");
 
   const loadCore = useCallback(async () => {
     if (!Number.isFinite(chatId)) {
-      setLoadError(new Error("无效的群 ID"));
+      setLoadError(new Error("群编号无效。"));
       setLoading(false);
       return;
     }
@@ -400,14 +662,11 @@ export function GroupAssistantWorkspace({ chatId }: { chatId: number }) {
       setGroup(groupResponse.group ?? null);
       setOverview(assistantResponse);
       const nextSettings = policyDraft(assistantResponse.policy);
-      const nextPool = normalizePool(poolResponse, assistantResponse.policy);
       setSettingsDraft(nextSettings);
       setSettingsSnapshot(nextSettings);
-      setPoolDraft(nextPool);
-      setPoolSnapshot(nextPool);
+      setPool(normalizePool(poolResponse));
     } catch (error) {
-      if (error instanceof ApiError) setLoadError(error);
-      else setLoadError(new Error(errorText(error, "加载群助手失败")));
+      setLoadError(error instanceof ApiError ? error : new Error(errorText(error, "群助手加载失败。")));
     } finally {
       setLoading(false);
     }
@@ -421,28 +680,29 @@ export function GroupAssistantWorkspace({ chatId }: { chatId: number }) {
       fetchAssistantDispatches(chatId),
       fetchRegistryModels(),
       apiFetch<{ groups: Group[] }>("/api/admin/groups"),
+      fetchAssistantRecentSenders(chatId),
     ]);
-    const [statusResult, toolsResult, dispatchResult, modelsResult, groupsResult] = results;
+    const [statusResult, toolsResult, dispatchResult, modelsResult, groupsResult, sendersResult] = results;
     if (statusResult.status === "fulfilled") {
       setStatus(statusResult.value);
       setStatusError(null);
     } else {
       setStatus(null);
-      setStatusError(errorText(statusResult.reason, "运行状态加载失败"));
+      setStatusError(errorText(statusResult.reason, "运行状态暂时没有返回。"));
     }
     if (toolsResult.status === "fulfilled") {
       setTools(toolsResult.value);
       setToolsError(null);
     } else {
       setTools(null);
-      setToolsError(errorText(toolsResult.reason, "工具能力加载失败"));
+      setToolsError(errorText(toolsResult.reason, "技能状态暂时没有返回。"));
     }
     if (dispatchResult.status === "fulfilled") {
       setDispatches(dispatchResult.value.dispatches ?? []);
       setDispatchError(null);
     } else {
       setDispatches([]);
-      setDispatchError(errorText(dispatchResult.reason, "调度记录加载失败"));
+      setDispatchError(errorText(dispatchResult.reason, "调度记录暂时没有返回。"));
     }
     if (modelsResult.status === "fulfilled") {
       setModels(modelsResult.value.models ?? []);
@@ -451,32 +711,42 @@ export function GroupAssistantWorkspace({ chatId }: { chatId: number }) {
       setModels([]);
       setRegistryError(
         modelsResult.reason instanceof ApiError && modelsResult.reason.status === 403
-          ? "当前管理员没有模型 registry 查看能力；保留当前引用，服务端仍会最终校验。"
-          : errorText(modelsResult.reason, "模型 registry 加载失败"),
+          ? "当前管理员没有查看模型清单的权限；现有模型引用仍会交给服务端校验。"
+          : "模型清单暂时加载失败，请稍后重试。",
       );
     }
-    if (groupsResult.status === "fulfilled") setGroups((groupsResult.value.groups ?? []).filter((item) => item.enabled));
+    if (groupsResult.status === "fulfilled") {
+      setGroups((groupsResult.value.groups ?? []).filter((item) => item.enabled));
+    }
+    if (sendersResult.status === "fulfilled") {
+      const value = sendersResult.value;
+      setRecentSenders(Array.isArray(value) ? value : value.senders ?? []);
+      setRecentSendersError(null);
+    } else {
+      setRecentSenders([]);
+      setRecentSendersError(
+        sendersResult.reason instanceof ApiError && sendersResult.reason.status === 404
+          ? "当前服务端还没有近期发言人接口，暂时不能选择学习对象。"
+          : "近期发言人暂时加载失败，请稍后重试。",
+      );
+    }
   }, [chatId]);
 
   useEffect(() => {
-    let alive = true;
     setGroup(null);
     setGroups([]);
     setOverview(null);
+    setPool(null);
     setSettingsDraft(null);
     setSettingsSnapshot(null);
-    setPoolDraft(null);
-    setPoolSnapshot(null);
     setStatus(null);
     setTools(null);
     setModels([]);
+    setRecentSenders([]);
     setLoadError(null);
     void loadCore().then(() => {
-      if (alive) void loadOptional();
+      void loadOptional();
     });
-    return () => {
-      alive = false;
-    };
   }, [loadCore, loadOptional]);
 
   const reloadRuntime = useCallback(async () => {
@@ -491,12 +761,12 @@ export function GroupAssistantWorkspace({ chatId }: { chatId: number }) {
       setDispatches(nextDispatches.dispatches ?? []);
       setDispatchError(null);
     } catch (error) {
-      setStatusError(errorText(error, "运行状态加载失败"));
+      setStatusError(errorText(error, "运行状态暂时没有返回。"));
     }
   }, [chatId]);
 
   useEffect(() => {
-    if (tab !== "pool" || !Number.isFinite(chatId)) return;
+    if (section !== "models" || !Number.isFinite(chatId)) return;
     let alive = true;
     const controller = new AbortController();
     const refresh = async () => {
@@ -512,8 +782,8 @@ export function GroupAssistantWorkspace({ chatId }: { chatId: number }) {
         setDispatches(nextDispatches.dispatches ?? []);
         setDispatchError(null);
       } catch (error) {
-        if (!alive || controller.signal.aborted) return;
-        setStatusError(errorText(error, "运行状态轮询失败"));
+        if (!alive || controller.signal.aborted || isAbortError(error)) return;
+        setStatusError(errorText(error, "运行状态暂时没有返回。"));
       }
     };
     const timer = window.setInterval(refresh, 20_000);
@@ -522,22 +792,23 @@ export function GroupAssistantWorkspace({ chatId }: { chatId: number }) {
       controller.abort();
       window.clearInterval(timer);
     };
-  }, [chatId, tab]);
+  }, [chatId, section]);
 
-  const confirmWorkspaceNavigation = (message: string) => {
-    return ["assistant-settings", "assistant-pool", "assistant-memory"].every((scope) => confirmNavigation(message, scope));
-  };
+  const confirmWorkspaceNavigation = useCallback(
+    (message: string) => confirmNavigation(message, "assistant-settings"),
+    [confirmNavigation],
+  );
 
-  const changeTab = (next: string) => {
-    const nextTab = next as AssistantTab;
-    if (nextTab === tab) return;
-    if (!confirmWorkspaceNavigation("当前群助手有未保存修改，确定切换场景吗？")) return;
-    setTab(nextTab);
+  const changeSection = (next: string) => {
+    const nextSection = next as AssistantSection;
+    if (nextSection === section) return;
+    if (!confirmWorkspaceNavigation("群助手设置还有未保存修改，确定切换分区吗？")) return;
+    setSection(nextSection);
   };
 
   const switchGroup = (nextId: string) => {
     if (!nextId || Number(nextId) === chatId) return;
-    if (!confirmWorkspaceNavigation("当前群助手有未保存修改，确定切换群组吗？")) return;
+    if (!confirmWorkspaceNavigation("群助手设置还有未保存修改，确定切换群组吗？")) return;
     router.push(`/groups/${encodeURIComponent(nextId)}/assistant`);
   };
 
@@ -545,8 +816,20 @@ export function GroupAssistantWorkspace({ chatId }: { chatId: number }) {
     setSettingsDraft((current) => (current ? { ...current, [key]: value } : current));
   };
 
+  const readiness = useMemo(
+    () => getReadiness(settingsDraft ?? policyDraft(overview?.policy ?? ({} as AssistantPolicy)), overview?.readiness, models),
+    [models, overview?.policy, overview?.readiness, settingsDraft],
+  );
+
   const saveSettings = async () => {
     if (!settingsDraft || !overview || savingSettings) return;
+    const saveBlockers = getReadiness(settingsDraft, overview.readiness, models).blockers;
+    if (settingsDraft.chat_enabled && saveBlockers.length > 0) {
+      const message = saveBlockers[0];
+      setLastSavedMessage(message);
+      pushToast(message, "error");
+      return;
+    }
     setSavingSettings(true);
     setLastSavedMessage(null);
     try {
@@ -555,12 +838,19 @@ export function GroupAssistantWorkspace({ chatId }: { chatId: number }) {
       setOverview((current) => (current ? { ...current, policy: response.policy } : current));
       setSettingsDraft(nextSettings);
       setSettingsSnapshot(nextSettings);
-      setLastSavedMessage("聊天与学习配置已按服务端版本保存");
-      pushToast("群助手配置已保存", "success");
+      setLastSavedMessage("设置已保存；聊天模型会由服务端自动作为主模型端点。 ");
+      pushToast("群助手设置已保存", "success");
+      try {
+        const nextPool = await fetchAssistantPool(chatId);
+        setPool(normalizePool(nextPool));
+      } catch {
+        // 主设置保存已经成功，模型池刷新失败不覆盖草稿结果。
+      }
     } catch (error) {
-      const message = error instanceof ApiError && error.status === 409
-        ? "版本冲突：草稿已保留，请刷新后比较并重新保存。"
-        : errorText(error, "保存群助手配置失败");
+      const message =
+        error instanceof ApiError && error.status === 409
+          ? "设置版本冲突：草稿已保留，请刷新后比较再保存。"
+          : displayServerText(errorText(error, "保存群助手设置失败。"));
       setLastSavedMessage(message);
       pushToast(message, "error");
     } finally {
@@ -570,107 +860,82 @@ export function GroupAssistantWorkspace({ chatId }: { chatId: number }) {
 
   const cancelSettings = () => {
     if (!settingsSnapshot) return;
-    if (!confirmNavigation("放弃当前聊天与学习配置草稿吗？", "assistant-settings")) return;
-    setSettingsDraft({ ...settingsSnapshot, tool_allowlist: [...settingsSnapshot.tool_allowlist], allow_domains: [...settingsSnapshot.allow_domains] });
-    setLastSavedMessage(null);
-  };
-
-  const savePool = async () => {
-    if (!poolDraft || savingPool) return;
-    const chatAssignment = poolDraft.config.task_assignments.chat;
-    const learningAssignment = poolDraft.config.task_assignments.learning;
-    if (!poolDraft.config.endpoints.length || !chatAssignment?.primary || !learningAssignment?.primary) {
-      const message = "模型池至少需要端点，以及 chat / learning 各一个主端点；未向服务端提交。";
-      setLastSavedMessage(message);
-      pushToast(message, "error");
-      return;
-    }
-    setSavingPool(true);
-    setLastSavedMessage(null);
-    try {
-      const response = await saveAssistantPool(
-        chatId,
-        {
-          strategy: poolDraft.strategy,
-          task_assignments: poolDraft.config.task_assignments,
-          endpoints: poolDraft.config.endpoints,
-          max_queue_depth: poolDraft.config.max_queue_depth,
-          max_queue_wait_sec: poolDraft.config.max_queue_wait_sec,
-        },
-        poolDraft.version,
-      );
-      const nextPool = normalizePool(response, overview?.policy ?? ({} as AssistantPolicy));
-      setPoolDraft(nextPool);
-      setPoolSnapshot(nextPool);
-      setOverview((current) => (current ? { ...current, model_pool: response } : current));
-      setLastSavedMessage("模型池已按服务端版本保存");
-      pushToast("模型池已保存", "success");
-    } catch (error) {
-      const message = error instanceof ApiError && error.status === 409
-        ? "模型池版本冲突：当前草稿已保留，没有覆盖你的编辑。"
-        : errorText(error, "保存模型池失败");
-      setLastSavedMessage(message);
-      pushToast(message, "error");
-    } finally {
-      setSavingPool(false);
-    }
-  };
-
-  const cancelPool = () => {
-    if (!poolSnapshot) return;
-    if (!confirmNavigation("放弃当前模型池草稿吗？", "assistant-pool")) return;
-    setPoolDraft({
-      ...poolSnapshot,
-      config: {
-        ...poolSnapshot.config,
-        task_assignments: {
-          chat: { ...poolSnapshot.config.task_assignments.chat, backups: [...poolSnapshot.config.task_assignments.chat.backups] },
-          learning: { ...poolSnapshot.config.task_assignments.learning, backups: [...poolSnapshot.config.task_assignments.learning.backups] },
-        },
-        endpoints: poolSnapshot.config.endpoints.map((endpoint) => ({ ...endpoint })),
-      },
+    if (!confirmNavigation("放弃当前群助手设置草稿吗？", "assistant-settings")) return;
+    setSettingsDraft({
+      ...settingsSnapshot,
+      tool_allowlist: [...settingsSnapshot.tool_allowlist],
+      allow_domains: [...settingsSnapshot.allow_domains],
     });
     setLastSavedMessage(null);
   };
 
   if (loading) {
     return (
-      <AdminShell title="群助手" subtitle="加载实际群助手策略与运行数据">
-        <Card><CardBody className="flex items-center gap-3 py-14 text-sm text-[var(--text-muted)]"><Loader2 className="h-4 w-4 animate-spin text-[var(--accent)]" />正在读取群助手数据…</CardBody></Card>
+      <AdminShell title="群助手" subtitle="正在读取这个群的助手设置">
+        <Card>
+          <CardBody className="flex items-center gap-3 py-14 text-sm text-[var(--text-muted)]">
+            <Loader2 className="h-4 w-4 animate-spin text-[var(--accent)]" />正在读取群助手数据…
+          </CardBody>
+        </Card>
       </AdminShell>
     );
   }
 
-  if (loadError || !overview || !group || !settingsDraft || !poolDraft) {
+  if (loadError || !overview || !group || !settingsDraft || !settingsSnapshot) {
     const statusCode = loadError instanceof ApiError ? loadError.status : undefined;
-    const title = statusCode === 403 ? "没有该群的管理范围" : statusCode === 404 ? "群组不存在或已停用" : "群助手加载失败";
+    const title =
+      statusCode === 403
+        ? "没有该群的管理范围"
+        : statusCode === 404
+          ? "群组不存在或已停用"
+          : "群助手加载失败";
     return (
-      <AdminShell title="群助手" subtitle="真实 API 页面">
-        <Card><CardBody className="flex flex-col gap-3 py-12">
-          <Badge tone={statusCode === 403 ? "warning" : "danger"}>{title}</Badge>
-          <p className="text-sm text-[var(--text-muted)]">{loadError?.message ?? "服务端没有返回完整群助手数据。"}</p>
-          <div className="flex gap-2">
-            <Button type="button" onClick={() => { void loadCore(); }}><RefreshCw className="h-4 w-4" />重试</Button>
-            <GuardedLink href="/assistant"><Button type="button" variant="secondary">返回选群</Button></GuardedLink>
-          </div>
-        </CardBody></Card>
+      <AdminShell title="群助手" subtitle="群助手设置">
+        <Card>
+          <CardBody className="flex flex-col gap-3 py-12">
+            <Badge tone={statusCode === 403 ? "warning" : "danger"}>{title}</Badge>
+            <p className="text-sm text-[var(--text-muted)]">{loadError ? displayServerText(loadError.message) : "服务端没有返回完整的群助手数据。"}</p>
+            <div className="flex gap-2">
+              <Button
+                type="button"
+                onClick={() => {
+                  void loadCore();
+                }}
+              >
+                <RefreshCw className="h-4 w-4" />重试
+              </Button>
+              <GuardedLink href="/assistant">
+                <Button type="button" variant="secondary">
+                  返回选群
+                </Button>
+              </GuardedLink>
+            </div>
+          </CardBody>
+        </Card>
       </AdminShell>
     );
   }
 
-  const policy = overview.policy;
   const defaults = overview.defaults;
-  const modelByRef = new Map(models.map((model) => [model.ref, model]));
-  const modelOptions = models.filter((model) => model.enabled);
-  const chatModelOptions = modelOptions.filter((model) => model.supports_tools);
   const activeGroupTitle = group.title || String(chatId);
+  const readinessForDraft = getReadiness(settingsDraft, overview.readiness, models);
 
   return (
     <AdminShell
-      title="群助手"
-      subtitle={`${activeGroupTitle} · Chat ID ${chatId} · 独立于现有审核策略`}
+      title="群助手工作台"
+      subtitle={`${activeGroupTitle} · 群编号 ${chatId} · 不改现有审核策略`}
       actions={
-        <Button type="button" variant="secondary" size="sm" onClick={() => { if (!confirmWorkspaceNavigation("当前群助手有未保存修改，确定刷新并放弃远端未合并草稿吗？")) return; void loadCore(); void loadOptional(); }} disabled={loading || savingSettings || savingPool}>
+        <Button
+          type="button"
+          variant="secondary"
+          size="sm"
+          onClick={() => {
+            if (!confirmWorkspaceNavigation("当前设置还有未保存修改，确定刷新吗？")) return;
+            void loadCore();
+            void loadOptional();
+          }}
+          disabled={loading || savingSettings}
+        >
           <RefreshCw className="h-3.5 w-3.5" />刷新
         </Button>
       }
@@ -678,244 +943,865 @@ export function GroupAssistantWorkspace({ chatId }: { chatId: number }) {
       <div className="flex flex-col gap-4">
         <div className="flex flex-col gap-3 rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-3 shadow-[var(--shadow)] sm:flex-row sm:items-center sm:justify-between">
           <div className="flex min-w-0 items-center gap-3">
-            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-[var(--accent-soft)] text-[var(--accent)]"><Bot className="h-4 w-4" /></div>
+            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-[var(--accent-soft)] text-[var(--accent)]">
+              <Bot className="h-4 w-4" />
+            </div>
             <div className="min-w-0">
-              <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-[var(--accent)]">Assistant scope</p>
+              <p className="text-[10px] font-semibold tracking-[0.16em] text-[var(--accent)]">当前群助手</p>
               <p className="truncate text-sm font-medium">{activeGroupTitle}</p>
             </div>
           </div>
-          {groups.length > 0 ? (
-            <label className="flex min-w-0 items-center gap-2 text-xs text-[var(--text-muted)]">
-              <span className="shrink-0">切换群组</span>
-              <select value={String(chatId)} onChange={(event) => switchGroup(event.target.value)} className="h-10 min-w-0 rounded-xl border border-[var(--input-border)] bg-[var(--input-bg)] px-3 text-sm text-[var(--input-color)]">
-                {groups.map((item) => <option key={item.chat_id} value={String(item.chat_id)}>{item.title} · {item.chat_id}</option>)}
-              </select>
-            </label>
-          ) : (
-            <span className="text-xs text-[var(--text-muted)]">可管理群列表无数据</span>
-          )}
+          <div className="flex flex-wrap items-center gap-2">
+            <Badge tone={settingsDraft.chat_enabled && readinessForDraft.canChat ? "success" : "warning"}>
+              {settingsDraft.chat_enabled && readinessForDraft.canChat ? "可以回复" : "还不能回复"}
+            </Badge>
+            {groups.length > 0 ? (
+              <label className="flex min-w-0 items-center gap-2 text-xs text-[var(--text-muted)]">
+                <span className="shrink-0">切换群组</span>
+                <select
+                  aria-label="切换群组"
+                  value={String(chatId)}
+                  onChange={(event) => switchGroup(event.target.value)}
+                  className="h-10 min-w-0 rounded-xl border border-[var(--input-border)] bg-[var(--input-bg)] px-3 text-sm text-[var(--input-color)]"
+                >
+                  {groups.map((item) => (
+                    <option key={item.chat_id} value={String(item.chat_id)}>
+                      {item.title} · {item.chat_id}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            ) : (
+              <span className="text-xs text-[var(--text-muted)]">可管理群列表没有数据</span>
+            )}
+            <GuardedLink href={`/groups/${encodeURIComponent(String(chatId))}`} className="text-xs text-[var(--accent)] underline-offset-2 hover:underline">
+              查看现有群审核策略（只读链接）
+            </GuardedLink>
+          </div>
         </div>
 
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <Tabs
             tabs={[
-              { value: "overview", label: "总览" },
-              { value: "chat", label: "聊天与学习" },
-              { value: "memory", label: "记忆中心" },
-              { value: "pool", label: "模型池" },
-              { value: "tools", label: "只读技能" },
+              { value: "start", label: "开始使用" },
+              { value: "speech", label: "怎么说话" },
+              { value: "memory", label: "群记忆" },
+              { value: "models", label: "模型与负载（高级）" },
+              { value: "skills", label: "能查什么" },
             ]}
-            value={tab}
-            onValueChange={changeTab}
+            value={section}
+            onValueChange={changeSection}
           />
-          <span className="text-xs text-[var(--text-muted)]">{settingsDirty || poolDirty ? "有未保存草稿" : lastSavedMessage ?? "服务端数据"}</span>
+          <span className="text-xs text-[var(--text-muted)]">
+            {settingsDirty ? "有未保存设置" : lastSavedMessage ?? "服务端数据"}
+          </span>
         </div>
 
-        {tab === "overview" && (
-          <OverviewPanel
-            policy={policy}
+        {section === "start" && (
+          <StartPanel
+            policy={settingsDraft}
             defaults={defaults}
+            readiness={readinessForDraft}
             status={status}
             statusError={statusError}
-            tools={tools}
-            onRetry={() => { void loadOptional(); }}
-            onOpen={(nextTab) => changeTab(nextTab)}
+            onRetry={() => {
+              void loadOptional();
+            }}
+            onOpen={changeSection}
           />
         )}
-        {tab === "chat" && (
-          <ChatSettingsPanel
+        {section === "speech" && (
+          <SpeechPanel
             draft={settingsDraft}
-            models={modelOptions}
-            chatModels={chatModelOptions}
+            models={models}
+            recentSenders={recentSenders}
+            recentSendersError={recentSendersError}
             registryError={registryError}
+            readiness={readinessForDraft}
             saving={savingSettings}
             dirty={settingsDirty}
             onChange={updateSetting}
+            onRequestEnable={(enabled) => {
+              if (!enabled) {
+                updateSetting("chat_enabled", false);
+                return;
+              }
+              if (readinessForDraft.blockers.length > 0) {
+                const message = readinessForDraft.blockers[0];
+                setLastSavedMessage(message);
+                pushToast(message, "error");
+                return;
+              }
+              updateSetting("chat_enabled", true);
+            }}
             onSave={saveSettings}
             onCancel={cancelSettings}
           />
         )}
-        {tab === "memory" && (
-          <MemoryPanel chatId={chatId} onToast={pushToast} />
-        )}
-        {tab === "pool" && (
-          <PoolPanel
-            chatId={chatId}
-            draft={poolDraft}
-            models={models}
-            modelByRef={modelByRef}
-            registryError={registryError}
+        {section === "memory" && <MemoryPanel chatId={chatId} onToast={pushToast} />}
+        {section === "models" && (
+          <ModelsPanel
+            draft={settingsDraft}
+            pool={pool}
             status={status}
             statusError={statusError}
             dispatches={dispatches}
             dispatchError={dispatchError}
-            saving={savingPool}
-            dirty={poolDirty}
-            onChange={setPoolDraft}
-            onSave={savePool}
-            onCancel={cancelPool}
-            onRefreshStatus={reloadRuntime}
+            modelByRef={new Map(models.map((model) => [model.ref, model]))}
+            readiness={readinessForDraft}
+            onChange={updateSetting}
+            saving={savingSettings}
+            dirty={settingsDirty}
+            onSave={saveSettings}
+            onCancel={cancelSettings}
+            onRefreshStatus={() => {
+              void reloadRuntime();
+            }}
           />
         )}
-        {tab === "tools" && (
-          <ToolsPanel tools={tools} error={toolsError} policy={policy} onOpenSettings={() => changeTab("chat")} />
+        {section === "skills" && (
+          <SkillsPanel
+            tools={tools}
+            error={toolsError}
+            policy={settingsDraft}
+            onRetry={() => {
+              void loadOptional();
+            }}
+            onOpenSettings={() => changeSection("speech")}
+          />
         )}
       </div>
     </AdminShell>
   );
 }
 
-function OverviewPanel({
+function StartPanel({
   policy,
   defaults,
+  readiness,
   status,
   statusError,
-  tools,
   onRetry,
   onOpen,
 }: {
-  policy: AssistantPolicy;
+  policy: PolicyDraft;
   defaults: AssistantDefaults;
+  readiness: ReadinessView;
   status: AssistantStatus | null;
   statusError: string | null;
-  tools: AssistantToolsResponse | null;
   onRetry: () => void;
-  onOpen: (tab: AssistantTab) => void;
+  onOpen: (section: AssistantSection) => void;
 }) {
+  const blockerList = readiness.blockers.length > 0 ? readiness.blockers : ["没有待办，这个群已具备聊天回复条件。"];
   return (
-    <div className="grid gap-4 xl:grid-cols-[minmax(0,1.4fr)_minmax(300px,0.8fr)]">
+    <div className="grid gap-4 xl:grid-cols-[minmax(0,1.35fr)_minmax(300px,0.8fr)]">
       <div className="space-y-4">
         <Card>
-          <CardHeader><CardTitle>实际状态</CardTitle><CardDescription>仅展示群助手 API 已返回的策略与运行状态，不读取或改变原审核策略。</CardDescription></CardHeader>
+          <CardHeader>
+            <CardTitle>{policy.chat_enabled && readiness.canChat ? "这个群现在可以回复" : "这个群现在还不能回复"}</CardTitle>
+            <CardDescription>
+              {policy.chat_enabled && readiness.canChat
+                ? "聊天已打开；默认不会主动插话。"
+                : readiness.blockers[0] ?? "先完成下面的待办，再打开聊天。"}
+            </CardDescription>
+          </CardHeader>
           <CardBody className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-            <StatusTile label="聊天" value={policy.chat_enabled ? "已启用" : "已关闭"} tone={policy.chat_enabled ? "success" : "default"} detail="仅 @、回复 Bot 或连续追问" />
-            <StatusTile label="普通群聊学习" value={policy.learning_enabled ? "已启用" : "已关闭"} tone={policy.learning_enabled ? "success" : "default"} detail="审核通过后独立提炼" />
-            <StatusTile label="原文保留" value={policy.retention_days ? `${policy.retention_days} 天` : "未知"} detail="可配置 1–30 天" />
-            <StatusTile label="本地队列" value={status ? String(status.queue_depth) : "未知"} detail={status?.remote_quota_note ?? defaults.remote_quota ?? "无数据"} />
+            <StatusTile
+              label="聊天"
+              value={policy.chat_enabled ? "已打开" : "已关闭"}
+              tone={policy.chat_enabled ? "success" : "default"}
+              detail="只响应 @、回复和连续追问。"
+            />
+            <StatusTile
+              label="聊天模型"
+              value={readiness.selectedModel?.label || "未选择"}
+              tone={readiness.capability === "declared" ? "success" : "warning"}
+              detail={readiness.selectedModel ? capabilityLabel(readiness.capability ?? "unspecified") : "选择后自动成为主模型。"}
+            />
+            <StatusTile
+              label="主动说话"
+              value="默认关闭"
+              detail={`有把握插一句：${policy.proactive_interject_enabled ? "开" : "关"} · 冷群找话题：${policy.proactive_cold_topic_enabled ? "开" : "关"}`}
+            />
+            <StatusTile
+              label="原文保留"
+              value={policy.retention_days ? `${policy.retention_days} 天` : "未知"}
+              detail={`历史默认政策：${retentionLabel(defaults.history_retention)}`}
+            />
           </CardBody>
         </Card>
+
         <Card>
-          <CardHeader><CardTitle>启用前说明</CardTitle><CardDescription>首次启用不会改变旧群审核、权限或 Telegram 数据。</CardDescription></CardHeader>
-          <CardBody className="space-y-3 text-sm text-[var(--text-muted)]">
-            <div className="flex gap-3"><ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-[var(--success)]" /><p>聊天和学习是两个独立开关；新群默认关闭。聊天只响应 @/reply 和同群、同话题、同用户的窗口内连续追问，不主动插话。</p></div>
-            <div className="flex gap-3"><Database className="mt-0.5 h-4 w-4 shrink-0 text-[var(--accent)]" /><p>普通群聊学习只收录已通过审核且在策略保留期内的文本，长期只保留可追溯事实及必要出处摘要。</p></div>
-            <div className="flex gap-3"><Info className="mt-0.5 h-4 w-4 shrink-0 text-[var(--warning)]" /><p>历史默认政策：{valueOrUnknown(defaults.history_retention)}；忘记操作只移出群助手本地召回范围，不删除 Telegram 远端原文。</p></div>
-            <div className="flex flex-wrap gap-2 pt-1"><Button type="button" size="sm" onClick={() => onOpen("chat")}>配置聊天与学习</Button><Button type="button" size="sm" variant="secondary" onClick={() => onOpen("memory")}>打开记忆中心</Button></div>
+          <CardHeader>
+            <CardTitle>开始前待办</CardTitle>
+            <CardDescription>这里显示服务端返回的待办；没有可用聊天模型时不会假装能回消息。</CardDescription>
+          </CardHeader>
+          <CardBody className="space-y-3">
+            <ul className="space-y-2 text-sm text-[var(--text-muted)]">
+              {blockerList.map((blocker, index) => (
+                <li key={`${blocker}-${index}`} className="flex items-start gap-2">
+                  {readiness.blockers.length > 0 ? (
+                    <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-[var(--warning)]" />
+                  ) : (
+                    <Check className="mt-0.5 h-4 w-4 shrink-0 text-[var(--success)]" />
+                  )}
+                  <span>{blocker}</span>
+                </li>
+              ))}
+            </ul>
+            <div className="flex flex-wrap gap-2 pt-1">
+              <Button type="button" size="sm" onClick={() => onOpen("speech")}>
+                <MessageCircle className="h-3.5 w-3.5" />去选择聊天模型
+              </Button>
+              <Button type="button" size="sm" variant="secondary" onClick={() => onOpen("memory")}>
+                <Database className="h-3.5 w-3.5" />查看群记忆
+              </Button>
+            </div>
           </CardBody>
         </Card>
       </div>
+
       <div className="space-y-4">
         <Card>
-          <CardHeader className="flex-row items-center justify-between"><div><CardTitle>只读技能概览</CardTitle><CardDescription>能力来源于实际 tools API。</CardDescription></div><Button type="button" variant="ghost" size="sm" onClick={() => onOpen("tools")}>详情</Button></CardHeader>
-          <CardBody>
-            {tools ? <div className="space-y-2">{tools.tools.map((tool) => <div key={tool.name} className="flex items-center justify-between gap-3 rounded-xl border border-[var(--border)] px-3 py-2"><span className="text-sm">{TOOL_LABELS[tool.name as AssistantToolName] ?? tool.name}</span><Badge tone={tool.enabled ? "success" : "default"}>{tool.enabled ? "启用" : "关闭"}</Badge></div>)}<p className="mt-3 text-xs text-[var(--text-muted)]">写工具：{tools.write_tools.length === 0 ? "无" : tools.write_tools.join("、")} · 服务端绑定范围：{tools.server_bound_scope ? "是" : "未知"}</p></div> : <ApiState label="工具状态无数据" error="未将原型沙箱按钮当作真实执行。" onRetry={onRetry} />}
+          <CardHeader>
+            <CardTitle>启用前说明</CardTitle>
+            <CardDescription>聊天与学习独立保存，不改变旧群审核、权限或 Telegram 原文。</CardDescription>
+          </CardHeader>
+          <CardBody className="space-y-3 text-sm text-[var(--text-muted)]">
+            <div className="flex gap-3">
+              <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-[var(--success)]" />
+              <p>聊天只在被点名、被回复或连续追问时回答；两个主动说话开关默认关闭。</p>
+            </div>
+            <div className="flex gap-3">
+              <Database className="mt-0.5 h-4 w-4 shrink-0 text-[var(--accent)]" />
+              <p>普通群聊学习只收录审核通过的文本，长期只沉淀可追溯事实。</p>
+            </div>
+            <div className="flex gap-3">
+              <Info className="mt-0.5 h-4 w-4 shrink-0 text-[var(--warning)]" />
+              <p>忘记记忆只移出群助手本地召回范围，不删除 Telegram 远端原文。</p>
+            </div>
           </CardBody>
         </Card>
         <Card>
-          <CardHeader><CardTitle>群内使用方式</CardTitle><CardDescription>真实 Bot 在 Telegram 执行，后台不模拟发送界面。</CardDescription></CardHeader>
-          <CardBody className="space-y-2 text-sm text-[var(--text-muted)]"><p>1. 在聊天配置中分别启用聊天或学习，并选择服务端 registry 中的模型。</p><p>2. 群内使用 @Bot 或回复 Bot 开始提问；窗口内连续追问按服务端会话隔离。</p><p>3. 技能执行、审核门禁、来源权威和群 scope 均由服务端最终决定。</p></CardBody>
-        </Card>
-        <Card>
-          <CardHeader><CardTitle>运行状态</CardTitle></CardHeader>
-          <CardBody>{status ? <div className="space-y-2 text-sm"><div className="flex justify-between gap-3"><span className="text-[var(--text-muted)]">调度策略</span><span className="font-medium">{valueOrUnknown(status.active_strategy)}</span></div><div className="flex justify-between gap-3"><span className="text-[var(--text-muted)]">远程配额</span><span className="text-right">{valueOrUnknown(status.remote_quota_note)}</span></div><div className="flex justify-between gap-3"><span className="text-[var(--text-muted)]">最近路由</span><span className="text-right">{status.last_dispatch_event ? `${status.last_dispatch_event.task_type} · ${status.last_dispatch_event.selected_endpoint_id}` : "未知"}</span></div></div> : <ApiState label="状态 API 无数据" error={statusError ?? "未知"} onRetry={onRetry} />}</CardBody>
+          <CardHeader className="flex-row items-center justify-between">
+            <div>
+              <CardTitle>实际状态</CardTitle>
+              <CardDescription>来自当前群助手运行接口。</CardDescription>
+            </div>
+            <Button type="button" variant="ghost" size="sm" onClick={onRetry}>
+              <RefreshCw className="h-3.5 w-3.5" />刷新
+            </Button>
+          </CardHeader>
+          <CardBody>
+            {status ? (
+              <div className="space-y-2 text-sm">
+                <div className="flex justify-between gap-3">
+                  <span className="text-[var(--text-muted)]">本地队列</span>
+                  <span>{status.queue_depth}</span>
+                </div>
+                <div className="flex justify-between gap-3">
+                  <span className="text-[var(--text-muted)]">远程配额</span>
+                  <span>未知</span>
+                </div>
+                <div className="flex justify-between gap-3">
+                  <span className="text-[var(--text-muted)]">最近调度</span>
+                  <span className="text-right">{status.last_dispatch_event ? "已有记录" : "未知"}</span>
+                </div>
+              </div>
+            ) : (
+              <ApiState label="运行状态暂时没有数据" error={statusError} onRetry={onRetry} />
+            )}
+          </CardBody>
         </Card>
       </div>
     </div>
   );
 }
 
-function StatusTile({ label, value, detail, tone = "default" }: { label: string; value: string; detail: string; tone?: "success" | "warning" | "danger" | "default" }) {
-  return <div className="rounded-xl border border-[var(--border)] bg-[var(--surface-2)] p-3"><div className="mb-2 flex items-center justify-between gap-2"><span className="text-xs text-[var(--text-muted)]">{label}</span><Badge tone={tone}>{value}</Badge></div><p className="text-[11px] leading-relaxed text-[var(--text-subtle)]">{detail}</p></div>;
+function ToggleRow({
+  label,
+  hint,
+  checked,
+  onChange,
+  ariaLabel,
+  disabled,
+  extra,
+}: {
+  label: string;
+  hint: string;
+  checked: boolean;
+  onChange: (value: boolean) => void;
+  ariaLabel: string;
+  disabled?: boolean;
+  extra?: React.ReactNode;
+}) {
+  return (
+    <div className="flex items-start justify-between gap-4 rounded-xl border border-[var(--border)] bg-[var(--surface-2)] p-4">
+      <div>
+        <p className="text-sm font-medium">{label}</p>
+        <p className="mt-1 text-xs leading-relaxed text-[var(--text-muted)]">{hint}</p>
+        {extra}
+      </div>
+      <Switch checked={checked} onCheckedChange={onChange} aria-label={ariaLabel} disabled={disabled} />
+    </div>
+  );
 }
 
-function ChatSettingsPanel({
+function SpeechPanel({
   draft,
   models,
-  chatModels,
+  recentSenders,
+  recentSendersError,
   registryError,
+  readiness,
   saving,
   dirty,
   onChange,
+  onRequestEnable,
   onSave,
   onCancel,
 }: {
   draft: PolicyDraft;
   models: RegistryModel[];
-  chatModels: RegistryModel[];
+  recentSenders: AssistantRecentSender[];
+  recentSendersError: string | null;
   registryError: string | null;
+  readiness: ReadinessView;
   saving: boolean;
   dirty: boolean;
   onChange: <K extends keyof PolicyDraft>(key: K, value: PolicyDraft[K]) => void;
+  onRequestEnable: (enabled: boolean) => void;
   onSave: () => void;
   onCancel: () => void;
 }) {
-  const modelOption = (model: RegistryModel) => `${model.label || model.ref} · ${model.ref}`;
-  const chatModelRefs = new Set(chatModels.map((model) => model.ref));
-  const learningModelRefs = new Set(models.map((model) => model.ref));
-  const currentChatMissing = Boolean(draft.chat_model_ref && !chatModelRefs.has(draft.chat_model_ref));
-  const currentLearningMissing = Boolean(draft.learning_model_ref && !learningModelRefs.has(draft.learning_model_ref));
+  const enabledModels = models.filter((model) => model.enabled);
+  const currentChatMissing = Boolean(draft.chat_model_ref && !enabledModels.some((model) => model.ref === draft.chat_model_ref));
+  const currentLearningMissing = Boolean(draft.learning_model_ref && !enabledModels.some((model) => model.ref === draft.learning_model_ref));
+  const selectedSender = recentSenders.find((sender) => sender.user_id === draft.mimic_target_user_id);
+  const mimicEnabled = draft.mimic_target_user_id > 0;
+  const collected = Math.max(0, draft.mimic_sample_count);
+  const distilled = Math.max(0, draft.mimic_distilled_at_count);
+  const progress = Math.min(100, Math.round((collected % 50) * 2));
+  const [profilePreviewOpen, setProfilePreviewOpen] = useState(false);
+
   return (
     <div className="space-y-4">
       <fieldset disabled={saving} aria-busy={saving} className={cn("space-y-4 border-0 p-0", saving && "opacity-70")}>
-      <Card>
-        <CardHeader><SectionTitle icon={MessageCircle} title="聊天与学习开关" description="两个开关独立保存；服务端最终验证群 scope、模型能力和权限。" /></CardHeader>
-        <CardBody className="grid gap-4 md:grid-cols-2">
-          <div className="flex items-start justify-between gap-4 rounded-xl border border-[var(--border)] bg-[var(--surface-2)] p-4"><div><p className="text-sm font-medium">聊天回复</p><p className="mt-1 text-xs leading-relaxed text-[var(--text-muted)]">响应 mention_or_reply 或 mention_only；连续追问受窗口和次数限制。</p></div><Switch checked={draft.chat_enabled} onCheckedChange={(value) => onChange("chat_enabled", value)} aria-label="启用聊天" /></div>
-          <div className="flex items-start justify-between gap-4 rounded-xl border border-[var(--border)] bg-[var(--surface-2)] p-4"><div><p className="text-sm font-medium">普通群聊自动学习</p><p className="mt-1 text-xs leading-relaxed text-[var(--text-muted)]">仅对审核通过消息进入独立学习队列；不会改变审核策略。</p></div><Switch checked={draft.learning_enabled} onCheckedChange={(value) => onChange("learning_enabled", value)} aria-label="启用普通群聊自动学习" /></div>
-        </CardBody>
-      </Card>
-      <Card>
-        <CardHeader><CardTitle>触发与会话</CardTitle><CardDescription>追问隔离键由服务端使用 chat_id + thread_id + sender_id 绑定，后台不注入身份。</CardDescription></CardHeader>
-        <CardBody className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-          <Field label="触发模式"><Select value={draft.trigger_mode} onChange={(event) => onChange("trigger_mode", event.target.value)}><option value="mention_or_reply">@ 或回复 Bot</option><option value="mention_only">仅 @ Bot</option></Select></Field>
-          <Field label="追问窗口（秒）" hint="服务端范围 30–3600"><Input type="number" min={30} max={3600} value={draft.followup_window_sec} onChange={(event) => onChange("followup_window_sec", Number(event.target.value))} /></Field>
-          <Field label="最多追问轮次" hint="服务端范围 1–20"><Input type="number" min={1} max={20} value={draft.max_followup_turns} onChange={(event) => onChange("max_followup_turns", Number(event.target.value))} /></Field>
-          <Field label="历史上下文条数" hint="服务端范围 1–200"><Input type="number" min={1} max={200} value={draft.history_limit} onChange={(event) => onChange("history_limit", Number(event.target.value))} /></Field>
-        </CardBody>
-      </Card>
-      <Card>
-        <CardHeader><CardTitle>模型引用与生成参数</CardTitle><CardDescription>模型只能从 registry 引用；此页不接受 base URL、key 或任意 provider 配置。</CardDescription></CardHeader>
-        <CardBody className="grid gap-4 md:grid-cols-2">
-          <Field label="聊天模型（必须支持 tools）" hint={registryError ?? "chat 模型由服务端 SupportsTools 硬门槛校验"}>
-            <select className="h-10 w-full rounded-xl border border-[var(--input-border)] bg-[var(--input-bg)] px-3 text-sm text-[var(--input-color)]" value={draft.chat_model_ref} onChange={(event) => onChange("chat_model_ref", event.target.value)}>
-              <option value="">不指定（由服务端策略处理）</option>
-              {currentChatMissing && <option value={draft.chat_model_ref}>{draft.chat_model_ref} · 当前引用（registry 无此能力）</option>}
-              {chatModels.map((model) => <option key={model.ref} value={model.ref}>{modelOption(model)}</option>)}
-            </select>
-          </Field>
-          <Field label="学习模型" hint={registryError ?? "learning 可使用 enabled registry 模型"}>
-            <select className="h-10 w-full rounded-xl border border-[var(--input-border)] bg-[var(--input-bg)] px-3 text-sm text-[var(--input-color)]" value={draft.learning_model_ref} onChange={(event) => onChange("learning_model_ref", event.target.value)}>
-              <option value="">不指定（由服务端策略处理）</option>
-              {currentLearningMissing && <option value={draft.learning_model_ref}>{draft.learning_model_ref} · 当前引用（registry 无此能力）</option>}
-              {models.map((model) => <option key={model.ref} value={model.ref}>{modelOption(model)}</option>)}
-            </select>
-          </Field>
-          <Field label="temperature" hint="服务端范围 0–2；独立于 system prompt"><Input type="number" min={0} max={2} step={0.1} value={draft.temperature} onChange={(event) => onChange("temperature", Number(event.target.value))} /></Field>
-          <Field label="原文保留天数" hint="服务端范围 1–30；长期事实不等于保留原文"><Input type="number" min={1} max={30} value={draft.retention_days} onChange={(event) => onChange("retention_days", Number(event.target.value))} /></Field>
-          <Field label="最大本地队列深度"><Input type="number" min={0} max={100} value={draft.max_queue_depth} onChange={(event) => onChange("max_queue_depth", Number(event.target.value))} /></Field>
-          <Field label="最大排队等待（秒）"><Input type="number" min={1} max={60} value={draft.max_queue_wait_sec} onChange={(event) => onChange("max_queue_wait_sec", Number(event.target.value))} /></Field>
-          <Field label="collection_policy" className="md:col-span-2"><Input value={draft.collection_policy} onChange={(event) => onChange("collection_policy", event.target.value)} /></Field>
-          <Field label="system prompt" hint="服务端最多 8000 字符；保存时按 CAS 提交" className="md:col-span-2"><Textarea rows={7} value={draft.system_prompt} onChange={(event) => onChange("system_prompt", event.target.value)} /></Field>
-        </CardBody>
-      </Card>
-      <Card>
-        <CardHeader><CardTitle>只读技能 allowlist</CardTitle><CardDescription>allowlist 是策略草稿；tools API 返回的 server_bound_scope 和只读能力仍是最终权威。</CardDescription></CardHeader>
-        <CardBody className="space-y-4">
-          <div className="grid gap-2 sm:grid-cols-3">{TOOL_NAMES.map((tool) => { const checked = draft.tool_allowlist.includes(tool); return <label key={tool} className="flex cursor-pointer items-center gap-2 rounded-xl border border-[var(--border)] p-3 text-sm"><input type="checkbox" checked={checked} onChange={(event) => onChange("tool_allowlist", event.target.checked ? [...draft.tool_allowlist, tool] : draft.tool_allowlist.filter((item) => item !== tool))} />{TOOL_LABELS[tool]}</label>; })}</div>
-          <Field label="网页域名白名单" hint="仅公开 GET 读取；不要填写 URL、路径、认证信息。空列表由服务端按策略处理。"><Textarea rows={4} value={draft.allow_domains.join("\n")} onChange={(event) => onChange("allow_domains", event.target.value.split("\n").map((item) => item.trim()).filter(Boolean))} placeholder="docs.example.com" /></Field>
-        </CardBody>
-      </Card>
+        <Card>
+          <CardHeader>
+            <SectionTitle icon={MessageCircle} title="聊天能不能开" description="聊天和全群旁听学习是两个独立开关；两个主动说话开关默认关闭。" />
+          </CardHeader>
+          <CardBody className="space-y-3">
+            <ToggleRow
+              label="启用群聊天应答"
+              hint="没有已声明支持技能的聊天模型时不能打开。@ 或回复才会必答。"
+              checked={draft.chat_enabled}
+              onChange={onRequestEnable}
+              ariaLabel="启用聊天"
+              extra={
+                !draft.chat_enabled && readiness.blockers.length > 0 ? (
+                  <p className="mt-2 rounded-lg border border-[var(--warning)]/30 bg-[var(--warning-soft)]/40 px-3 py-2 text-xs text-[var(--warning)]">
+                    {readiness.blockers[0]}
+                  </p>
+                ) : null
+              }
+            />
+            <ToggleRow
+              label="全群旁听学习"
+              hint="默认只听不插话。普通成员说的话不能覆盖管理员事实。"
+              checked={draft.learning_enabled}
+              onChange={(value) => onChange("learning_enabled", value)}
+              ariaLabel="启用普通群聊自动学习"
+            />
+          </CardBody>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>聊天模型</CardTitle>
+            <CardDescription>选中后会直接作为主模型端点；不需要再填端点表或任务分配。</CardDescription>
+          </CardHeader>
+          <CardBody className="space-y-3">
+            <Field label="聊天模型" hint={registryError ?? "必须已声明支持技能调用。"}>
+              <Select
+                aria-label="聊天模型"
+                value={draft.chat_model_ref}
+                onChange={(event) => onChange("chat_model_ref", event.target.value)}
+              >
+                <option value="">还没选</option>
+                {currentChatMissing && <option value={draft.chat_model_ref}>{draft.chat_model_ref} · 当前引用不可用</option>}
+                {enabledModels.map((model) => (
+                  <option key={model.ref} value={model.ref}>
+                    {modelLabel(model)}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+            {readiness.selectedModel && readiness.capability !== "declared" && (
+              <div className="rounded-xl border border-[var(--warning)]/30 bg-[var(--warning-soft)]/40 p-3 text-sm text-[var(--warning)]">
+                <p className="font-medium">
+                  {readiness.capability === "unsupported" ? "这个模型确定不能作为聊天模型" : "这个模型还没声明能调用技能"}
+                </p>
+                <p className="mt-1 text-xs leading-relaxed">
+                  请去 <GuardedLink className="underline" href="/llm">模型管理</GuardedLink> 打开「支持工具调用」声明，或换一个已声明的模型。
+                </p>
+              </div>
+            )}
+            {readiness.selectedModel && readiness.capability === "declared" && (
+              <p className="rounded-xl border border-[var(--success)]/20 bg-[var(--success-soft)]/40 p-3 text-xs text-[var(--success)]">
+                已声明支持技能。保存后服务端会自动建立聊天主端点。
+              </p>
+            )}
+          </CardBody>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>什么时候开口</CardTitle>
+            <CardDescription>默认只在被点名、被回复或连续追问时回答。</CardDescription>
+          </CardHeader>
+          <CardBody className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            <Field label="唤起方式">
+              <Select value={draft.trigger_mode} onChange={(event) => onChange("trigger_mode", event.target.value)}>
+                <option value="mention_or_reply">@ 我或回复我</option>
+                <option value="mention_only">只在 @ 我时回答</option>
+              </Select>
+            </Field>
+            <Field label="追问窗口（秒）" hint="服务端范围 30–3600">
+              <Input type="number" min={30} max={3600} value={draft.followup_window_sec} onChange={(event) => onChange("followup_window_sec", Number(event.target.value))} />
+            </Field>
+            <Field label="最多追问轮次" hint="服务端范围 1–20">
+              <Input type="number" min={1} max={20} value={draft.max_followup_turns} onChange={(event) => onChange("max_followup_turns", Number(event.target.value))} />
+            </Field>
+            <Field label="历史上下文条数" hint="服务端范围 1–200">
+              <Input type="number" min={1} max={200} value={draft.history_limit} onChange={(event) => onChange("history_limit", Number(event.target.value))} />
+            </Field>
+            <div className="sm:col-span-2 lg:col-span-4 grid gap-3 md:grid-cols-2">
+              <ToggleRow
+                label="有把握才插一句"
+                hint="硬门禁先于决策：两人互回、已有人回答、纯附和或拿不准时不插。"
+                checked={draft.proactive_interject_enabled}
+                onChange={(value) => onChange("proactive_interject_enabled", value)}
+                ariaLabel="有把握才插一句"
+              />
+              <ToggleRow
+                label="冷群找话题"
+                hint="独立开关，默认关闭。闲置后才随口一提，发送前会再次检查群内活动。"
+                checked={draft.proactive_cold_topic_enabled}
+                onChange={(value) => onChange("proactive_cold_topic_enabled", value)}
+                ariaLabel="冷群找话题"
+              />
+            </div>
+            <Field label="闲置多久才找话题（分钟）" hint="最少 180 分钟">
+              <Input type="number" min={180} max={1440} value={draft.cold_topic_idle_minutes} onChange={(event) => onChange("cold_topic_idle_minutes", Math.max(180, Number(event.target.value) || 180))} />
+            </Field>
+            <Field label="静默开始（小时）" hint="0–23 点">
+              <Input type="number" min={0} max={23} value={draft.cold_topic_quiet_start} onChange={(event) => onChange("cold_topic_quiet_start", Number(event.target.value))} />
+            </Field>
+            <Field label="静默结束（小时）" hint="相等表示不设静默">
+              <Input type="number" min={0} max={23} value={draft.cold_topic_quiet_end} onChange={(event) => onChange("cold_topic_quiet_end", Number(event.target.value))} />
+            </Field>
+          </CardBody>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <CardTitle>学习指定成员的语气</CardTitle>
+                <CardDescription>只从当前群近期发言人中选择，不发明全群成员列表。</CardDescription>
+              </div>
+              <Badge tone={mimicEnabled ? "success" : "default"}>{mimicEnabled ? "已开始学习" : "默认克制群友口吻"}</Badge>
+            </div>
+          </CardHeader>
+          <CardBody className="space-y-4">
+            <p className="text-sm leading-relaxed text-[var(--text-muted)]">
+              画像只影响说话方式，不覆盖安全、身份、权限和审核规则。群里不会说自己在模仿谁，也不会把画像正文发出去。
+            </p>
+            <Field label="学习谁" hint={recentSendersError ?? "只显示当前群保留期内已审核消息的去重发送者。"}>
+              <Select
+                aria-label="学习对象"
+                value={draft.mimic_target_user_id ? String(draft.mimic_target_user_id) : ""}
+                onChange={(event) => {
+                  const nextId = Number(event.target.value) || 0;
+                  const sender = recentSenders.find((item) => item.user_id === nextId);
+                  onChange("mimic_target_user_id", nextId);
+                  onChange("mimic_target_user_name", sender?.user_name ?? "");
+                  if (!nextId) {
+                    onChange("mimic_profile_text", "");
+                    onChange("mimic_sample_count", 0);
+                    onChange("mimic_distilled_at_count", 0);
+                  } else if (nextId !== draft.mimic_target_user_id) {
+                    onChange("mimic_profile_text", "");
+                    onChange("mimic_sample_count", 0);
+                    onChange("mimic_distilled_at_count", 0);
+                  }
+                }}
+              >
+                <option value="">不学习，保持默认口吻</option>
+                {draft.mimic_target_user_id > 0 && !selectedSender && (
+                  <option value={String(draft.mimic_target_user_id)}>{draft.mimic_target_user_name || "当前学习对象"}</option>
+                )}
+                {recentSenders.map((sender) => (
+                  <option key={sender.user_id} value={String(sender.user_id)}>
+                    {sender.user_name} · 近期 {sender.message_count ?? 0} 条
+                  </option>
+                ))}
+              </Select>
+            </Field>
+            {mimicEnabled ? (
+              <div className="space-y-3 rounded-xl border border-[var(--border)] bg-[var(--surface-2)] p-4">
+                <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-[var(--text-muted)]">
+                  <span>当前对象：{draft.mimic_target_user_name || selectedSender?.user_name || "未知"}</span>
+                  <span>已采集 {collected} 条 · 已蒸馏 {distilled} 条</span>
+                </div>
+                <div className="h-2 overflow-hidden rounded-full bg-[var(--border)]">
+                  <div className="h-full rounded-full bg-[var(--accent)] transition-all" style={{ width: `${progress}%` }} />
+                </div>
+                <div className="rounded-lg border border-[var(--border)] bg-[var(--surface)] p-3 text-sm leading-relaxed">
+                  {draft.mimic_profile_text || "还在收集样本；达到一批审核通过的消息后会生成中文画像。"}
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => setProfilePreviewOpen(true)}
+                  >
+                    查看画像预览
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="danger"
+                    size="sm"
+                    onClick={() => {
+                      onChange("mimic_target_user_id", 0);
+                      onChange("mimic_target_user_name", "");
+                      onChange("mimic_profile_text", "");
+                      onChange("mimic_sample_count", 0);
+                      onChange("mimic_distilled_at_count", 0);
+                    }}
+                  >
+                    停止学习
+                  </Button>
+                </div>
+                {profilePreviewOpen && (
+                  <div className="rounded-xl border border-[var(--accent)]/20 bg-[var(--accent-soft)]/30 p-3 text-sm" role="region" aria-label="当前画像预览">
+                    <div className="flex items-center justify-between gap-2"><p className="font-medium">当前画像预览</p><Button type="button" variant="ghost" size="sm" onClick={() => setProfilePreviewOpen(false)}>收起</Button></div>
+                    <p className="mt-2 whitespace-pre-wrap leading-relaxed">{draft.mimic_profile_text || "还没有画像，继续收集审核通过的消息即可。"}</p>
+                    <p className="mt-2 text-xs text-[var(--text-muted)]">这段内容只在后台展示，群里发言不会念出画像。</p>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <p className="rounded-xl border border-dashed border-[var(--border-strong)] p-4 text-xs leading-relaxed text-[var(--text-muted)]">
+                未指定学习对象。默认使用克制、短句、像普通群友的口吻。
+              </p>
+            )}
+          </CardBody>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>学习模型</CardTitle>
+            <CardDescription>学习模型可以是纯文本模型，不参与聊天技能门禁。</CardDescription>
+          </CardHeader>
+          <CardBody className="grid gap-4 md:grid-cols-2">
+            <Field label="学习模型">
+              <Select
+                aria-label="学习模型"
+                value={draft.learning_model_ref}
+                onChange={(event) => onChange("learning_model_ref", event.target.value)}
+              >
+                <option value="">不指定</option>
+                {currentLearningMissing && <option value={draft.learning_model_ref}>{draft.learning_model_ref} · 当前引用不可用</option>}
+                {enabledModels.map((model) => (
+                  <option key={model.ref} value={model.ref}>
+                    {model.label || model.ref}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+            <p className="self-end text-xs leading-relaxed text-[var(--text-muted)]">{registryError ?? "保存时服务端会再次检查模型是否可用。"}</p>
+          </CardBody>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>只读技能选择</CardTitle>
+            <CardDescription>聊天模型必须能调用已选技能；服务端范围和最终权限仍以实际接口为准。</CardDescription>
+          </CardHeader>
+          <CardBody className="space-y-4">
+            <div className="grid gap-2 sm:grid-cols-3">
+              {TOOL_NAMES.map((tool) => {
+                const checked = draft.tool_allowlist.includes(tool);
+                return (
+                  <label key={tool} className="flex cursor-pointer items-center gap-2 rounded-xl border border-[var(--border)] p-3 text-sm">
+                    <input type="checkbox" checked={checked} onChange={(event) => onChange("tool_allowlist", event.target.checked ? [...draft.tool_allowlist, tool] : draft.tool_allowlist.filter((item) => item !== tool))} />
+                    {TOOL_LABELS[tool]}
+                  </label>
+                );
+              })}
+            </div>
+            <Field label="网页域名白名单" hint="只填域名，每行一个；不要填网址、路径或认证信息。">
+              <Textarea rows={3} value={draft.allow_domains.join("\n")} onChange={(event) => onChange("allow_domains", event.target.value.split("\n").map((item) => item.trim()).filter(Boolean))} placeholder="docs.example.com" />
+            </Field>
+          </CardBody>
+        </Card>
       </fieldset>
-      <SaveBar dirty={dirty} saving={saving} onSave={onSave} onCancel={onCancel} scope="聊天与学习配置" />
+      <SaveBar dirty={dirty} saving={saving} onSave={onSave} onCancel={onCancel} scope="群助手设置" />
     </div>
   );
 }
 
-function SaveBar({ dirty, saving, onSave, onCancel, scope }: { dirty: boolean; saving: boolean; onSave: () => void; onCancel: () => void; scope: string }) {
-  return <div className="miniapp-savebar sticky bottom-3 z-10 flex flex-col gap-3 rounded-2xl border border-[var(--border)] bg-[var(--savebar-bg)] p-3 shadow-xl backdrop-blur-xl sm:flex-row sm:items-center sm:justify-between"><div className="flex items-center gap-2 text-xs text-[var(--text-muted)]"><Save className="h-4 w-4" />{dirty ? `${scope}有未保存修改` : `${scope}与服务端一致`}</div><div className="flex gap-2"><Button type="button" variant="secondary" size="sm" disabled={!dirty || saving} onClick={onCancel}><RotateCcw className="h-3.5 w-3.5" />取消草稿</Button><Button type="button" size="sm" disabled={!dirty || saving} onClick={onSave}>{saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}{saving ? "保存中…" : "按版本保存"}</Button></div></div>;
+function ModelsPanel({
+  draft,
+  pool,
+  status,
+  statusError,
+  dispatches,
+  dispatchError,
+  modelByRef,
+  readiness,
+  onChange,
+  saving,
+  dirty,
+  onSave,
+  onCancel,
+  onRefreshStatus,
+}: {
+  draft: PolicyDraft;
+  pool: AssistantPool | null;
+  status: AssistantStatus | null;
+  statusError: string | null;
+  dispatches: AssistantDispatch[];
+  dispatchError: string | null;
+  modelByRef: Map<string, RegistryModel>;
+  readiness: ReadinessView;
+  onChange: <K extends keyof PolicyDraft>(key: K, value: PolicyDraft[K]) => void;
+  saving: boolean;
+  dirty: boolean;
+  onSave: () => void;
+  onCancel: () => void;
+  onRefreshStatus: () => void;
+}) {
+  const endpoints = pool?.config.endpoints ?? [];
+  const backupEndpoints = endpoints.filter((endpoint) => endpoint.role === "backup");
+  return (
+    <div className="space-y-4">
+      <Card>
+        <CardHeader>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <CardTitle>模型与负载</CardTitle>
+              <CardDescription>高级设置。日常只需要在「怎么说话」中选择聊天模型。</CardDescription>
+            </div>
+            <Badge tone="info">主模型优先，忙时自动用备用</Badge>
+          </div>
+        </CardHeader>
+        <CardBody className="space-y-4">
+          <fieldset disabled={saving} aria-busy={saving} className={cn("space-y-4 border-0 p-0", saving && "opacity-70")}>
+          <div className="rounded-xl border border-[var(--accent)]/20 bg-[var(--accent-soft)]/40 p-4">
+            <p className="text-sm font-medium">当前主模型</p>
+            <p className="mt-1 text-sm text-[var(--text-muted)]">{readiness.selectedModel?.label || draft.chat_model_ref || "尚未选择"}</p>
+            <p className="mt-2 text-xs leading-relaxed text-[var(--text-muted)]">
+              {readiness.capability === "declared"
+                ? "已具备技能调用声明。保存聊天设置时，服务端会自动建立主模型端点。"
+                : readiness.blockers[0] ?? "选择聊天模型后会自动建立主模型端点。"}
+            </p>
+          </div>
+          <details className="rounded-xl border border-[var(--border)] p-4">
+            <summary className="cursor-pointer text-sm font-medium">备用模型、排队与回答随机程度</summary>
+            <div className="mt-4 space-y-4">
+              <div>
+                <p className="text-xs font-medium text-[var(--text-muted)]">备用模型（可选）</p>
+                {backupEndpoints.length > 0 ? (
+                  <div className="mt-2 space-y-2">
+                    {backupEndpoints.map((endpoint) => (
+                      <div key={endpoint.id} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-[var(--border)] bg-[var(--surface-2)] px-3 py-2 text-sm">
+                        <span>{modelByRef.get(endpoint.model_ref)?.label || endpoint.model_ref}</span>
+                        <span className="text-xs text-[var(--text-muted)]">故障、忙碌或限流时使用</span>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="mt-2 rounded-lg border border-dashed border-[var(--border-strong)] p-3 text-xs text-[var(--text-muted)]">
+                    当前没有备用模型；不影响保存聊天模型。备用端点由服务端模型池管理。
+                  </p>
+                )}
+              </div>
+              <div className="grid gap-4 md:grid-cols-3">
+                <Field label="回答随机程度" hint="范围 0–2">
+                  <Input type="number" min={0} max={2} step={0.1} value={draft.temperature} onChange={(event) => onChange("temperature", Number(event.target.value))} />
+                </Field>
+                <Field label="原文保留天数" hint="范围 1–30 天">
+                  <Input type="number" min={1} max={30} value={draft.retention_days} onChange={(event) => onChange("retention_days", Number(event.target.value))} />
+                </Field>
+                <Field label="最大本地队列深度">
+                  <Input type="number" min={0} max={100} value={draft.max_queue_depth} onChange={(event) => onChange("max_queue_depth", Number(event.target.value))} />
+                </Field>
+                <Field label="最大排队等待（秒）">
+                  <Input type="number" min={1} max={60} value={draft.max_queue_wait_sec} onChange={(event) => onChange("max_queue_wait_sec", Number(event.target.value))} />
+                </Field>
+                <Field label="默认系统指令" hint="可选；仅用于回答风格，不写入管理员身份或来源。" className="md:col-span-3">
+                  <Textarea aria-label="默认系统指令" rows={4} value={draft.system_prompt} onChange={(event) => onChange("system_prompt", event.target.value)} />
+                </Field>
+              </div>
+            </div>
+          </details>
+          </fieldset>
+        </CardBody>
+      </Card>
+
+      <Card>
+        <CardHeader className="flex-row items-center justify-between">
+          <div>
+            <CardTitle>当前负载</CardTitle>
+            <CardDescription>远程配额不伪造，统一显示为未知。</CardDescription>
+          </div>
+          <Button type="button" variant="ghost" size="sm" onClick={onRefreshStatus}>
+            <RefreshCw className="h-3.5 w-3.5" />刷新
+          </Button>
+        </CardHeader>
+        <CardBody>
+          {status ? (
+            <div className="space-y-3">
+              <div className="grid gap-3 sm:grid-cols-3">
+                <StatusTile label="本地队列" value={String(status.queue_depth)} detail="等待中的本地任务" />
+                <StatusTile label="远程配额" value="未知" detail="不伪造供应商限额" />
+                <StatusTile label="端点数量" value={String(status.endpoints_status.length)} detail="来自当前状态接口" />
+              </div>
+              {status.endpoints_status.length > 0 && <EndpointStatusTable endpoints={status.endpoints_status} />}
+            </div>
+          ) : (
+            <ApiState label="负载状态暂时没有数据" error={statusError} onRetry={onRefreshStatus} />
+          )}
+        </CardBody>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>最近调度</CardTitle>
+          <CardDescription>仅展示服务端已返回的记录。</CardDescription>
+        </CardHeader>
+        <CardBody>
+          {dispatchError ? <ApiState label="调度记录暂时没有数据" error={dispatchError} onRetry={onRefreshStatus} /> : dispatches.length === 0 ? <EmptyState title="还没有调度记录" detail="服务端没有返回最近任务。" /> : <DispatchTable dispatches={dispatches} />}
+        </CardBody>
+      </Card>
+      <SaveBar dirty={dirty} saving={saving} onSave={onSave} onCancel={onCancel} scope="群助手设置" />
+    </div>
+  );
 }
 
-function MemoryPanel({ chatId, onToast }: { chatId: number; onToast: (message: string, tone?: "success" | "error") => void }) {
+function EndpointStatusTable({ endpoints }: { endpoints: AssistantStatus["endpoints_status"] }) {
+  return (
+    <div className="overflow-x-auto rounded-xl border border-[var(--border)]">
+      <table className="w-full min-w-[660px] text-left text-xs">
+        <thead className="bg-[var(--table-th-bg)] text-[var(--text-muted)]">
+          <tr><th className="px-3 py-3 font-medium">模型</th><th className="px-3 py-3 font-medium">状态</th><th className="px-3 py-3 font-medium">并发</th><th className="px-3 py-3 font-medium">本地限制</th><th className="px-3 py-3 font-medium">远程配额</th></tr>
+        </thead>
+        <tbody>
+          {endpoints.map((endpoint) => (
+            <tr key={endpoint.id} className="border-t border-[var(--border)] align-top">
+              <td className="px-3 py-3"><p className="font-medium">{endpoint.model_label || endpoint.model_ref || "未知"}</p><p className="mt-1 text-[var(--text-subtle)]">{endpoint.role === "backup" ? "备用" : "主模型"}</p></td>
+              <td className="px-3 py-3"><Badge tone={endpoint.status === "healthy" ? "success" : endpoint.status === "unhealthy" ? "danger" : "warning"}>{statusLabel(endpoint.status)}</Badge></td>
+              <td className="px-3 py-3">{endpoint.current_active} / {endpoint.max_concurrency}</td>
+              <td className="px-3 py-3 text-[var(--text-muted)]">{localLimitLabel(endpoint.local_limit_label)}</td>
+              <td className="px-3 py-3 text-[var(--text-muted)]">未知</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function DispatchTable({ dispatches }: { dispatches: AssistantDispatch[] }) {
+  return (
+    <div className="overflow-x-auto rounded-xl border border-[var(--border)]">
+      <table className="w-full min-w-[720px] text-left text-xs">
+        <thead className="bg-[var(--table-th-bg)] text-[var(--text-muted)]"><tr><th className="px-3 py-3 font-medium">时间</th><th className="px-3 py-3 font-medium">任务与模型</th><th className="px-3 py-3 font-medium">原因</th><th className="px-3 py-3 font-medium">结果</th><th className="px-3 py-3 font-medium">耗时</th></tr></thead>
+        <tbody>
+          {dispatches.map((dispatch) => (
+            <tr key={dispatch.id} className="border-t border-[var(--border)] align-top">
+              <td className="whitespace-nowrap px-3 py-3 text-[var(--text-muted)]">{formatDate(dispatch.created_at)}</td>
+              <td className="px-3 py-3"><p>{taskLabel(dispatch.task_type)}</p><p className="mt-1 text-[var(--text-muted)]">{dispatch.model_ref || "未知模型"}</p></td>
+              <td className="max-w-[280px] px-3 py-3 text-[var(--text-muted)]">{displayServerText(dispatch.reason || "未知")}</td>
+              <td className="px-3 py-3"><Badge tone={dispatch.status === "ok" || dispatch.status === "success" ? "success" : dispatch.status === "failed" ? "danger" : "default"}>{statusLabel(dispatch.status)}</Badge></td>
+              <td className="px-3 py-3">{dispatch.latency_ms == null ? "未知" : `${dispatch.latency_ms} 毫秒`}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function SkillsPanel({
+  tools,
+  error,
+  policy,
+  onRetry,
+  onOpenSettings,
+}: {
+  tools: AssistantToolsResponse | null;
+  error: string | null;
+  policy: PolicyDraft;
+  onRetry: () => void;
+  onOpenSettings: () => void;
+}) {
+  return (
+    <div className="grid gap-4 lg:grid-cols-[minmax(0,1.3fr)_minmax(280px,0.7fr)]">
+      <Card>
+        <CardHeader>
+          <SectionTitle icon={Wrench} title="能查什么" description="三个只读技能，范围由服务端绑定。" />
+        </CardHeader>
+        <CardBody>
+          {tools ? (
+            <div className="space-y-3">
+              {TOOL_NAMES.map((tool) => {
+                const actual = tools.tools.find((item) => item.name === tool);
+                return (
+                  <div key={tool} className="rounded-xl border border-[var(--border)] p-4">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex items-center gap-2"><span className="font-medium">{TOOL_LABELS[tool]}</span><Badge tone={actual?.enabled ? "success" : "default"}>{actual?.enabled ? "已启用" : "未启用"}</Badge></div>
+                      <Badge tone={actual?.read_only === false ? "danger" : "success"}>{actual?.read_only === false ? "异常：可写" : "只读"}</Badge>
+                    </div>
+                    <p className="mt-2 text-xs leading-relaxed text-[var(--text-muted)]">{TOOL_DESCRIPTIONS[tool]}</p>
+                    {tool === "webfetch_readonly" && <p className="mt-2 text-xs text-[var(--text-subtle)]">只允许服务端约束的公开网页读取；失败、超时或截断会明确返回失败。</p>}
+                  </div>
+                );
+              })}
+              <div className="rounded-xl border border-[var(--border)] bg-[var(--surface-2)] p-3 text-xs text-[var(--text-muted)]">可写技能：无。当前群范围：{tools.server_bound_scope ? "已绑定" : "未知"}。</div>
+            </div>
+          ) : (
+            <ApiState label="技能状态暂时没有数据" error={error} onRetry={onRetry} />
+          )}
+        </CardBody>
+      </Card>
+      <Card>
+        <CardHeader>
+          <CardTitle>当前启用的查询能力</CardTitle>
+          <CardDescription>这里显示策略选择，不代表越过服务端权限。</CardDescription>
+        </CardHeader>
+        <CardBody className="space-y-3">
+          {TOOL_NAMES.map((tool) => (
+            <div key={tool} className="flex items-center justify-between gap-3 text-sm">
+              <span>{TOOL_LABELS[tool]}</span>
+              <Badge tone={policy.tool_allowlist.includes(tool) ? "success" : "default"}>{policy.tool_allowlist.includes(tool) ? "已选择" : "未选择"}</Badge>
+            </div>
+          ))}
+          <div className="border-t border-[var(--border)] pt-3 text-xs text-[var(--text-muted)]"><p>网页域名白名单</p><p className="mt-1 break-words">{policy.allow_domains.length ? policy.allow_domains.join("、") : "未设置"}</p></div>
+          <Button type="button" variant="secondary" size="sm" onClick={onOpenSettings}>去怎么说话设置</Button>
+        </CardBody>
+      </Card>
+    </div>
+  );
+}
+
+type MemoryPanelProps = { chatId: number; onToast: (message: string, tone?: "success" | "error") => void };
+
+function MemoryPanel({ chatId, onToast }: MemoryPanelProps) {
   const [memories, setMemories] = useState<AssistantMemory[]>([]);
   const [conflicts, setConflicts] = useState<AssistantConflict[]>([]);
   const [memoryFilter, setMemoryFilter] = useState<MemoryFilter>("active");
@@ -980,8 +1866,8 @@ function MemoryPanel({ chatId, onToast }: { chatId: number; onToast: (message: s
       setConflictError(null);
     } catch (error) {
       if (!isCurrent() || controller.signal.aborted || isAbortError(error)) return;
-      setMemoryError(errorText(error, "记忆列表加载失败"));
-      if (error instanceof ApiError && error.status === 403) setConflictError("当前管理员没有冲突查看能力");
+      setMemoryError(errorText(error, "记忆列表加载失败。"));
+      if (error instanceof ApiError && error.status === 403) setConflictError("当前管理员没有查看待处理冲突的权限。 ");
     } finally {
       if (isCurrent()) {
         setLoading(false);
@@ -1004,10 +1890,10 @@ function MemoryPanel({ chatId, onToast }: { chatId: number; onToast: (message: s
       if (!isCurrent()) return;
       setHistory(result.history ?? []);
       setHistoryRetention(result.retention_days);
-      setHistoryNotice(result.expired_auto_removed ? "服务端已自动排除超过保留期的原文。" : "服务端未返回过期清理说明。");
+      setHistoryNotice(result.expired_auto_removed ? "服务端已自动排除超过保留期的原文。" : "服务端没有返回过期清理说明。 ");
     } catch (error) {
       if (!isCurrent() || controller.signal.aborted || isAbortError(error)) return;
-      setHistoryError(errorText(error, "历史检索失败"));
+      setHistoryError(errorText(error, "历史检索失败。"));
     } finally {
       if (isCurrent()) {
         setLoadingHistory(false);
@@ -1024,7 +1910,8 @@ function MemoryPanel({ chatId, onToast }: { chatId: number; onToast: (message: s
   const visibleMemories = useMemo(() => {
     const now = Date.now();
     return memories.filter((memory) => {
-      const expired = Boolean(memory.expires_at && !Number.isNaN(new Date(memory.expires_at).getTime()) && new Date(memory.expires_at).getTime() <= now);
+      const expiresAt = memory.expires_at ? new Date(memory.expires_at).getTime() : Number.NaN;
+      const expired = Number.isFinite(expiresAt) && expiresAt <= now;
       if (memoryFilter === "base") return memory.memory_type === "base";
       if (memoryFilter === "learned") return memory.memory_type === "learned";
       if (memoryFilter === "pending") return memory.memory_type === "pending";
@@ -1053,7 +1940,7 @@ function MemoryPanel({ chatId, onToast }: { chatId: number; onToast: (message: s
     if (restoreTrigger) restoreFocus(trigger);
   };
 
-  const openMemoryDetail = async (memory: AssistantMemory, trigger?: HTMLElement) => {
+  const openMemoryDetail = async (memory: AssistantMemory, trigger?: HTMLElement | null) => {
     selectedTriggerRef.current = trigger ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null);
     detailAbortRef.current?.abort();
     const controller = new AbortController();
@@ -1074,7 +1961,7 @@ function MemoryPanel({ chatId, onToast }: { chatId: number; onToast: (message: s
       setSelectedVersions(versions.versions ?? []);
     } catch (error) {
       if (!isCurrent() || controller.signal.aborted || isAbortError(error)) return;
-      onToast(errorText(error, "来源详情加载失败"), "error");
+      onToast(displayServerText(errorText(error, "来源详情加载失败。")), "error");
     } finally {
       if (isCurrent()) {
         setDetailLoading(false);
@@ -1115,7 +2002,7 @@ function MemoryPanel({ chatId, onToast }: { chatId: number; onToast: (message: s
       if (isCurrent()) setEditorVersions(versions.versions ?? []);
     } catch (error) {
       if (!isCurrent() || controller.signal.aborted || isAbortError(error)) return;
-      onToast(errorText(error, "版本链加载失败"), "error");
+      onToast(displayServerText(errorText(error, "版本链加载失败。")), "error");
     } finally {
       if (isCurrent()) editorVersionsAbortRef.current = null;
     }
@@ -1127,38 +2014,32 @@ function MemoryPanel({ chatId, onToast }: { chatId: number; onToast: (message: s
   };
 
   const forgetMemory = async (memory: AssistantMemory) => {
-    if (!window.confirm(`确定忘记“${memory.subject}”吗？这只会移出群助手本地召回/检索范围，不会删除 Telegram 远端原消息。`)) return;
+    if (!window.confirm(`确定忘记“${memory.subject}”吗？这只会移出本地召回/检索范围，不会删除 Telegram 远端原消息。`)) return;
     try {
       const result = await forgetAssistantMemory(chatId, memory.id);
       onToast(result.remote_telegram_deleted ? "记忆已忘记" : "已移出本地召回范围；Telegram 原文未删除", "success");
       await loadMemories();
     } catch (error) {
-      onToast(errorText(error, "忘记记忆失败"), "error");
+      onToast(displayServerText(errorText(error, "忘记记忆失败。")), "error");
     }
   };
 
   const resolveConflict = async (conflict: AssistantConflict, accept: boolean) => {
-    const action = accept
-      ? `接受候选事实，并以当前管理员明确纠正“${conflict.subject}”`
-      : `拒绝候选事实“${conflict.subject}”`;
+    const action = accept ? `接受候选事实，并以当前管理员明确更正“${conflict.subject}”` : `拒绝候选事实“${conflict.subject}”`;
     if (!window.confirm(`确定${action}吗？`)) return;
     try {
       if (accept) {
         if (conflict.memory_id == null) {
-          onToast(`冲突“${conflict.subject}”没有目标记忆，无法以当前管理员明确纠正。`, "error");
+          onToast(`冲突“${conflict.subject}”没有目标记忆，无法更正。`, "error");
           return;
         }
         const current = await fetchAssistantMemory(chatId, conflict.memory_id);
         const expectedVersion = current.memory.version;
         if (!Number.isInteger(expectedVersion) || expectedVersion <= 0) {
-          onToast(`冲突“${conflict.subject}”的目标记忆版本未知，未猜测版本号，请刷新后重试。`, "error");
+          onToast(`冲突“${conflict.subject}”的目标记忆版本未知，请刷新后重试。`, "error");
           return;
         }
-        await resolveAssistantConflict(chatId, conflict.id, {
-          accept: true,
-          expected_memory_version: expectedVersion,
-          resolution_mode: "admin_explicit_correction",
-        });
+        await resolveAssistantConflict(chatId, conflict.id, { accept: true, expected_memory_version: expectedVersion, resolution_mode: "admin_explicit_correction" });
       } else {
         await resolveAssistantConflict(chatId, conflict.id, { accept: false });
       }
@@ -1166,36 +2047,54 @@ function MemoryPanel({ chatId, onToast }: { chatId: number; onToast: (message: s
       await loadMemories();
     } catch (error) {
       if (error instanceof ApiError && error.status === 409) {
-        onToast(`冲突“${conflict.subject}”版本已变化，请刷新记忆列表后重新处理；本次未成功接受。`, "error");
+        onToast(`冲突“${conflict.subject}”版本已变化，请刷新记忆列表后重新处理。`, "error");
         await loadMemories();
         return;
       }
-      onToast(errorText(error, "处理冲突失败"), "error");
+      onToast(displayServerText(errorText(error, "处理冲突失败。")), "error");
     }
   };
 
   return (
     <div className="space-y-4">
       <Card>
-        <CardHeader className="flex-row flex-wrap items-start justify-between gap-3"><div><SectionTitle icon={Database} title="记忆中心" description="列表、来源、版本与冲突均来自当前群 API；普通成员字段只读展示。" /></div><Button type="button" size="sm" onClick={(event) => { void openEditor(null, event.currentTarget); }}><Plus className="h-3.5 w-3.5" />新增基础事实</Button></CardHeader>
+        <CardHeader className="flex-row flex-wrap items-start justify-between gap-3">
+          <div><SectionTitle icon={Database} title="群记忆" description="基础事实、学习沉淀、待处理冲突和历史检索均来自当前群接口。" /></div>
+          <Button type="button" size="sm" onClick={(event) => { void openEditor(null, event.currentTarget); }}><Plus className="h-3.5 w-3.5" />新增基础事实</Button>
+        </CardHeader>
         <CardBody className="space-y-4">
-          <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_180px_auto]"><Field label="搜索 subject / content"><div className="flex gap-2"><Input value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void loadMemories(); }} placeholder="搜索当前群记忆" /><Button type="button" variant="secondary" size="sm" onClick={() => { void loadMemories(); }}><Search className="h-3.5 w-3.5" />检索</Button></div></Field><Field label="列表筛选"><select className="h-10 w-full rounded-xl border border-[var(--input-border)] bg-[var(--input-bg)] px-3 text-sm text-[var(--input-color)]" value={memoryFilter} onChange={(event) => setMemoryFilter(event.target.value as MemoryFilter)}><option value="active">当前有效</option><option value="base">base 基础</option><option value="learned">learned 学习</option><option value="pending">pending 待处理</option><option value="expired">已过期</option><option value="inactive">inactive 已忘记</option></select></Field><div className="flex items-end"><Button type="button" variant="ghost" size="sm" onClick={() => { void loadMemories(); }}><RefreshCw className="h-3.5 w-3.5" />刷新</Button></div></div>
-          <div className="flex flex-wrap gap-2 text-xs text-[var(--text-muted)]"><span className="rounded-lg border border-[var(--border)] px-2 py-1">API 返回 {memories.length} 条</span><span className="rounded-lg border border-[var(--border)] px-2 py-1">当前视图 {visibleMemories.length} 条</span>{memoryNotice && <span className="rounded-lg border border-[var(--border)] px-2 py-1">{memoryNotice}</span>}</div>
-          {memoryError ? <ApiState label="记忆列表无数据" error={memoryError} onRetry={() => { void loadMemories(); }} /> : loading ? <div className="py-8 text-center text-sm text-[var(--text-muted)]"><Loader2 className="mx-auto mb-2 h-4 w-4 animate-spin" />正在加载记忆…</div> : visibleMemories.length === 0 ? <EmptyState title="当前筛选没有 API 返回的记忆" detail="不会用原型中的示例事实填充此列表。" /> : <MemoryTable memories={visibleMemories} onDetail={openMemoryDetail} onEdit={openEditor} onForget={forgetMemory} />}
+          <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_180px_auto]">
+            <Field label="搜索当前群记忆">
+              <div className="flex gap-2"><Input value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void loadMemories(); }} placeholder="搜索主题或内容" /><Button type="button" variant="secondary" size="sm" onClick={() => { void loadMemories(); }}><Search className="h-3.5 w-3.5" />检索</Button></div>
+            </Field>
+            <Field label="列表筛选">
+              <Select aria-label="列表筛选" value={memoryFilter} onChange={(event) => setMemoryFilter(event.target.value as MemoryFilter)}>
+                <option value="active">当前有效</option><option value="base">基础</option><option value="learned">学到的</option><option value="pending">待处理</option><option value="expired">已过期</option><option value="inactive">已忘记</option>
+              </Select>
+            </Field>
+            <div className="flex items-end"><Button type="button" variant="ghost" size="sm" onClick={() => { void loadMemories(); }}><RefreshCw className="h-3.5 w-3.5" />刷新</Button></div>
+          </div>
+          <div className="flex flex-wrap gap-2 text-xs text-[var(--text-muted)]"><span className="rounded-lg border border-[var(--border)] px-2 py-1">接口返回 {memories.length} 条</span><span className="rounded-lg border border-[var(--border)] px-2 py-1">当前视图 {visibleMemories.length} 条</span>{memoryNotice && <span className="rounded-lg border border-[var(--border)] px-2 py-1">{displayServerText(memoryNotice)}</span>}</div>
+          {memoryError ? <ApiState label="记忆列表没有数据" error={memoryError} onRetry={() => { void loadMemories(); }} /> : loading ? <div className="py-8 text-center text-sm text-[var(--text-muted)]"><Loader2 className="mx-auto mb-2 h-4 w-4 animate-spin" />正在加载记忆…</div> : visibleMemories.length === 0 ? <EmptyState title="当前筛选没有记忆" detail="不会用原型示例填充服务端列表。" /> : <MemoryTable memories={visibleMemories} onDetail={openMemoryDetail} onEdit={openEditor} onForget={forgetMemory} />}
         </CardBody>
       </Card>
 
       <Card>
-        <CardHeader><SectionTitle icon={AlertTriangle} title="待处理冲突" description="仅显示服务端标记为 pending 的候选事实；接受/拒绝由服务端按事务处理。" /></CardHeader>
-        <CardBody>{conflictError ? <ApiState label="冲突列表无数据" error={conflictError} onRetry={() => { void loadMemories(); }} /> : conflicts.length === 0 ? <EmptyState title="没有待处理冲突" detail="未从 conflicts API 返回 pending 记录。" /> : <div className="space-y-3">{conflicts.map((conflict) => <ConflictRow key={conflict.id} conflict={conflict} onResolve={resolveConflict} />)}</div>}</CardBody>
+        <CardHeader><SectionTitle icon={AlertTriangle} title="待处理冲突" description="只显示服务端标记为待处理的候选事实。" /></CardHeader>
+        <CardBody>{conflictError ? <ApiState label="冲突列表没有数据" error={conflictError} onRetry={() => { void loadMemories(); }} /> : conflicts.length === 0 ? <EmptyState title="没有待处理冲突" detail="服务端没有返回待处理记录。" /> : <div className="space-y-3">{conflicts.map((conflict) => <ConflictRow key={conflict.id} conflict={conflict} onResolve={resolveConflict} />)}</div>}</CardBody>
       </Card>
 
       <Card>
-        <CardHeader><SectionTitle icon={History} title="历史检索" description="仅检索当前群、仍在真实保留期内且已审核送达的原文。" /></CardHeader>
+        <CardHeader><SectionTitle icon={History} title="历史检索" description="只检索当前群、仍在真实保留期内且已审核送达的原文。" /></CardHeader>
         <CardBody className="space-y-4">
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4"><Field label="关键词"><Input value={historyQuery} onChange={(event) => setHistoryQuery(event.target.value)} /></Field><Field label="thread_id"><Input inputMode="numeric" value={historyThread} onChange={(event) => setHistoryThread(event.target.value)} placeholder="可选" /></Field><Field label="sender_id"><Input inputMode="numeric" value={historySender} onChange={(event) => setHistorySender(event.target.value)} placeholder="可选" /></Field><div className="flex items-end"><Button type="button" onClick={() => { void loadHistory(); }} disabled={loadingHistory}><Search className="h-3.5 w-3.5" />{loadingHistory ? "检索中…" : "检索历史"}</Button></div></div>
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <Field label="关键词"><Input aria-label="关键词" value={historyQuery} onChange={(event) => setHistoryQuery(event.target.value)} /></Field>
+            <Field label="话题编号"><Input aria-label="话题编号" inputMode="numeric" value={historyThread} onChange={(event) => setHistoryThread(event.target.value)} placeholder="可选" /></Field>
+            <Field label="成员编号"><Input aria-label="成员编号" inputMode="numeric" value={historySender} onChange={(event) => setHistorySender(event.target.value)} placeholder="可选" /></Field>
+            <div className="flex items-end"><Button type="button" onClick={() => { void loadHistory(); }} disabled={loadingHistory}><Search className="h-3.5 w-3.5" />{loadingHistory ? "检索中…" : "检索历史"}</Button></div>
+          </div>
           {historyNotice && <p className="text-xs text-[var(--text-muted)]">{historyNotice} 保留天数：{historyRetention ?? "未知"}</p>}
-          {historyError ? <ApiState label="历史无数据" error={historyError} onRetry={() => { void loadHistory(); }} /> : history.length === 0 ? <EmptyState title="没有 API 返回的历史消息" detail="过期原文不会在后台伪造展示。" /> : <HistoryTable history={history} />}
+          {historyError ? <ApiState label="历史没有数据" error={historyError} onRetry={() => { void loadHistory(); }} /> : history.length === 0 ? <EmptyState title="没有历史消息" detail="过期原文不会在后台伪造展示。" /> : <HistoryTable history={history} />}
         </CardBody>
       </Card>
 
@@ -1205,42 +2104,133 @@ function MemoryPanel({ chatId, onToast }: { chatId: number; onToast: (message: s
   );
 }
 
-function sourceType(source: { source_type?: string; type?: string }) {
-  return source.source_type || source.type || "未知";
+function MemoryTable({
+  memories,
+  onDetail,
+  onEdit,
+  onForget,
+}: {
+  memories: AssistantMemory[];
+  onDetail: (memory: AssistantMemory, trigger: HTMLElement) => void;
+  onEdit: (memory: AssistantMemory | null, trigger: HTMLElement) => void;
+  onForget: (memory: AssistantMemory) => void;
+}) {
+  return (
+    <div className="overflow-x-auto rounded-xl border border-[var(--border)]">
+      <table className="w-full min-w-[880px] text-left text-xs">
+        <thead className="bg-[var(--table-th-bg)] text-[var(--text-muted)]"><tr><th className="px-3 py-3 font-medium">事实</th><th className="px-3 py-3 font-medium">类型 / 权威</th><th className="px-3 py-3 font-medium">有效范围</th><th className="px-3 py-3 font-medium">来源</th><th className="px-3 py-3 font-medium">有效期</th><th className="px-3 py-3 font-medium">操作</th></tr></thead>
+        <tbody>
+          {memories.map((memory) => {
+            const expiresAt = memory.expires_at ? new Date(memory.expires_at).getTime() : Number.NaN;
+            const expired = Number.isFinite(expiresAt) && expiresAt <= Date.now();
+            return (
+              <tr key={memory.id} className="border-t border-[var(--border)] align-top hover:bg-[var(--table-hover)]">
+                <td className="max-w-[280px] px-3 py-3"><p className="font-medium">{memory.subject}</p><p className="mt-1 line-clamp-3 text-[var(--text-muted)]">{memory.content}</p><p className="mt-1 text-[var(--text-subtle)]">第 {memory.version} 版 · {memory.active ? "当前有效" : "已忘记"}</p></td>
+                <td className="px-3 py-3"><Badge>{memoryTypeLabel(memory.memory_type)}</Badge><p className="mt-2 text-[var(--text-muted)]">{authorityLabel(memory.authority_level)}</p></td>
+                <td className="max-w-[150px] px-3 py-3 text-[var(--text-muted)]">{scopeLabel(memory.valid_scope)}</td>
+                <td className="max-w-[210px] px-3 py-3"><p>{sourceType(memory.source)}</p><p className="mt-1 text-[var(--text-muted)]">{memory.source.operator_name || (sourceMessageId(memory.source) != null ? `消息 ${sourceMessageId(memory.source)}` : "来源未知")}</p><p className="mt-1 text-[var(--text-subtle)]">校验：{verificationLabel(memory.source.verified)}{memory.source.currently_verified === undefined ? "" : memory.source.currently_verified ? " · 当前有效" : " · 未确认"}</p></td>
+                <td className="px-3 py-3 text-[var(--text-muted)]"><span className={expired ? "text-[var(--warning)]" : undefined}>{formatDate(memory.expires_at)}</span>{expired && <span className="mt-1 block">已过期</span>}</td>
+                <td className="px-3 py-3"><div className="flex flex-wrap gap-1"><Button type="button" variant="secondary" size="sm" onClick={(event) => onDetail(memory, event.currentTarget)}>来源</Button><Button type="button" variant="secondary" size="sm" onClick={(event) => onEdit(memory, event.currentTarget)}><Pencil className="h-3 w-3" />编辑</Button>{memory.active && <Button type="button" variant="danger" size="sm" onClick={() => onForget(memory)}><Trash2 className="h-3 w-3" />忘记</Button>}</div></td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
 }
 
-function sourceMessageId(source: { source_message_id?: number | null; message_id?: number | null }) {
-  return source.source_message_id ?? source.message_id ?? null;
-}
-
-function sourceChatId(source: { source_chat_id?: number | null; chat_id?: number | null }) {
-  return source.source_chat_id ?? source.chat_id ?? null;
-}
-
-function MemoryTable({ memories, onDetail, onEdit, onForget }: { memories: AssistantMemory[]; onDetail: (memory: AssistantMemory, trigger: HTMLElement) => void; onEdit: (memory: AssistantMemory, trigger: HTMLElement) => void; onForget: (memory: AssistantMemory) => void }) {
-  return <div className="overflow-x-auto rounded-xl border border-[var(--border)]"><table className="w-full min-w-[820px] text-left text-xs"><thead className="bg-[var(--table-th-bg)] text-[var(--text-muted)]"><tr><th className="px-3 py-3 font-medium">事实</th><th className="px-3 py-3 font-medium">类型 / 权威</th><th className="px-3 py-3 font-medium">作用域</th><th className="px-3 py-3 font-medium">来源</th><th className="px-3 py-3 font-medium">有效期</th><th className="px-3 py-3 font-medium">操作</th></tr></thead><tbody>{memories.map((memory) => { const expired = memory.expires_at && new Date(memory.expires_at).getTime() <= Date.now(); return <tr key={memory.id} className="border-t border-[var(--border)] align-top hover:bg-[var(--table-hover)]"><td className="max-w-[280px] px-3 py-3"><p className="font-medium">{memory.subject}</p><p className="mt-1 line-clamp-3 text-[var(--text-muted)]">{memory.content}</p><p className="mt-1 text-[var(--text-subtle)]">v{memory.version} · {memory.active ? "active" : "inactive"}</p></td><td className="px-3 py-3"><Badge>{memory.memory_type}</Badge><p className="mt-2 text-[var(--text-muted)]">{memory.authority_level || "未知"}</p></td><td className="max-w-[150px] px-3 py-3 text-[var(--text-muted)]">{memory.valid_scope || "未知"}</td><td className="max-w-[190px] px-3 py-3"><p>{sourceType(memory.source)}</p><p className="mt-1 text-[var(--text-muted)]">{memory.source.operator_name || (sourceMessageId(memory.source) != null ? `消息 ${sourceMessageId(memory.source)}` : "来源未知")}</p><p className="mt-1 text-[var(--text-subtle)]">校验：{memory.source.verified || "未知"}{memory.source.currently_verified === undefined ? "" : ` · currently_verified=${String(memory.source.currently_verified)}`}</p></td><td className="px-3 py-3 text-[var(--text-muted)]"><span className={expired ? "text-[var(--warning)]" : undefined}>{formatDate(memory.expires_at)}</span>{expired && <span className="mt-1 block">已过期</span>}</td><td className="px-3 py-3"><div className="flex flex-wrap gap-1"><Button type="button" variant="secondary" size="sm" onClick={(event) => onDetail(memory, event.currentTarget)}>来源</Button><Button type="button" variant="secondary" size="sm" onClick={(event) => onEdit(memory, event.currentTarget)}><Pencil className="h-3 w-3" />编辑</Button>{memory.active && <Button type="button" variant="danger" size="sm" onClick={() => onForget(memory)}><Trash2 className="h-3 w-3" />忘记</Button>}</div></td></tr>; })}</tbody></table></div>;
-}
-
-function ConflictRow({ conflict, onResolve }: { conflict: AssistantConflict; onResolve: (conflict: AssistantConflict, accept: boolean) => void }) {
+function ConflictRow({
+  conflict,
+  onResolve,
+}: {
+  conflict: AssistantConflict;
+  onResolve: (conflict: AssistantConflict, accept: boolean) => void;
+}) {
   const messageId = sourceMessageId(conflict.source);
   const chatId = sourceChatId(conflict.source);
-  return <div className="rounded-xl border border-[var(--warning)]/30 bg-[var(--warning-soft)]/40 p-4"><div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between"><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><Badge tone="warning">{conflict.status}</Badge><span className="font-medium">{conflict.subject}</span></div><p className="mt-2 text-sm">{conflict.candidate_content}</p><p className="mt-2 text-xs text-[var(--text-muted)]">候选权威：{conflict.candidate_authority || "未知"} · scope：{conflict.candidate_scope || "未知"} · 来源：{sourceType(conflict.source)} · 原消息：{valueOrUnknown(messageId)} · 来源群：{valueOrUnknown(chatId)}</p>{conflict.source.snippet && <p className="mt-2 rounded-lg border border-[var(--border)] bg-[var(--surface)] p-2 text-xs text-[var(--text-muted)]">{conflict.source.snippet}</p>}<p className="mt-2 text-xs text-[var(--text-muted)]">接受后仅会以当前管理员明确纠正“{conflict.subject}”，普通来源不会自动升权；服务端会保留 {sourceType(conflict.source)} 等原始来源字段。</p></div><div className="flex shrink-0 gap-2"><Button type="button" size="sm" onClick={() => onResolve(conflict, true)}><Check className="h-3.5 w-3.5" />接受</Button><Button type="button" variant="secondary" size="sm" onClick={() => onResolve(conflict, false)}><X className="h-3.5 w-3.5" />拒绝</Button></div></div></div>;
+  return (
+    <div className="rounded-xl border border-[var(--warning)]/30 bg-[var(--warning-soft)]/40 p-4">
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2"><Badge tone="warning">{statusLabel(conflict.status)}</Badge><span className="font-medium">{conflict.subject}</span></div>
+          <p className="mt-2 text-sm">{conflict.candidate_content}</p>
+          <p className="mt-2 text-xs text-[var(--text-muted)]">候选权威：{authorityLabel(conflict.candidate_authority)} · 有效范围：{scopeLabel(conflict.candidate_scope)} · 来源：{sourceType(conflict.source)} · 原消息：{valueOrUnknown(messageId)} · 来源群：{valueOrUnknown(chatId)}</p>
+          {conflict.source.snippet && <p className="mt-2 rounded-lg border border-[var(--border)] bg-[var(--surface)] p-2 text-xs text-[var(--text-muted)]">{conflict.source.snippet}</p>}
+          <p className="mt-2 text-xs text-[var(--text-muted)]">接受后会以当前管理员明确更正；普通来源不会自动提升为权威。</p>
+        </div>
+        <div className="flex shrink-0 gap-2"><Button type="button" size="sm" onClick={() => onResolve(conflict, true)}><Check className="h-3.5 w-3.5" />接受</Button><Button type="button" variant="secondary" size="sm" onClick={() => onResolve(conflict, false)}><X className="h-3.5 w-3.5" />拒绝</Button></div>
+      </div>
+    </div>
+  );
 }
 
 function HistoryTable({ history }: { history: AssistantHistoryMessage[] }) {
-  return <div className="overflow-x-auto rounded-xl border border-[var(--border)]"><table className="w-full min-w-[780px] text-left text-xs"><thead className="bg-[var(--table-th-bg)] text-[var(--text-muted)]"><tr><th className="px-3 py-3 font-medium">时间</th><th className="px-3 py-3 font-medium">发送者 / 线程</th><th className="px-3 py-3 font-medium">角色</th><th className="px-3 py-3 font-medium">原文</th><th className="px-3 py-3 font-medium">来源与有效期</th></tr></thead><tbody>{history.map((item) => <tr key={item.id} className="border-t border-[var(--border)] align-top hover:bg-[var(--table-hover)]"><td className="whitespace-nowrap px-3 py-3 text-[var(--text-muted)]">{formatDate(item.created_at)}</td><td className="px-3 py-3"><p>{item.sender_name || "未知"}</p><p className="mt-1 text-[var(--text-subtle)]">sender {item.sender_id} · thread {item.thread_id}</p></td><td className="px-3 py-3"><Badge>{item.role}</Badge></td><td className="max-w-[360px] whitespace-pre-wrap px-3 py-3">{item.text}</td><td className="px-3 py-3 text-[var(--text-muted)]"><p>{item.source.type || "未知"} · {item.source.id || "未知"}</p><p className="mt-1">{item.delivered ? "已送达" : "未送达"} · {item.approved ? "已审核" : "审核状态未知"}</p><p className="mt-1">到期：{formatDate(item.expires_at)}</p></td></tr>)}</tbody></table></div>;
+  return (
+    <div className="overflow-x-auto rounded-xl border border-[var(--border)]">
+      <table className="w-full min-w-[780px] text-left text-xs">
+        <thead className="bg-[var(--table-th-bg)] text-[var(--text-muted)]"><tr><th className="px-3 py-3 font-medium">时间</th><th className="px-3 py-3 font-medium">发送者 / 话题</th><th className="px-3 py-3 font-medium">角色</th><th className="px-3 py-3 font-medium">原文</th><th className="px-3 py-3 font-medium">来源与有效期</th></tr></thead>
+        <tbody>
+          {history.map((item) => (
+            <tr key={item.id} className="border-t border-[var(--border)] align-top hover:bg-[var(--table-hover)]">
+              <td className="whitespace-nowrap px-3 py-3 text-[var(--text-muted)]">{formatDate(item.created_at)}</td>
+              <td className="px-3 py-3"><p>{item.sender_name || "未知"}</p><p className="mt-1 text-[var(--text-subtle)]">成员 {item.sender_id} · 话题 {item.thread_id}</p></td>
+              <td className="px-3 py-3"><Badge>{item.role === "user" ? "成员" : item.role === "assistant" ? "助手" : "其他"}</Badge></td>
+              <td className="max-w-[360px] whitespace-pre-wrap px-3 py-3">{item.text}</td>
+              <td className="px-3 py-3 text-[var(--text-muted)]"><p>{sourceLabel(item.source.type)} · {item.source.id || "未知"}</p><p className="mt-1">{item.delivered ? "已送达" : "未送达"} · {item.approved ? "已审核" : "审核状态未知"}</p><p className="mt-1">到期：{formatDate(item.expires_at)}</p></td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
 }
 
 function EmptyState({ title, detail }: { title: string; detail: string }) {
   return <div className="rounded-xl border border-dashed border-[var(--border-strong)] p-8 text-center"><p className="text-sm font-medium">{title}</p><p className="mt-1 text-xs text-[var(--text-muted)]">{detail}</p></div>;
 }
 
-function MemoryDetailDialog({ memory, versions, loading, onClose, onEdit }: { memory: AssistantMemory; versions: AssistantMemoryVersion[]; loading: boolean; onClose: () => void; onEdit: () => void }) {
+function MemoryDetailDialog({
+  memory,
+  versions,
+  loading,
+  onClose,
+  onEdit,
+}: {
+  memory: AssistantMemory;
+  versions: AssistantMemoryVersion[];
+  loading: boolean;
+  onClose: () => void;
+  onEdit: () => void;
+}) {
   const dialogRef = useModalFocusTrap(onClose);
-  return <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/45 p-0 backdrop-blur-sm sm:items-center sm:p-4" role="dialog" aria-modal="true"><div ref={dialogRef} tabIndex={-1} className="max-h-[90vh] w-full max-w-3xl overflow-y-auto rounded-t-3xl border border-[var(--border)] bg-[var(--dialog-bg)] p-5 shadow-2xl sm:rounded-3xl"><div className="flex items-start justify-between gap-4"><div><p className="text-[10px] uppercase tracking-[0.16em] text-[var(--accent)]">Source of truth</p><h2 className="mt-1 text-lg font-semibold">{memory.subject}</h2><p className="mt-1 text-xs text-[var(--text-muted)]">记忆 ID {memory.id} · 当前版本 v{memory.version}</p></div><Button type="button" variant="ghost" size="sm" onClick={onClose} aria-label="关闭" autoFocus><X className="h-4 w-4" /></Button></div><div className="mt-5 grid gap-4 md:grid-cols-2"><div className="space-y-3"><div className="rounded-xl border border-[var(--border)] bg-[var(--surface-2)] p-3 text-sm whitespace-pre-wrap">{memory.content}</div><div className="grid gap-2 text-xs text-[var(--text-muted)]"><p>类型：{memory.memory_type} · 权威：{memory.authority_level || "未知"}</p><p>作用域：{memory.valid_scope || "未知"}</p><p>有效至：{formatDate(memory.expires_at)} · active：{String(memory.active)}</p></div></div><div className="space-y-3 text-xs"><div className="rounded-xl border border-[var(--border)] p-3"><p className="mb-2 font-medium">来源（服务端字段，只读）</p><p>source_type：{sourceType(memory.source)}</p><p>消息 ID：{valueOrUnknown(sourceMessageId(memory.source))}</p><p>source_chat_id：{valueOrUnknown(sourceChatId(memory.source))}</p><p>operator：{memory.source.operator_name || valueOrUnknown(memory.source.operator_id)}</p><p>校验：{memory.source.verified || "未知"}{memory.source.currently_verified === undefined ? "" : ` · currently_verified=${String(memory.source.currently_verified)}`}</p>{memory.source.snippet && <p className="mt-2 rounded-lg bg-[var(--surface-2)] p-2 text-[var(--text-muted)]">{memory.source.snippet}</p>}</div><div className="rounded-xl border border-[var(--warning)]/30 bg-[var(--warning-soft)]/40 p-3">来源过期或未验证时，后台不会把它升级成 admin / pinned 权威；置顶权威由服务端再次核验。管理员更正会以当前管理员明确纠正“{memory.subject}”，普通来源不会自动升权。</div></div></div><div className="mt-5"><div className="mb-2 flex items-center justify-between"><h3 className="text-sm font-semibold">版本链</h3>{loading && <Loader2 className="h-4 w-4 animate-spin text-[var(--accent)]" />}</div>{versions.length === 0 ? <p className="text-xs text-[var(--text-muted)]">暂无 API 返回版本。</p> : <div className="space-y-2">{versions.map((version) => <div key={version.id} className="rounded-xl border border-[var(--border)] p-3 text-xs"><div className="flex flex-wrap gap-2"><Badge>v{version.version}</Badge><span>{version.change_kind}</span><span className="text-[var(--text-muted)]">{formatDate(version.created_at)}</span></div><p className="mt-2 whitespace-pre-wrap">{version.content}</p><p className="mt-1 text-[var(--text-muted)]">{version.authority_level} · {version.valid_scope || "未知"} · {version.source_type}</p></div>)}</div>}</div><div className="mt-5 flex justify-end gap-2"><Button type="button" variant="secondary" onClick={onClose}>关闭</Button><Button type="button" onClick={onEdit}><Pencil className="h-3.5 w-3.5" />管理员更正</Button></div></div></div>;
+  return (
+    <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/45 p-0 backdrop-blur-sm sm:items-center sm:p-4" role="dialog" aria-modal="true" aria-label="记忆来源详情">
+      <div ref={dialogRef} tabIndex={-1} className="max-h-[90vh] w-full max-w-3xl overflow-y-auto rounded-t-3xl border border-[var(--border)] bg-[var(--dialog-bg)] p-5 shadow-2xl sm:rounded-3xl">
+        <div className="flex items-start justify-between gap-4"><div><p className="text-[10px] font-semibold tracking-[0.16em] text-[var(--accent)]">记忆来源</p><h2 className="mt-1 text-lg font-semibold">{memory.subject}</h2><p className="mt-1 text-xs text-[var(--text-muted)]">记忆编号 {memory.id} · 当前第 {memory.version} 版</p></div><Button type="button" variant="ghost" size="sm" onClick={onClose} aria-label="关闭" autoFocus><X className="h-4 w-4" /></Button></div>
+        <div className="mt-5 grid gap-4 md:grid-cols-2"><div className="space-y-3"><div className="rounded-xl border border-[var(--border)] bg-[var(--surface-2)] p-3 text-sm whitespace-pre-wrap">{memory.content}</div><div className="grid gap-2 text-xs text-[var(--text-muted)]"><p>类型：{memoryTypeLabel(memory.memory_type)} · 权威：{authorityLabel(memory.authority_level)}</p><p>有效范围：{scopeLabel(memory.valid_scope)}</p><p>有效至：{formatDate(memory.expires_at)} · {memory.active ? "当前有效" : "已忘记"}</p></div></div><div className="space-y-3 text-xs"><div className="rounded-xl border border-[var(--border)] p-3"><p className="mb-2 font-medium">来源（服务端只读）</p><p>来源类型：{sourceType(memory.source)}</p><p>来源消息编号：{valueOrUnknown(sourceMessageId(memory.source))}</p><p>来源群编号：{valueOrUnknown(sourceChatId(memory.source))}</p><p>操作人：{memory.source.operator_name || valueOrUnknown(memory.source.operator_id)}</p><p>校验：{verificationLabel(memory.source.verified)}{memory.source.currently_verified === undefined ? "" : memory.source.currently_verified ? " · 当前有效" : " · 未确认"}</p>{memory.source.snippet && <p className="mt-2 rounded-lg bg-[var(--surface-2)] p-2 text-[var(--text-muted)]">{memory.source.snippet}</p>}</div><div className="rounded-xl border border-[var(--warning)]/30 bg-[var(--warning-soft)]/40 p-3">来源过期或未验证时，不会被后台升级为权威；管理员更正由服务端记录。</div></div></div>
+        <div className="mt-5"><div className="mb-2 flex items-center justify-between"><h3 className="text-sm font-semibold">版本记录</h3>{loading && <Loader2 className="h-4 w-4 animate-spin text-[var(--accent)]" />}</div>{versions.length === 0 ? <p className="text-xs text-[var(--text-muted)]">暂时没有版本记录。</p> : <div className="space-y-2">{versions.map((version) => <div key={version.id} className="rounded-xl border border-[var(--border)] p-3 text-xs"><div className="flex flex-wrap gap-2"><Badge>第 {version.version} 版</Badge><span>{version.change_kind === "create" ? "创建" : "更新"}</span><span className="text-[var(--text-muted)]">{formatDate(version.created_at)}</span></div><p className="mt-2 whitespace-pre-wrap">{version.content}</p><p className="mt-1 text-[var(--text-muted)]">{authorityLabel(version.authority_level)} · {scopeLabel(version.valid_scope)} · {sourceLabel(version.source_type)}</p></div>)}</div>}</div>
+        <div className="mt-5 flex justify-end gap-2"><Button type="button" variant="secondary" onClick={onClose}>关闭</Button><Button type="button" onClick={onEdit}><Pencil className="h-3.5 w-3.5" />管理员更正</Button></div>
+      </div>
+    </div>
+  );
 }
 
-function MemoryEditorDialog({ chatId, memory, versions, onClose, onSaved, onToast }: { chatId: number; memory: AssistantMemory | null; versions: AssistantMemoryVersion[]; onClose: () => void; onSaved: () => Promise<void>; onToast: (message: string, tone?: "success" | "error") => void }) {
+function MemoryEditorDialog({
+  chatId,
+  memory,
+  versions,
+  onClose,
+  onSaved,
+  onToast,
+}: {
+  chatId: number;
+  memory: AssistantMemory | null;
+  versions: AssistantMemoryVersion[];
+  onClose: () => void;
+  onSaved: () => Promise<void>;
+  onToast: (message: string, tone?: "success" | "error") => void;
+}) {
   const { confirmNavigation } = useDirtyNavigation();
   const [subject, setSubject] = useState(memory?.subject ?? "");
   const [content, setContent] = useState(memory?.content ?? "");
@@ -1252,11 +2242,11 @@ function MemoryEditorDialog({ chatId, memory, versions, onClose, onSaved, onToas
   const initial = `${memory?.version ?? 0}|${memory?.subject ?? ""}|${memory?.content ?? ""}|${memory?.valid_scope ?? ""}|${formatDateTimeLocal(memory?.expires_at)}|${memory?.source.snippet ?? ""}`;
   const current = `${memory?.version ?? 0}|${subject}|${content}|${scope}|${expiresAt}|${snippet}`;
   const dirty = current !== initial;
-  useDirtyGuard(dirty, "记忆更正草稿尚未保存，确定离开吗？", "assistant-memory");
+  useDirtyGuard(dirty, "记忆更正草稿还有未保存修改，确定离开吗？", "assistant-memory");
 
   const close = useCallback(() => {
     if (saving || savingRef.current) return;
-    if (!confirmNavigation("记忆更正草稿尚未保存，确定关闭吗？", "assistant-memory")) return;
+    if (!confirmNavigation("记忆更正草稿还有未保存修改，确定关闭吗？", "assistant-memory")) return;
     onClose();
   }, [confirmNavigation, onClose, saving]);
   const dialogRef = useModalFocusTrap(close);
@@ -1265,7 +2255,7 @@ function MemoryEditorDialog({ chatId, memory, versions, onClose, onSaved, onToas
     if (!subject.trim() || !content.trim() || !scope.trim() || saving || savingRef.current) return;
     const normalizedScope = normalizeMemoryScope(scope);
     if (!normalizedScope) {
-      onToast("有效范围必须使用服务端支持的范围（today、this_week、this_month、current_group、long_term、weekly 或 retention_window）。", "error");
+      onToast("有效范围不受支持，请填写今天、本周、本月、当前群、长期、每周或保留窗口。", "error");
       return;
     }
     savingRef.current = true;
@@ -1279,7 +2269,7 @@ function MemoryEditorDialog({ chatId, memory, versions, onClose, onSaved, onToas
       onToast(memory ? "管理员更正已保存" : "基础事实已新增", "success");
       await onSaved();
     } catch (error) {
-      onToast(error instanceof ApiError && error.status === 409 ? "记忆版本冲突：草稿保留，请重新打开当前版本比较。" : errorText(error, "保存记忆失败"), "error");
+      onToast(error instanceof ApiError && error.status === 409 ? "记忆版本冲突：草稿保留，请重新打开当前版本比较。" : displayServerText(errorText(error, "保存记忆失败。")), "error");
     } finally {
       savingRef.current = false;
       setSaving(false);
@@ -1287,109 +2277,21 @@ function MemoryEditorDialog({ chatId, memory, versions, onClose, onSaved, onToas
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/45 p-0 backdrop-blur-sm sm:items-center sm:p-4" role="dialog" aria-modal="true">
+    <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/45 p-0 backdrop-blur-sm sm:items-center sm:p-4" role="dialog" aria-modal="true" aria-label={memory ? "管理员更正" : "新增基础事实"}>
       <div ref={dialogRef} tabIndex={-1} aria-busy={saving} className="max-h-[92vh] w-full max-w-3xl overflow-y-auto rounded-t-3xl border border-[var(--border)] bg-[var(--dialog-bg)] p-5 shadow-2xl sm:rounded-3xl">
-        <div className="flex items-start justify-between gap-4">
-          <div>
-            <p className="text-[10px] uppercase tracking-[0.16em] text-[var(--accent)]">{memory ? "Admin correction" : "Admin base fact"}</p>
-            <h2 className="mt-1 text-lg font-semibold">{memory ? "更正长期记忆" : "新增预置基础事实"}</h2>
-            <p className="mt-1 text-xs text-[var(--text-muted)]">本次{memory ? `会以当前管理员明确纠正“${memory.subject}”` : "会创建管理员基础事实"}；服务端注入真实管理员身份并决定 authority_level。表单不接受伪造 pinned、sender 或 Telegram message 来源，普通来源不会自动升权。</p>
-          </div>
-          <Button type="button" variant="ghost" size="sm" onClick={close} aria-label="关闭" autoFocus><X className="h-4 w-4" /></Button>
-        </div>
+        <div className="flex items-start justify-between gap-4"><div><p className="text-[10px] font-semibold tracking-[0.16em] text-[var(--accent)]">{memory ? "管理员更正" : "管理员写入"}</p><h2 className="mt-1 text-lg font-semibold">{memory ? "更正群记忆" : "新增基础事实"}</h2><p className="mt-1 text-xs text-[var(--text-muted)]">服务端会记录真实管理员身份；表单不接受伪造 Telegram 来源或权限字段。</p></div><Button type="button" variant="ghost" size="sm" onClick={close} aria-label="关闭" autoFocus><X className="h-4 w-4" /></Button></div>
         <fieldset disabled={saving} aria-busy={saving} className={cn("contents", saving && "opacity-70")}>
           <div className="mt-5 grid gap-4 md:grid-cols-2">
-            <Field label="主题"><Input value={subject} onChange={(event) => setSubject(event.target.value)} maxLength={200} /></Field>
-            <Field label="有效范围" hint="请输入 today、this_week、this_month、current_group、long_term、weekly、retention_window，或本周有效/本群等受支持别名"><Input value={scope} onChange={(event) => setScope(event.target.value)} maxLength={300} placeholder="例如：本周有效" /></Field>
-            <Field label="事实内容" className="md:col-span-2"><Textarea rows={7} value={content} onChange={(event) => setContent(event.target.value)} maxLength={4000} /></Field>
-            <Field label="到期时间" hint="留空由服务端设定默认期限；过期来源不应被当作当前权威"><Input type="datetime-local" value={expiresAt} onChange={(event) => setExpiresAt(event.target.value)} /></Field>
-            <Field label="来源摘要（可选）" hint="仅摘要说明，不可填写 source_message_id 伪造 Telegram 来源"><Textarea rows={3} value={snippet} onChange={(event) => setSnippet(event.target.value)} maxLength={1000} /></Field>
+            <Field label="主题"><Input aria-label="主题" value={subject} onChange={(event) => setSubject(event.target.value)} maxLength={200} /></Field>
+            <Field label="有效范围" hint="可填今天、本周、本月、当前群、长期、每周或保留窗口"><Input aria-label="有效范围" value={scope} onChange={(event) => setScope(event.target.value)} maxLength={300} placeholder="例如：本周有效" /></Field>
+            <Field label="事实内容" className="md:col-span-2"><Textarea aria-label="事实内容" rows={7} value={content} onChange={(event) => setContent(event.target.value)} maxLength={4000} /></Field>
+            <Field label="到期时间" hint="留空由服务端设定默认期限"><Input aria-label="到期时间" type="datetime-local" value={expiresAt} onChange={(event) => setExpiresAt(event.target.value)} /></Field>
+            <Field label="来源摘要（可选）" hint="只写摘要，不填写 Telegram 消息身份"><Textarea aria-label="来源摘要（可选）" rows={3} value={snippet} onChange={(event) => setSnippet(event.target.value)} maxLength={1000} /></Field>
           </div>
-          {memory && versions.length > 0 && <div className="mt-4 rounded-xl border border-[var(--border)] bg-[var(--surface-2)] p-3 text-xs text-[var(--text-muted)]">已有版本链 {versions.length} 条；提交使用当前 v{memory.version} CAS。</div>}
+          {memory && versions.length > 0 && <div className="mt-4 rounded-xl border border-[var(--border)] bg-[var(--surface-2)] p-3 text-xs text-[var(--text-muted)]">已有 {versions.length} 条版本记录；保存会基于当前第 {memory.version} 版。</div>}
           <div className="mt-5 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end"><Button type="button" variant="secondary" onClick={close}>取消</Button><Button type="button" onClick={() => { void save(); }} disabled={saving || !subject.trim() || !content.trim() || !scope.trim()}>{saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}{saving ? "保存中…" : "保存更正"}</Button></div>
         </fieldset>
       </div>
     </div>
   );
-}
-
-function PoolPanel({
-  chatId,
-  draft,
-  models,
-  modelByRef,
-  registryError,
-  status,
-  statusError,
-  dispatches,
-  dispatchError,
-  saving,
-  dirty,
-  onChange,
-  onSave,
-  onCancel,
-  onRefreshStatus,
-}: {
-  chatId: number;
-  draft: PoolDraft;
-  models: RegistryModel[];
-  modelByRef: Map<string, RegistryModel>;
-  registryError: string | null;
-  status: AssistantStatus | null;
-  statusError: string | null;
-  dispatches: AssistantDispatch[];
-  dispatchError: string | null;
-  saving: boolean;
-  dirty: boolean;
-  onChange: React.Dispatch<React.SetStateAction<PoolDraft | null>>;
-  onSave: () => void;
-  onCancel: () => void;
-  onRefreshStatus: () => void;
-}) {
-  const enabledModels = models.filter((model) => model.enabled);
-  const addEndpoint = () => {
-    const model = enabledModels[0];
-    if (!model) return;
-    const id = `ep-${Date.now()}`;
-    onChange((current) => {
-      if (!current) return current;
-      const endpoint: AssistantPoolEndpoint = { id, name: model.label, model_ref: model.ref, role: "backup", priority: current.config.endpoints.length, max_concurrency: 1, timeout_ms: 10000, cooldown_duration_sec: 30, supports_tools: model.supports_tools };
-      return { ...current, config: { ...current.config, endpoints: [...current.config.endpoints, endpoint] } };
-    });
-  };
-  const removeEndpoint = (id: string) => onChange((current) => {
-    if (!current) return current;
-    const assignments = { ...current.config.task_assignments };
-    for (const task of ["chat", "learning"]) {
-      const assignment = assignments[task] ?? emptyTaskAssignment();
-      assignments[task] = { primary: assignment.primary === id ? "" : assignment.primary, backups: assignment.backups.filter((backup) => backup !== id) };
-    }
-    return { ...current, config: { ...current.config, task_assignments: assignments, endpoints: current.config.endpoints.filter((endpoint) => endpoint.id !== id) } };
-  });
-  const updateEndpoint = (id: string, patch: Partial<AssistantPoolEndpoint>) => onChange((current) => current ? { ...current, config: { ...current.config, endpoints: current.config.endpoints.map((endpoint) => endpoint.id === id ? { ...endpoint, ...patch } : endpoint) } } : current);
-  const assignment = (task: string) => draft.config.task_assignments[task] ?? emptyTaskAssignment();
-  const endpointSupportsTools = (endpoint: AssistantPoolEndpoint) => {
-    const model = modelByRef.get(endpoint.model_ref);
-    return model ? model.enabled && model.supports_tools : endpoint.supports_tools;
-  };
-  const endpointsForTask = (task: string) => task === "chat" ? draft.config.endpoints.filter(endpointSupportsTools) : draft.config.endpoints;
-  const updateAssignment = (task: string, patch: Partial<{ primary: string; backups: string[] }>) => onChange((current) => current ? { ...current, config: { ...current.config, task_assignments: { ...current.config.task_assignments, [task]: { ...assignment(task), ...patch } } } } : current);
-  const endpointLabel = (id: string) => { const endpoint = draft.config.endpoints.find((item) => item.id === id); return endpoint ? `${endpoint.id} · ${endpoint.model_ref}` : id; };
-
-  return <div className="space-y-4">
-    <fieldset disabled={saving} aria-busy={saving} className={cn("space-y-4 border-0 p-0", saving && "opacity-70")}>
-    <Card><CardHeader className="flex-row items-start justify-between gap-3"><div><SectionTitle icon={RotateCcw} title="primary-overflow 模型池" description="固定主优先、容量满/429 冷却/故障时按备用顺序分流；审核流水线不进入此池。" /><GuardedLink href={`/groups/${chatId}`} className="inline-flex items-center gap-1 text-xs text-[var(--accent)] hover:underline"><ExternalLink className="h-3 w-3" />查看现有群审核策略（只读链接）</GuardedLink></div><Button type="button" size="sm" onClick={addEndpoint} disabled={!enabledModels.length}><Plus className="h-3.5 w-3.5" />从 registry 添加端点</Button></CardHeader><CardBody className="space-y-4"><div className="grid gap-3 sm:grid-cols-3"><Field label="策略"><Input value={draft.strategy} readOnly /></Field><Field label="最大队列深度"><Input type="number" min={0} max={100} value={draft.config.max_queue_depth} onChange={(event) => onChange((current) => current ? { ...current, config: { ...current.config, max_queue_depth: Number(event.target.value) } } : current)} /></Field><Field label="最大排队等待（秒）"><Input type="number" min={0} max={60} value={draft.config.max_queue_wait_sec} onChange={(event) => onChange((current) => current ? { ...current, config: { ...current.config, max_queue_wait_sec: Number(event.target.value) } } : current)} /></Field></div>{registryError && <div className="rounded-xl border border-[var(--warning)]/30 bg-[var(--warning-soft)]/40 p-3 text-xs text-[var(--text-muted)]"><AlertTriangle className="mr-1 inline h-3.5 w-3.5 text-[var(--warning)]" />{registryError} 不提供 base URL/key 输入；已保存的 endpoint 能力仍以服务端 registry 校验。</div>}{draft.config.endpoints.length === 0 ? <EmptyState title="模型池没有 API 返回的端点" detail="不能用原型默认端点填充；请在有 registry 查看权限时添加现有 model_ref。" /> : <div className="overflow-x-auto rounded-xl border border-[var(--border)]"><table className="w-full min-w-[1100px] text-left text-xs"><thead className="bg-[var(--table-th-bg)] text-[var(--text-muted)]"><tr><th className="px-3 py-3">端点 ID / 名称</th><th className="px-3 py-3">registry model_ref</th><th className="px-3 py-3">角色 / 顺序</th><th className="px-3 py-3">本地并发</th><th className="px-3 py-3">超时 / 冷却</th><th className="px-3 py-3">tools 能力</th><th className="px-3 py-3">操作</th></tr></thead><tbody>{draft.config.endpoints.map((endpoint) => { const registryModel = modelByRef.get(endpoint.model_ref); return <tr key={endpoint.id} className="border-t border-[var(--border)] align-top"><td className="space-y-2 px-3 py-3"><Input value={endpoint.id} onChange={(event) => { const nextId = event.target.value; onChange((current) => { if (!current) return current; const rename = (task: string) => { const currentAssignment = current.config.task_assignments[task] ?? emptyTaskAssignment(); return { ...currentAssignment, primary: currentAssignment.primary === endpoint.id ? nextId : currentAssignment.primary, backups: currentAssignment.backups.map((id) => id === endpoint.id ? nextId : id) }; }; return { ...current, config: { ...current.config, task_assignments: { ...current.config.task_assignments, chat: rename("chat"), learning: rename("learning") }, endpoints: current.config.endpoints.map((item) => item.id === endpoint.id ? { ...item, id: nextId } : item) } }; }); }} /><Input value={endpoint.name ?? ""} placeholder="可选名称" onChange={(event) => updateEndpoint(endpoint.id, { name: event.target.value })} /></td><td className="px-3 py-3"><select className="h-9 min-w-[220px] rounded-lg border border-[var(--input-border)] bg-[var(--input-bg)] px-2 text-xs text-[var(--input-color)]" value={endpoint.model_ref} onChange={(event) => { const model = modelByRef.get(event.target.value); updateEndpoint(endpoint.id, { model_ref: event.target.value, supports_tools: model?.supports_tools ?? endpoint.supports_tools }); }}><option value={endpoint.model_ref}>{endpoint.model_ref} · 当前</option>{enabledModels.map((model) => <option key={model.ref} value={model.ref}>{model.label} · {model.ref}</option>)}</select><p className="mt-1 text-[11px] text-[var(--text-subtle)]">provider/key 不在此页面配置</p></td><td className="space-y-2 px-3 py-3"><select className="h-9 rounded-lg border border-[var(--input-border)] bg-[var(--input-bg)] px-2 text-xs text-[var(--input-color)]" value={endpoint.role} onChange={(event) => updateEndpoint(endpoint.id, { role: event.target.value })}><option value="primary">primary</option><option value="backup">backup</option></select><Input type="number" min={0} value={endpoint.priority} onChange={(event) => updateEndpoint(endpoint.id, { priority: Number(event.target.value) })} /></td><td className="px-3 py-3"><Input className="w-24" type="number" min={1} max={100} value={endpoint.max_concurrency} onChange={(event) => updateEndpoint(endpoint.id, { max_concurrency: Number(event.target.value) })} /></td><td className="space-y-2 px-3 py-3"><Input className="w-28" type="number" min={1000} max={120000} value={endpoint.timeout_ms} onChange={(event) => updateEndpoint(endpoint.id, { timeout_ms: Number(event.target.value) })} /><Input className="w-28" type="number" min={1} max={3600} value={endpoint.cooldown_duration_sec} onChange={(event) => updateEndpoint(endpoint.id, { cooldown_duration_sec: Number(event.target.value) })} /></td><td className="px-3 py-3">{registryModel ? <Badge tone={registryModel.supports_tools ? "success" : "warning"}>{registryModel.supports_tools ? "SupportsTools" : "纯文本"}</Badge> : <Badge>未知</Badge>}</td><td className="px-3 py-3"><Button type="button" variant="danger" size="sm" onClick={() => removeEndpoint(endpoint.id)}><Trash2 className="h-3 w-3" />删除</Button></td></tr>; })}</tbody></table></div>}</CardBody></Card>
-    <Card><CardHeader><CardTitle>任务分配</CardTitle><CardDescription>chat 的主端点和备用端点必须满足 tools 硬门槛；learning 可使用纯文本模型。备用顺序按逗号分隔的端点 ID 保存。</CardDescription></CardHeader><CardBody className="grid gap-4 md:grid-cols-2">{(["chat", "learning"] as const).map((task) => { const current = assignment(task); return <div key={task} className="rounded-xl border border-[var(--border)] bg-[var(--surface-2)] p-4"><p className="mb-3 text-sm font-medium">{task === "chat" ? "聊天任务" : "学习任务"}</p><Field label="主端点"><select className="h-10 w-full rounded-xl border border-[var(--input-border)] bg-[var(--input-bg)] px-3 text-sm text-[var(--input-color)]" value={current.primary} onChange={(event) => updateAssignment(task, { primary: event.target.value })}><option value="">请选择实际端点</option>{current.primary && task === "chat" && !endpointsForTask(task).some((endpoint) => endpoint.id === current.primary) && <option value={current.primary} disabled>{endpointLabel(current.primary)} · 当前引用不满足 tools</option>}{endpointsForTask(task).map((endpoint) => <option key={endpoint.id} value={endpoint.id}>{endpointLabel(endpoint.id)}</option>)}</select></Field><Field label="有序备用端点" hint="只填写当前端点 ID，不是 model_ref；服务端会再次校验重复、存在性和 chat tools 能力" className="mt-3"><Input value={current.backups.join(", ")} onChange={(event) => { const backups = event.target.value.split(",").map((item) => item.trim()).filter(Boolean); updateAssignment(task, { backups: task === "chat" ? backups.filter((id) => { const endpoint = draft.config.endpoints.find((item) => item.id === id); return endpoint ? endpointSupportsTools(endpoint) : false; }) : backups }); }} placeholder="按实际端点 ID 填写，可留空" /></Field></div>; })}</CardBody></Card>
-    </fieldset>
-    <Card><CardHeader><SectionTitle icon={ActivityIcon} title="真实运行状态" description="可见页每 20 秒轮询；离开页面会取消定时器和请求。没有活动负载时也只展示服务端返回的 0/unknown。" /></CardHeader><CardBody>{status ? <div className="space-y-4"><div className="flex flex-wrap items-center justify-between gap-2"><div className="flex flex-wrap gap-2"><Badge>{valueOrUnknown(status.active_strategy)}</Badge><span className="rounded-lg border border-[var(--border)] px-2 py-1 text-xs text-[var(--text-muted)]">队列 {valueOrUnknown(status.queue_depth)}</span><span className="rounded-lg border border-[var(--border)] px-2 py-1 text-xs text-[var(--text-muted)]">远程配额：{valueOrUnknown(status.remote_quota_note)}</span></div><Button type="button" variant="secondary" size="sm" onClick={onRefreshStatus}><RefreshCw className="h-3.5 w-3.5" />立即刷新</Button></div><div className="overflow-x-auto rounded-xl border border-[var(--border)]"><table className="w-full min-w-[880px] text-left text-xs"><thead className="bg-[var(--table-th-bg)] text-[var(--text-muted)]"><tr><th className="px-3 py-3">端点</th><th className="px-3 py-3">本地负载</th><th className="px-3 py-3">状态</th><th className="px-3 py-3">冷却</th><th className="px-3 py-3">最近错误</th><th className="px-3 py-3">远端额度</th></tr></thead><tbody>{status.endpoints_status.map((endpoint) => <tr key={endpoint.id} className="border-t border-[var(--border)]"><td className="px-3 py-3"><p className="font-medium">{endpoint.id}</p><p className="text-[var(--text-muted)]">{endpoint.model_label || endpoint.model_ref || "未知"}</p></td><td className="px-3 py-3">{valueOrUnknown(endpoint.current_active)} / {valueOrUnknown(endpoint.max_concurrency)}{endpoint.is_full ? <Badge tone="warning" className="ml-2">满载</Badge> : null}</td><td className="px-3 py-3"><Badge tone={statusTone(endpoint.status)}>{endpoint.status || "unknown"}</Badge></td><td className="px-3 py-3">{endpoint.cooldown_remaining_sec ? `${endpoint.cooldown_remaining_sec}s` : "0 / 未冷却"}</td><td className="max-w-[220px] px-3 py-3 text-[var(--text-muted)]">{endpoint.last_error || "无数据"}</td><td className="px-3 py-3 text-[var(--text-muted)]">{endpoint.remote_quota_observed || "未知"}</td></tr>)}</tbody></table></div>{status.last_dispatch_event && <LastDispatch event={status.last_dispatch_event} />}</div> : <ApiState label="运行状态无数据" error={statusError ?? "未知"} onRetry={onRefreshStatus} />}</CardBody></Card>
-    <Card><CardHeader><CardTitle>最近调度记录</CardTitle><CardDescription>只显示服务端裁剪后的任务、端点、原因、状态和延迟，不含提示全文或密钥。</CardDescription></CardHeader><CardBody>{dispatchError ? <ApiState label="调度记录无数据" error={dispatchError} onRetry={onRefreshStatus} /> : dispatches.length === 0 ? <EmptyState title="没有 API 返回调度记录" detail="不绘制原型中的模拟曲线或虚构请求。" /> : <div className="overflow-x-auto rounded-xl border border-[var(--border)]"><table className="w-full min-w-[760px] text-left text-xs"><thead className="bg-[var(--table-th-bg)] text-[var(--text-muted)]"><tr><th className="px-3 py-3">时间</th><th className="px-3 py-3">任务 / 端点</th><th className="px-3 py-3">原因</th><th className="px-3 py-3">状态</th><th className="px-3 py-3">延迟</th><th className="px-3 py-3">错误</th></tr></thead><tbody>{dispatches.map((dispatch) => <tr key={dispatch.id} className="border-t border-[var(--border)] align-top"><td className="whitespace-nowrap px-3 py-3 text-[var(--text-muted)]">{formatDate(dispatch.created_at)}</td><td className="px-3 py-3"><p>{dispatch.task_type} · {dispatch.endpoint_id || "未知"}</p><p className="text-[var(--text-muted)]">{dispatch.model_ref || "未知"}</p></td><td className="max-w-[260px] px-3 py-3 text-[var(--text-muted)]">{dispatch.reason || "未知"}</td><td className="px-3 py-3"><Badge tone={dispatch.status === "ok" || dispatch.status === "success" ? "success" : dispatch.status === "failed" ? "danger" : "default"}>{dispatch.status || "未知"}</Badge></td><td className="px-3 py-3">{dispatch.latency_ms == null ? "未知" : `${dispatch.latency_ms} ms`}</td><td className="max-w-[220px] px-3 py-3 text-[var(--text-muted)]">{dispatch.error || "—"}</td></tr>)}</tbody></table></div>}</CardBody></Card>
-    <SaveBar dirty={dirty} saving={saving} onSave={onSave} onCancel={onCancel} scope="模型池" />
-  </div>;
-}
-
-function ActivityIcon(props: React.ComponentProps<typeof Clock3>) { return <Clock3 {...props} />; }
-function LastDispatch({ event }: { event: AssistantLastDispatch }) { return <div className="rounded-xl border border-[var(--border)] bg-[var(--surface-2)] p-3 text-xs"><p className="font-medium">最近选路：{event.task_type} · {event.selected_endpoint_id || "未知"}</p><p className="mt-1 text-[var(--text-muted)]">{event.reason || "未知"} · {valueOrUnknown(event.status)} · {formatDate(event.timestamp)}</p></div>; }
-
-function ToolsPanel({ tools, error, policy, onOpenSettings }: { tools: AssistantToolsResponse | null; error: string | null; policy: AssistantPolicy; onOpenSettings: () => void }) {
-  return <div className="grid gap-4 lg:grid-cols-[minmax(0,1.3fr)_minmax(280px,0.7fr)]"><Card><CardHeader><SectionTitle icon={Wrench} title="只读技能" description="没有真实工具运行 API，因此不显示‘试运行’或假的 Telegram 消息按钮。" /></CardHeader><CardBody>{tools ? <div className="space-y-3">{tools.tools.map((tool) => <div key={tool.name} className="rounded-xl border border-[var(--border)] p-4"><div className="flex flex-wrap items-center justify-between gap-2"><div className="flex items-center gap-2"><span className="font-medium">{TOOL_LABELS[tool.name as AssistantToolName] ?? tool.name}</span><Badge tone={tool.read_only ? "success" : "danger"}>{tool.read_only ? "只读" : "异常：非只读"}</Badge><Badge tone={tool.enabled ? "success" : "default"}>{tool.enabled ? "已启用" : "未启用"}</Badge></div><span className="text-xs text-[var(--text-muted)]">scope：{tool.scope || "未知"}</span></div>{tool.name === "webfetch_readonly" && <p className="mt-2 text-xs text-[var(--text-muted)]">只允许服务端约束的公开白名单 GET；失败、超时、截断会作为结构化结果返回，不代表读取成功。域名白名单在聊天与学习设置编辑。</p>}</div>)}<div className="rounded-xl border border-[var(--border)] bg-[var(--surface-2)] p-3 text-xs text-[var(--text-muted)]">write_tools：{tools.write_tools.length === 0 ? "空" : tools.write_tools.join("、")} · server_bound_scope：{String(tools.server_bound_scope)}</div></div> : <ApiState label="tools API 无数据" error={error ?? "未知"} />}</CardBody></Card><Card><CardHeader><CardTitle>当前策略 allowlist</CardTitle><CardDescription>来自 assistant settings policy；tools API 才能说明服务端实际启用能力。</CardDescription></CardHeader><CardBody className="space-y-3"><div className="space-y-2">{TOOL_NAMES.map((tool) => <div key={tool} className="flex items-center justify-between gap-3 text-sm"><span>{TOOL_LABELS[tool]}</span><Badge tone={policy.tool_allowlist.includes(tool) ? "success" : "default"}>{policy.tool_allowlist.includes(tool) ? "allow" : "deny"}</Badge></div>)}</div><div className="border-t border-[var(--border)] pt-3 text-xs text-[var(--text-muted)]"><p>域名白名单</p><p className="mt-1 break-words">{policy.allow_domains.length ? policy.allow_domains.join("、") : "空（无已配置域名）"}</p></div><Button type="button" variant="secondary" size="sm" onClick={onOpenSettings}>编辑 assistant settings</Button></CardBody></Card></div>;
 }
