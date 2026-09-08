@@ -20,12 +20,25 @@ test('settings select model enables chat and sends the primary model reference w
  await openAssistant(page);await tab(page,'怎么说话');await expect(page.getByRole('switch',{name:'启用聊天',exact:true})).not.toBeChecked();await expect(page.getByRole('switch',{name:'启用普通群聊自动学习'})).not.toBeChecked();
  const chat=page.getByLabel('聊天模型',{exact:true}),learn=page.getByLabel('学习模型',{exact:true});await expect(chat.locator('option[value="fixture:text"]')).toHaveCount(1);await expect(chat.locator('option[value="fixture:no-tools"]')).toHaveCount(1);await expect(chat.locator('option[value="fixture:disabled"]')).toHaveCount(0);await chat.selectOption('fixture:no-tools');await page.getByRole('switch',{name:'启用聊天',exact:true}).click();await expect(page.getByText(/确定不能作为聊天模型/)).toBeVisible();await expect(page.getByRole('switch',{name:'启用聊天',exact:true})).not.toBeChecked();
  await chat.selectOption('fixture:tools');await learn.selectOption('fixture:text');await page.getByRole('switch',{name:'启用聊天',exact:true}).click();await expect(page.getByRole('switch',{name:'启用聊天',exact:true})).toBeChecked();await page.getByLabel('唤起方式').selectOption('mention_only');
- for(const [label,value] of [['追问窗口（秒）','600'],['最多追问轮次','9'],['历史上下文条数','44']])await page.getByLabel(label,{exact:false}).fill(value);
+ // These remain editable compatibility values, not a promise to force follow-up
+ // replies. The SGB entry consults the proactive/mention switches instead.
+ await expect(page.getByLabel('旧追问窗口（秒）',{exact:false})).toHaveValue(String(api.policies[-1001].followup_window_sec));
+ await expect(page.getByLabel('旧追问轮次（保留值）',{exact:false})).toHaveValue(String(api.policies[-1001].max_followup_turns));
+ await expect(page.getByText('保留旧存储值；当前由决策处理，不再强制回复',{exact:true})).toBeVisible();
+ await expect(page.getByText('不绕过主动聊天开关',{exact:true})).toBeVisible();
+ for(const [label,value] of [['旧追问窗口（秒）','600'],['旧追问轮次（保留值）','9'],['历史上下文条数','44']])await page.getByLabel(label,{exact:false}).fill(value);
  await page.getByLabel('网页域名白名单').fill('docs.example.test');
  await tab(page,'主动与风格');await page.getByRole('switch',{name:'有把握才插一句'}).click();await expect(page.getByRole('switch',{name:'有把握才插一句'})).toBeChecked();await page.getByRole('switch',{name:'有把握才插一句'}).click();
  await tab(page,'模型与负载（高级）');await page.getByText('备用模型、排队与回答随机程度',{exact:true}).click();for(const [label,value] of [['回答随机程度','0'],['原文保留天数','9'],['最大本地队列深度','0'],['最大排队等待（秒）','22']])await page.getByLabel(label,{exact:false}).fill(value);await page.getByLabel('默认系统指令').fill('Fixture system only');await page.getByRole('button',{name:'保存设置'}).click();await expect(page.getByText('群助手设置已保存',{exact:true})).toBeVisible();
  expect(api.writes).toHaveLength(1);expect(api.writes[0]).toMatchObject({path:'/api/admin/groups/-1001/assistant',method:'PUT',csrf:'fixture-csrf',body:{expected_version:0,chat_enabled:true,learning_enabled:false,trigger_mode:'mention_only',followup_window_sec:600,max_followup_turns:9,history_limit:44,temperature:0,retention_days:9,chat_model_ref:'fixture:tools',learning_model_ref:'fixture:text',max_queue_depth:0,max_queue_wait_sec:22,system_prompt:'Fixture system only',allow_domains:['docs.example.test'],tool_allowlist:tools}});expect(api.writes[0].body).not.toHaveProperty('model_pool');
- await tab(page,'怎么说话');await page.getByRole('switch',{name:'启用普通群聊自动学习'}).click();await page.getByRole('button',{name:'保存设置'}).click();await expect.poll(()=>api.writes.length).toBe(2);expect(api.writes[1].body).toMatchObject({expected_version:1,chat_enabled:true,learning_enabled:true,chat_model_ref:'fixture:tools'});expect(api.writes.some(w=>w.path.endsWith('/config')||w.path.includes('/global-config'))).toBe(false);
+ expect(api.writes[0].body).toMatchObject({proactive_interject_enabled:false,proactive_cold_topic_enabled:false});
+ await tab(page,'回复与媒体');
+ await expect(page.getByLabel('旧追问窗口（秒）',{exact:false})).toHaveValue('600');
+ await expect(page.getByLabel('旧追问轮次（保留值）',{exact:false})).toHaveValue('9');
+ await page.getByRole('switch',{name:'启用普通群聊自动学习'}).click();await page.getByRole('button',{name:'保存设置'}).click();await expect.poll(()=>api.writes.length).toBe(2);
+ expect(api.writes[1].body).toMatchObject({expected_version:1,chat_enabled:true,learning_enabled:true,chat_model_ref:'fixture:tools',followup_window_sec:600,max_followup_turns:9,max_queue_depth:0,max_queue_wait_sec:22});
+ expect(api.writes.every(w=>w.path==='/api/admin/groups/-1001/assistant'&&w.method==='PUT')).toBe(true);
+ expect(api.writes.some(w=>w.path.endsWith('/config')||w.path.includes('/global-config'))).toBe(false);
 });
 
 for(const code of [409,500])test(`settings ${code} retains draft and allows retry`,async({page,api})=>{

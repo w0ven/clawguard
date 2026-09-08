@@ -1,11 +1,46 @@
 import {test,expect,openAssistant,tab,configuredPool} from './assistant-fixtures';
 
 test('selecting a chat model saves settings and lets the server create the primary endpoint',async({page,api})=>{
- await openAssistant(page);await tab(page,'怎么说话');await page.getByLabel('聊天模型',{exact:true}).selectOption('fixture:tools');page.once('dialog',d=>d.accept());await tab(page,'模型与负载（高级）');await page.getByText('备用模型、排队与回答随机程度',{exact:true}).click();await expect(page.getByText('主模型优先，忙时自动用备用',{exact:true})).toBeVisible();await expect(page.getByText('当前主模型',{exact:true})).toBeVisible();await expect(page.getByText('备用模型（可选）',{exact:true})).toBeVisible();await page.getByRole('button',{name:'保存设置'}).click();await expect(page.getByText('群助手设置已保存',{exact:true})).toBeVisible();expect(api.writes).toHaveLength(1);expect(api.writes[0].path).toBe('/api/admin/groups/-1001/assistant');expect(api.writes[0].body).toMatchObject({expected_version:0,chat_model_ref:'fixture:tools',chat_enabled:false});expect(api.writes.some(w=>w.path.endsWith('/model-pool'))).toBe(false);expect(api.pools[-1001].config.task_assignments.chat.primary).toBe('ep-auto-chat');
+ await openAssistant(page);await tab(page,'回复与媒体');
+ await page.getByLabel('聊天模型',{exact:true}).selectOption('fixture:tools');
+ page.once('dialog',d=>d.accept());await tab(page,'全局');
+ const load=page.locator('.glass-panel').filter({has:page.getByRole('heading',{name:'助手共享模型负载',exact:true})});
+ await expect(load).toBeVisible();await expect(load.getByLabel('本群负载策略')).toHaveValue('primary-overflow');
+ await expect(page.getByText('当前主模型',{exact:true})).toBeVisible();
+ await expect(load.getByLabel('聊天模型 1',{exact:true})).toHaveValue('');
+ expect(api.writes).toEqual([]); // Navigation is not a save of either settings or pool.
+ await page.getByRole('button',{name:'保存设置'}).click();
+ await expect(page.getByText('群助手设置已保存',{exact:true})).toBeVisible();
+ expect(api.writes).toHaveLength(1);expect(api.writes[0].path).toBe('/api/admin/groups/-1001/assistant');
+ expect(api.writes[0].body).toMatchObject({expected_version:0,chat_model_ref:'fixture:tools',chat_enabled:false});
+ expect(api.writes.some(w=>w.path.endsWith('/model-pool'))).toBe(false);
+ // Synthetic fixture ID is retained; observable contract is the selected model
+ // behind the server-created primary, refreshed into the shared-load editor.
+ expect(api.pools[-1001].config.task_assignments.chat.primary).toBe('ep-auto-chat');
+ expect(api.pools[-1001].config.endpoints.find((e:any)=>e.id==='ep-auto-chat')).toMatchObject({model_ref:'fixture:tools',role:'primary'});
+ await expect(load.getByLabel('聊天模型 1',{exact:true})).toHaveValue('fixture:tools');
+ await expect(load).toContainText('当前聊天链：fixture:tools');
+ await expect(load.getByRole('button',{name:'添加聊天备用模型',exact:true})).toBeEnabled();
 });
 
 test('advanced view does not require endpoint or primary assignment fields',async({page,api})=>{
- api.pools[-1001]=configuredPool();await openAssistant(page);await tab(page,'模型与负载（高级）');await page.getByText('备用模型、排队与回答随机程度',{exact:true}).click();await expect(page.getByText('当前没有备用模型',{exact:false})).toHaveCount(0);await expect(page.locator('details').getByText('Fixture backup',{exact:true})).toBeVisible();await expect(page.getByLabel('主端点')).toHaveCount(0);await expect(page.getByLabel('有序备用端点')).toHaveCount(0);await expect(page.getByRole('button',{name:/从.*添加端点|删除端点/})).toHaveCount(0);expect(api.writes).toEqual([]);
+ api.pools[-1001]=configuredPool();const saved=structuredClone(api.pools[-1001]);
+ await openAssistant(page);await tab(page,'全局');
+ const load=page.locator('.glass-panel').filter({has:page.getByRole('heading',{name:'助手共享模型负载',exact:true})});
+ const backup=load.getByLabel('聊天模型 2',{exact:true});
+ await expect(backup).toBeVisible();await expect(backup).toHaveValue('fixture:backup');
+ await expect(backup.locator('option:checked')).toHaveText('Fixture backup');
+ await expect(load.getByLabel('聊天模型 1',{exact:true})).toHaveValue('fixture:tools');
+ await expect(page.getByText('当前没有备用模型',{exact:false})).toHaveCount(0);
+ await expect(page.getByLabel('主端点')).toHaveCount(0);await expect(page.getByLabel('有序备用端点')).toHaveCount(0);
+ await expect(page.getByRole('button',{name:/从.*添加端点|删除端点/})).toHaveCount(0);expect(api.writes).toEqual([]);
+ // Editing a referenced model's load is a local draft, not an endpoint registry write.
+ await load.getByLabel('聊天并发 2',{exact:true}).fill('4');
+ await expect(load.getByRole('button',{name:'保存本群负载',exact:true})).toBeEnabled();
+ expect(api.pools[-1001]).toEqual(saved);expect(api.writes).toEqual([]);
+ await load.getByRole('button',{name:'取消负载修改',exact:true}).click();
+ await expect(load.getByLabel('聊天并发 2',{exact:true})).toHaveValue('3');
+ await expect(backup).toHaveValue('fixture:backup');expect(api.pools[-1001]).toEqual(saved);expect(api.writes).toEqual([]);
 });
 
 test('registry 403 keeps the model reference and shows the management hint',async({page,api})=>{
