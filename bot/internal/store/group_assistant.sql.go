@@ -288,7 +288,7 @@ func (q *Queries) InvalidateGroupAssistantSource(ctx context.Context, chatID, te
 
 func (q *Queries) ListGroupAssistantMessages(ctx context.Context, arg ListGroupAssistantMessagesParams) ([]GroupAssistantMessage, error) {
 	limit := arg.Limit
-	if limit <= 0 || limit > 200 {
+	if limit <= 0 || limit > 500 {
 		limit = 50
 	}
 	query := `SELECT ` + groupAssistantMessageColumns + ` FROM group_assistant_messages

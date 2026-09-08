@@ -76,7 +76,16 @@ func TestGroupAssistantBrowserIntegrationServe(t *testing.T) {
 			t.Fatal(e)
 		}
 	}
-	for _, chat := range []int64{-88001, -88002} {
+	fixesRound2 := os.Getenv("CG_BROWSER_IT_FIXES_ROUND2") == "1"
+	fixesRound1 := os.Getenv("CG_BROWSER_IT_FIXES_ROUND1") == "1" || fixesRound2
+	chats := []int64{-88001, -88002}
+	if fixesRound1 {
+		chats = append(chats, -88003, -88004)
+	}
+	if fixesRound2 {
+		chats = append(chats, -88005)
+	}
+	for _, chat := range chats {
 		exec(`INSERT INTO groups(chat_id,title,type,config) VALUES($1,$2,'supergroup','{"integration_keep":"unchanged","ai":{"message_rules":"existing moderation fixture"}}')`, chat, fmt.Sprintf("Integration PG 群 %d · 非线上", chat))
 		exec(`INSERT INTO authorized_groups(chat_id) VALUES($1)`, chat)
 	}
@@ -92,7 +101,24 @@ func TestGroupAssistantBrowserIntegrationServe(t *testing.T) {
 	if err = db.QueryRow(ctx, `INSERT INTO llm_providers(key,label,base_url,api_key_enc) VALUES('browser','Integration Provider','http://127.0.0.1:9/never-call',$1) RETURNING id`, encrypted).Scan(&providerID); err != nil {
 		t.Fatal(err)
 	}
-	exec(`INSERT INTO llm_models(provider_id,model_key,label,supports_tools,probe_enabled) VALUES($1,'tools','Integration Tools',true,false),($1,'text','Integration Text',false,false)`, providerID)
+	exec(`INSERT INTO llm_models(provider_id,model_key,label,supports_tools,probe_enabled) VALUES($1,'tools','Integration Tools',true,false),($1,'tools2','备用模型二',true,false),($1,'tools3','备用模型三',true,false),($1,'text','Integration Text',false,false)`, providerID)
+	// Independent FE-01/04 fixtures, opt-in and confined to this disposable DB.
+	if fixesRound1 {
+		exec(`UPDATE llm_models SET supports_vision=true,capability_tags=ARRAY['embedding'] WHERE model_key IN ('tools2','tools3')`)
+		exec(`INSERT INTO llm_models(provider_id,model_key,label,supports_tools,enabled,probe_enabled) VALUES($1,'disabled','已停用验收模型',true,false,false)`, providerID)
+		exec(`INSERT INTO group_assistant_policies(chat_id,chat_enabled,learning_enabled,chat_model_ref,learning_model_ref,system_prompt,proactive_interject_enabled,proactive_cold_topic_enabled,mimic_profile_text,tts_mode) VALUES(-88003,true,true,'browser:tools','browser:text','旧群显式Prompt保全 [ACTIVE_PERSONA]',true,false,'旧群语气保全','off')`)
+		exec(`INSERT INTO group_assistant_pools(chat_id,strategy,config) VALUES(-88003,'primary-overflow','{"task_assignments":{"chat":{"primary":"legacy-main","backups":["legacy-backup"]}},"endpoints":[{"id":"legacy-main","model_ref":"browser:tools","role":"primary","priority":0,"max_concurrency":2,"timeout_ms":12000,"cooldown_duration_sec":30,"supports_tools":true},{"id":"legacy-backup","model_ref":"browser:tools2","role":"backup","priority":1,"max_concurrency":2,"timeout_ms":12000,"cooldown_duration_sec":30,"supports_tools":true}]}')`)
+		exec(`INSERT INTO group_assistant_prompt_overrides(chat_id,prompt_key,content) VALUES(0,'persona','全局已编辑人格保全 [ACTIVE_PERSONA]'),(-88003,'casual','旧群日常Prompt覆盖保全')`)
+	}
+	if fixesRound2 {
+		// Legacy explicit decision deliberately shares the exact chat endpoint IDs.
+		// Separate learning parameters must survive adding backups in the browser.
+		exec(`INSERT INTO group_assistant_policies(chat_id,chat_enabled,learning_enabled,chat_model_ref,learning_model_ref,system_prompt) VALUES(-88005,true,true,'browser:tools','browser:text','Round2 legacy explicit Prompt')`)
+		exec(`INSERT INTO group_assistant_pools(chat_id,strategy,config) SELECT -88005,strategy,
+		 jsonb_set(jsonb_set(config,'{task_assignments,decision}',config->'task_assignments'->'chat'),'{task_assignments,learning}','{"primary":"legacy-learning","backups":null,"strategy":"weighted","temperature":0.43,"max_tokens":777}')
+		 || jsonb_build_object('endpoints',(config->'endpoints') || '[{"id":"legacy-learning","model_ref":"browser:text","role":"primary","priority":0,"weight":7,"max_concurrency":3,"timeout_ms":19000,"cooldown_duration_sec":41,"supports_tools":false}]'::jsonb)
+		 FROM group_assistant_pools WHERE chat_id=-88003`)
+	}
 	providers := ai.NewProviderRegistry(zap.NewNop(), q)
 	models := ai.NewModelRegistry(q)
 	if err = providers.Reload(ctx); err != nil {
@@ -196,6 +222,22 @@ func TestGroupAssistantBrowserIntegrationServe(t *testing.T) {
 				return
 			}
 			w.Write(raw)
+			return
+		}
+		if fixesRound1 && r.Method == "POST" && (r.URL.Path == "/empty-ui-catalog" || r.URL.Path == "/disable-ui-catalog") {
+			statement := `UPDATE llm_models SET enabled=false`
+			if r.URL.Path == "/empty-ui-catalog" {
+				statement = `DELETE FROM llm_models`
+			}
+			_, e := db.Exec(ctx, statement)
+			if e == nil {
+				e = models.Reload(ctx)
+			}
+			if e != nil {
+				http.Error(w, e.Error(), 500)
+				return
+			}
+			w.Write([]byte(`{"test_catalog_updated":true}`))
 			return
 		}
 		if r.Method == "POST" && r.URL.Path == "/seed" && !seeded {

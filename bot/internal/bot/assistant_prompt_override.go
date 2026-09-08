@@ -79,7 +79,7 @@ func assistantSystemPromptForModeWithOverrides(policy store.GroupAssistantPolicy
 		base += "\n" + assistantResolvedPrompt(overrides, "proactive_topic")
 		base += "\n[INTERACTION_MODE]\ncold：自然开启一个轻量话题，默认1到2句；没有合适话题时严格输出 SKIP_TASK。"
 	}
-	return base + "\n" + assistantSafetyPrompt
+	return base + "\n[BOT_PROJECT_INFO]\nproject: ClawGuard\ncomponent: 群助手\nsource_adaptation: Smart_Group_Bot (MIT) 聊天、上下文与技能链路\n[BOT_RUNTIME_PROFILE]\n模型来自现有共享模型目录。保留群聊自动学习；事实以来源权威和有效期为准，不是管理员永久记忆。聊天技能不能修改记忆、规则或群管配置。具体能力以本轮实际工具定义为准。\n" + assistantSafetyPrompt
 }
 
 func assistantPromptOverrideMissing(err error) bool {

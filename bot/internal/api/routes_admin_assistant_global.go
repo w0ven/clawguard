@@ -23,7 +23,7 @@ func (s *Server) registerAssistantGlobalRoutes(admin *echo.Group) {
 
 func defaultAssistantGlobalSettings() store.AssistantGlobalSettings {
 	return store.AssistantGlobalSettings{
-		ID: 1, InboundMergeWindowSec: 0.4, ReplyTotalTimeoutSec: 45, DecisionContextItems: 5,
+		ID: 1, InboundMergeWindowSec: 5, ReplyTotalTimeoutSec: 45, DecisionContextItems: 5,
 		KeepOriginalText: true, MemoryRecallEnabled: true, HotWindowCompressEnabled: false,
 		ProactiveIdleMinutes: 180, ProactiveQuietStart: 0, ProactiveQuietEnd: 8, ProactiveCheckIntervalSec: 60,
 		TTSHTTPTimeoutSec: 20, TTSMaxTextLength: 500, TTSAPIBase: "https://openspeech.bytedance.com",
@@ -168,18 +168,8 @@ func (s *Server) handlePutAssistantGlobal(c echo.Context) error {
 		if encErr != nil {
 			return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid model_roles"})
 		}
-		for _, role := range req.ModelRoles {
-			for _, ref := range append([]string{role.ModelRef}, role.Fallbacks...) {
-				ref = strings.TrimSpace(ref)
-				if ref == "" {
-					continue
-				}
-				if s.botService.Assistant() != nil {
-					if err := s.botService.Assistant().ValidateModelRef(ref, false); err != nil {
-						return c.JSON(http.StatusBadRequest, map[string]string{"error": "模型角色引用了不可用的模型"})
-					}
-				}
-			}
+		if err := s.botService.Assistant().ValidateRoleConfigs(req.ModelRoles); err != nil {
+			return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
 		}
 		arg.ModelRoles = raw
 	}

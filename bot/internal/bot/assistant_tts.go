@@ -331,8 +331,8 @@ func (a *GroupAssistant) executeDoubaoTTSTool(ctx context.Context, chatID int64,
 		return assistantToolError("missing_context", "当前上下文不支持发送语音"), fmt.Errorf("missing service")
 	}
 	settings := a.loadRuntimeSettings(ctx)
-	if a.toolRuntime != nil {
-		settings = a.toolRuntime.settings
+	if assistantRuntime(ctx) != nil {
+		settings = assistantRuntime(ctx).settings
 	}
 	mode := normalizeAssistantTTSMode(policy.TTSMode)
 	if mode == assistantTTSModeOff {
@@ -349,8 +349,8 @@ func (a *GroupAssistant) executeDoubaoTTSTool(ctx context.Context, chatID int64,
 		return assistantToolError("tts_not_configured", "语音服务未配置密钥"), fmt.Errorf("tts not configured")
 	}
 	text := assistantStringArg(args, "text")
-	if text == "" && a.toolRuntime != nil {
-		text = a.toolRuntime.current
+	if text == "" && assistantRuntime(ctx) != nil {
+		text = assistantRuntime(ctx).current
 	}
 	result := synth.Synthesize(ctx, text)
 	if !result.OK {
@@ -359,17 +359,37 @@ func (a *GroupAssistant) executeDoubaoTTSTool(ctx context.Context, chatID int64,
 	}
 	delivery := strings.ToLower(assistantStringArg(args, "delivery_mode"))
 	opts := &tele.SendOptions{}
-	if a.toolRuntime != nil && a.toolRuntime.msg != nil {
-		opts.ThreadID = a.toolRuntime.msg.ThreadID
+	if assistantRuntime(ctx) != nil && assistantRuntime(ctx).msg != nil {
+		opts.ThreadID = assistantRuntime(ctx).msg.ThreadID
 		if delivery != "message" {
-			opts.ReplyTo = a.toolRuntime.msg
+			opts.ReplyTo = assistantRuntime(ctx).msg
 		}
 	}
+	if rt := assistantRuntime(ctx); rt != nil && a.queries != nil && !a.service.assistantPreSendReview(ctx, rt.msg, rt.mode) {
+		return assistantToolError("canceled", "消息已失效或助手已关闭"), context.Canceled
+	}
+	if err := assistantReserveMedia(ctx, "voice:"+result.Normalized); err != nil {
+		return assistantToolError("already_attempted", err.Error()), err
+	}
+	if rt := assistantRuntime(ctx); rt != nil {
+		rt.deliveryUncertain = true
+	}
 	sent, err := a.service.sendAssistantVoice(ctx, &tele.Chat{ID: chatID}, result.Audio, result.Format, opts)
+	if err == nil && (sent == nil || sent.ID == 0) {
+		err = fmt.Errorf("语音发送未确认")
+	}
 	if err != nil {
 		a.logTTSSkip(chatID, "语音发送失败")
 		return assistantToolError("send_failed", "语音发送失败"), err
 	}
-	_ = sent
-	return assistantJSONResult(map[string]any{"ok": true, "text": result.Normalized, "delivery_mode": delivery}), nil
+	if rt := assistantRuntime(ctx); rt != nil {
+		rt.voiceSent = true
+		rt.deliveryUncertain = false
+		if sent != nil && rt.msg != nil {
+			if err := a.service.storeAssistantDelivery(ctx, rt.msg, policy, result.Normalized, sent, opts); err != nil {
+				return assistantToolError("storage_failed", "语音已发送但归档失败，不得重发"), err
+			}
+		}
+	}
+	return assistantJSONResult(map[string]any{"ok": true, "text": result.Normalized, "delivery_mode": delivery, "tts_sent": true}), nil
 }

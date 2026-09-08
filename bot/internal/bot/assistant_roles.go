@@ -144,6 +144,12 @@ func assistantRoleEndpointID(task, modelRef string) string {
 }
 
 func applyAssistantRolesToPool(cfg AssistantPoolConfig, roles assistantRoleSet, policy store.GroupAssistantPolicy) AssistantPoolConfig {
+	if cfg.Strategy == "" {
+		cfg.Strategy = roles.Main.Strategy
+		if cfg.Strategy == "" {
+			cfg.Strategy = "primary-overflow"
+		}
+	}
 	if cfg.TaskAssignments == nil {
 		cfg.TaskAssignments = map[string]AssistantTaskAssignment{}
 	}
@@ -152,6 +158,11 @@ func applyAssistantRolesToPool(cfg AssistantPoolConfig, roles assistantRoleSet, 
 		existing[ep.ID] = struct{}{}
 	}
 	addRole := func(task string, role store.AssistantModelRoleConfig, requireTools bool) {
+		// Legacy explicit assignments remain complete group overrides, never a
+		// hidden partial merge with a newer global primary/fallback chain.
+		if cfg.TaskAssignments[task].Primary != "" {
+			return
+		}
 		refs := make([]string, 0, 1+len(role.Fallbacks))
 		if strings.TrimSpace(role.ModelRef) != "" {
 			refs = append(refs, strings.TrimSpace(role.ModelRef))
@@ -175,9 +186,22 @@ func applyAssistantRolesToPool(cfg AssistantPoolConfig, roles assistantRoleSet, 
 				if i == 0 {
 					roleName = "primary"
 				}
+				opts := role.ModelOptions[ref]
+				if opts.Weight == 0 {
+					opts.Weight = 1
+				}
+				if opts.MaxConcurrency == 0 {
+					opts.MaxConcurrency = 2
+				}
+				if opts.TimeoutMs == 0 {
+					opts.TimeoutMs = timeoutMS
+				}
+				if opts.CooldownSeconds == 0 {
+					opts.CooldownSeconds = 30
+				}
 				cfg.Endpoints = append(cfg.Endpoints, AssistantPoolEndpoint{
-					ID: id, Name: ref, ModelRef: ref, Role: roleName, Priority: i,
-					MaxConcurrency: 2, TimeoutMs: timeoutMS, CooldownSeconds: 30, SupportsTools: requireTools && i == 0,
+					ID: id, Name: ref, ModelRef: ref, Role: roleName, Priority: i, Weight: opts.Weight,
+					MaxConcurrency: opts.MaxConcurrency, TimeoutMs: opts.TimeoutMs, CooldownSeconds: opts.CooldownSeconds,
 				})
 				existing[id] = struct{}{}
 			}
@@ -186,6 +210,10 @@ func applyAssistantRolesToPool(cfg AssistantPoolConfig, roles assistantRoleSet, 
 		assignment := cfg.TaskAssignments[task]
 		if strings.TrimSpace(assignment.Primary) == "" {
 			assignment.Primary = ids[0]
+			assignment.Strategy = role.Strategy
+			temperature := role.Temperature
+			assignment.Temperature = &temperature
+			assignment.MaxTokens = role.MaxTokens
 			if len(ids) > 1 {
 				assignment.Backups = append([]string(nil), ids[1:]...)
 			}
@@ -197,26 +225,46 @@ func applyAssistantRolesToPool(cfg AssistantPoolConfig, roles assistantRoleSet, 
 		main.ModelRef = strings.TrimSpace(policy.ChatModelRef)
 	}
 	addRole("chat", main, true)
-	addRole("decision", roles.effective("decision"), false)
-	addRole("vision", roles.effective("vision"), false)
-	addRole("compress", roles.effective("compress"), false)
-	addRole("vector", roles.effective("vector"), false)
+	for _, task := range []string{"decision", "vision", "compress", "vector"} {
+		role := map[string]store.AssistantModelRoleConfig{"decision": roles.Decision, "vision": roles.Vision, "compress": roles.Compress, "vector": roles.Vector}[task]
+		if role.ModelRef != "" {
+			addRole(task, role, false)
+		}
+	}
 	if strings.TrimSpace(policy.LearningModelRef) != "" {
 		addRole("learning", store.AssistantModelRoleConfig{ModelRef: policy.LearningModelRef, TimeoutSec: 12, Fallbacks: []string{}}, false)
+	}
+	for _, task := range []string{"learning", "decision", "vision", "compress", "vector"} {
+		if cfg.TaskAssignments[task].Primary == "" {
+			child := cfg.TaskAssignments[task]
+			if role, ok := map[string]store.AssistantModelRoleConfig{"decision": roles.Decision, "vision": roles.Vision, "compress": roles.Compress, "vector": roles.Vector}[task]; ok {
+				if child.MaxTokens == 0 {
+					child.MaxTokens = role.MaxTokens
+				}
+				if child.Temperature == nil {
+					temp := role.Temperature
+					child.Temperature = &temp
+				}
+				if child.Strategy == "" {
+					child.Strategy = role.Strategy
+				}
+			}
+			cfg.TaskAssignments[task] = inheritAssistantAssignment(child, cfg.TaskAssignments["chat"])
+		}
 	}
 	return cfg
 }
 
 func (a *GroupAssistant) loadRuntimeSettings(ctx context.Context) store.AssistantGlobalSettings {
 	if a == nil || a.queries == nil {
-		return store.AssistantGlobalSettings{InboundMergeWindowSec: 0.4, ReplyTotalTimeoutSec: 45, DecisionContextItems: 5, MemoryRecallEnabled: true, TTSAudioFormat: "ogg_opus", TTSSampleRate: 48000, TTSEmotionScale: 4, TTSHTTPTimeoutSec: 20, TTSMaxTextLength: 500, TTSAPIBase: "https://openspeech.bytedance.com", TTSResourceID: "seed-tts-2.0", StickerFallbackFileIDs: []string{}}
+		return store.AssistantGlobalSettings{InboundMergeWindowSec: 5, ReplyTotalTimeoutSec: 45, DecisionContextItems: 5, MemoryRecallEnabled: true, TTSAudioFormat: "ogg_opus", TTSSampleRate: 48000, TTSEmotionScale: 4, TTSHTTPTimeoutSec: 20, TTSMaxTextLength: 500, TTSAPIBase: "https://openspeech.bytedance.com", TTSResourceID: "seed-tts-2.0", StickerFallbackFileIDs: []string{}}
 	}
 	settings, err := a.queries.GetAssistantGlobalSettings(ctx)
 	if err != nil {
 		if !errorsIsNoRows(err) {
 			a.logger.Debug("load assistant global settings failed")
 		}
-		return store.AssistantGlobalSettings{InboundMergeWindowSec: 0.4, ReplyTotalTimeoutSec: 45, DecisionContextItems: 5, MemoryRecallEnabled: true, TTSAudioFormat: "ogg_opus", TTSSampleRate: 48000, TTSEmotionScale: 4, TTSHTTPTimeoutSec: 20, TTSMaxTextLength: 500, TTSAPIBase: "https://openspeech.bytedance.com", TTSResourceID: "seed-tts-2.0", StickerFallbackFileIDs: []string{}}
+		return store.AssistantGlobalSettings{InboundMergeWindowSec: 5, ReplyTotalTimeoutSec: 45, DecisionContextItems: 5, MemoryRecallEnabled: true, TTSAudioFormat: "ogg_opus", TTSSampleRate: 48000, TTSEmotionScale: 4, TTSHTTPTimeoutSec: 20, TTSMaxTextLength: 500, TTSAPIBase: "https://openspeech.bytedance.com", TTSResourceID: "seed-tts-2.0", StickerFallbackFileIDs: []string{}}
 	}
 	return settings
 }
@@ -226,7 +274,7 @@ func errorsIsNoRows(err error) bool {
 }
 
 func assistantMergeWindow(settings store.AssistantGlobalSettings) time.Duration {
-	if settings.InboundMergeWindowSec <= 0 {
+	if settings.InboundMergeWindowSec < 0 {
 		return assistantReplyMergeWindow
 	}
 	return time.Duration(settings.InboundMergeWindowSec * float64(time.Second))

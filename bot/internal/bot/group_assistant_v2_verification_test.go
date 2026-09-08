@@ -25,8 +25,17 @@ func TestAssistantV2EnabledHardGate(t *testing.T) {
 	model.SupportsTools = false
 	registry.models[ai.NewModelRef("mock", "main")] = model
 	readiness = a.ChatReadinessForPool(cfg)
+	// Source-refactor contract: an incompatible primary must not suppress a
+	// compatible backup. Capability gates still apply to every real candidate.
+	if !readiness.CanChat || !readiness.ToolsDeclared || readiness.ChatPrimaryModelRef != "mock:backup" {
+		t.Fatalf("declared backup did not keep chat ready: %+v", readiness)
+	}
+	backup := registry.models[ai.NewModelRef("mock", "backup")]
+	backup.SupportsTools = false
+	registry.models[ai.NewModelRef("mock", "backup")] = backup
+	readiness = a.ChatReadinessForPool(cfg)
 	if readiness.CanChat || readiness.ToolsDeclared || len(readiness.Blockers) == 0 {
-		t.Fatalf("undeclared tools primary passed: %+v", readiness)
+		t.Fatalf("all undeclared tools models passed: %+v", readiness)
 	}
 }
 
@@ -56,7 +65,7 @@ func TestAssistantV2ColdPreSendCancellation(t *testing.T) {
 
 func TestAssistantChatBrainPromptContracts(t *testing.T) {
 	defaultSystem := assistantSystemPrompt(store.GroupAssistantPolicy{})
-	for _, want := range []string{"约 10 个汉字", "禁止括号动作", "客服腔"} {
+	for _, want := range []string{"around 10 Chinese characters", "Do not write bracketed action descriptions", "customer-service"} {
 		if !strings.Contains(defaultSystem, want) {
 			t.Fatalf("default system prompt missing %q", want)
 		}
