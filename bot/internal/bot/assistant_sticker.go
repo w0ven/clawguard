@@ -154,14 +154,14 @@ func (a *GroupAssistant) executeSendStickerTool(ctx context.Context, chatID int6
 		delivery = "reply"
 	}
 	settings := a.loadRuntimeSettings(ctx)
-	if a.toolRuntime != nil {
-		settings = a.toolRuntime.settings
+	if assistantRuntime(ctx) != nil {
+		settings = assistantRuntime(ctx).settings
 	}
 	source := "explicit"
 	description := ""
 	if fileID == "" {
-		if query == "" && a.toolRuntime != nil {
-			query = a.toolRuntime.current
+		if query == "" && assistantRuntime(ctx) != nil {
+			query = assistantRuntime(ctx).current
 		}
 		picked := a.pickAssistantSticker(ctx, chatID, query, assistantStickerFallbackIDs(policy, settings))
 		fileID = picked.FileID
@@ -172,17 +172,37 @@ func (a *GroupAssistant) executeSendStickerTool(ctx context.Context, chatID int6
 		return assistantToolError("no_sticker", "当前没有可用贴纸"), fmt.Errorf("no sticker")
 	}
 	opts := &tele.SendOptions{}
-	if a.toolRuntime != nil && a.toolRuntime.msg != nil {
-		opts.ThreadID = a.toolRuntime.msg.ThreadID
+	if assistantRuntime(ctx) != nil && assistantRuntime(ctx).msg != nil {
+		opts.ThreadID = assistantRuntime(ctx).msg.ThreadID
 		if delivery == "reply" {
-			opts.ReplyTo = a.toolRuntime.msg
+			opts.ReplyTo = assistantRuntime(ctx).msg
 		}
 	}
+	if rt := assistantRuntime(ctx); rt != nil && a.queries != nil && !a.service.assistantPreSendReview(ctx, rt.msg, rt.mode) {
+		return assistantToolError("canceled", "消息已失效或助手已关闭"), context.Canceled
+	}
+	if err := assistantReserveMedia(ctx, "sticker:"+fileID); err != nil {
+		return assistantToolError("already_attempted", err.Error()), err
+	}
+	if rt := assistantRuntime(ctx); rt != nil {
+		rt.deliveryUncertain = true
+	}
 	sent, err := a.service.sendAssistantSticker(ctx, &tele.Chat{ID: chatID}, fileID, opts)
+	if err == nil && (sent == nil || sent.ID == 0) {
+		err = fmt.Errorf("贴纸发送未确认")
+	}
 	if err != nil {
 		return assistantToolError("send_failed", "贴纸发送失败"), err
 	}
-	_ = sent
+	if rt := assistantRuntime(ctx); rt != nil {
+		rt.stickerSent = true
+		rt.deliveryUncertain = false
+		if sent != nil && rt.msg != nil {
+			if err := a.service.storeAssistantDelivery(ctx, rt.msg, policy, "[贴纸] "+query, sent, opts); err != nil {
+				return assistantToolError("storage_failed", "贴纸已发送但归档失败，不得重发"), err
+			}
+		}
+	}
 	if a.queries != nil {
 		_ = a.queries.MarkAssistantStickerSent(ctx, chatID, fileID)
 	}

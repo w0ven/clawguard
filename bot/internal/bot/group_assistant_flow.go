@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"html"
 	"strings"
 	"time"
 	"unicode"
@@ -133,8 +132,10 @@ func (s *Service) handleApprovedAssistantMessage(ctx context.Context, msg *tele.
 		text = strings.TrimSpace(msg.Caption)
 	}
 	if text == "" {
-		s.assistant.collectApprovedSticker(ctx, msg)
-		return nil
+		if msg.Photo == nil && msg.Sticker == nil && msg.Animation == nil {
+			return nil
+		}
+		text = "[已审核媒体] " + assistantMessageType(msg)
 	}
 	if isEdited {
 		// An eligible edit updates an existing approved source only. It never
@@ -157,26 +158,28 @@ func (s *Service) handleApprovedAssistantMessage(ctx context.Context, msg *tele.
 			authority: authority, sourceType: sourceType, sourceChat: msg.Chat.ID, operatorID: msg.Sender.ID})
 	}
 	// Approved text is the only input eligible for chat, learning, and style
-	// collection. Explicit @/reply and an active follow-up session are direct;
-	// unsolicited interjection remains opt-in and passes two separate gates.
+	// collection. SGB explicit @/reply forces casual; unaddressed messages
+	// use decision only when proactive interjection is explicitly enabled.
 	if policy.MimicTargetUserID != 0 {
 		s.assistant.collectMimicSample(ctx, policy, msg.Chat.ID, msg.Sender.ID, text)
 	}
 	if !policy.ChatEnabled || keywordReplied {
 		return nil
 	}
-	direct := assistantMentionsBot(msg, s.bot) || assistantRepliesToBot(msg, s.bot) || s.assistant.shouldTrigger(msg, policy)
+	direct := assistantMentionsBot(msg, s.bot) || assistantRepliesToBot(msg, s.bot)
+	// Resolve unsolicited-chat eligibility after batching: a same-sender
+	// supplement may belong to a pending direct turn even with proactive off.
+	if s.assistant.enqueueReplyBatch(s, msg, text, direct, isAdmin) {
+		return nil
+	}
 	mode := assistantReplyDirect
 	if !direct {
-		if !policy.ProactiveInterjectEnabled {
+		if !policy.ProactiveInterjectEnabled || policy.TriggerMode == "mention_only" {
 			return nil
 		}
 		mode = assistantReplyJoin
 	}
 
-	if s.assistant.enqueueReplyBatch(s, msg, text, direct, isAdmin) {
-		return nil
-	}
 	return s.processAssistantReplyNow(ctx, msg, text, policy, direct, mode, isAdmin, 1)
 }
 
@@ -197,7 +200,7 @@ func (s *Service) processQueuedAssistantReply(ctx context.Context, msg *tele.Mes
 	mode := assistantReplyJoin
 	if direct {
 		mode = assistantReplyDirect
-	} else if !policy.ProactiveInterjectEnabled {
+	} else if !policy.ProactiveInterjectEnabled || policy.TriggerMode == "mention_only" {
 		return nil
 	}
 	return s.processAssistantReplyNow(ctx, msg, text, policy, direct, mode, isAdmin, mergedCount)
@@ -205,6 +208,9 @@ func (s *Service) processQueuedAssistantReply(ctx context.Context, msg *tele.Mes
 
 func (s *Service) processAssistantReplyNow(ctx context.Context, msg *tele.Message, text string, policy store.GroupAssistantPolicy, direct bool, mode assistantReplyMode, isAdmin bool, mergedCount int) error {
 	settings := s.assistant.loadRuntimeSettings(ctx)
+	replyCtx, replyCancel := context.WithTimeout(ctx, assistantReplyTimeout(settings))
+	defer replyCancel()
+	ctx = replyCtx
 	roles := parseAssistantRoleSet(settings.ModelRoles)
 	pool, err := s.assistant.loadPool(ctx, msg.Chat.ID)
 	if err != nil {
@@ -214,7 +220,6 @@ func (s *Service) processAssistantReplyNow(ctx context.Context, msg *tele.Messag
 		}
 		return err
 	}
-	pool = applyAssistantRolesToPool(pool, roles, policy)
 	readiness := s.assistant.ChatReadinessForPool(pool)
 	if !readiness.CanChat {
 		reason := "聊天模型未就绪"
@@ -224,7 +229,7 @@ func (s *Service) processAssistantReplyNow(ctx context.Context, msg *tele.Messag
 		s.logger.Info("group assistant chat skipped", zap.Int64("chat_id", msg.Chat.ID), zap.String("reason", reason))
 		return nil
 	}
-	memories, err := s.assistant.loadMemories(ctx, msg.Chat.ID, text)
+	memories, err := s.assistant.loadMemories(ctx, msg.Chat.ID, "")
 	if err != nil {
 		return err
 	}
@@ -242,18 +247,12 @@ func (s *Service) processAssistantReplyNow(ctx context.Context, msg *tele.Messag
 	for left, right := 0, len(history)-1; left < right; left, right = left+1, right-1 {
 		history[left], history[right] = history[right], history[left]
 	}
+	history = assistantExcludeBatchHistory(ctx, history)
 	history = s.assistant.compressHotWindow(ctx, msg.Chat.ID, pool, policy, history, settings, roles)
-	if !direct && !assistantHardInterjectionGate(msg, history, s.bot) {
-		return nil
-	}
 	current := stripAssistantMention(text, s.bot)
 	sender := s.assistant.assistantPromptSender(ctx, msg, isAdmin)
 	if !direct && !s.assistant.decideInterjection(ctx, msg, policy, pool, history, current, current, mergedCount, sender) {
 		return nil
-	}
-	messages := assistantUntrustedContextWithSender(policy, memories, history, current, sender)
-	if len(messages) > 0 {
-		messages[len(messages)-1].Content = s.assistant.visionMessageParts(ctx, msg, current, roles)
 	}
 	overrides := s.assistant.loadPromptOverrides(ctx, msg.Chat.ID)
 	system := assistantSystemPromptForModeWithOverrides(policy, string(mode), overrides) + "\n" + assistantBotIdentityBlock(s.bot) + "\n" + assistantCurrentSenderBlock(sender)
@@ -263,80 +262,20 @@ func (s *Service) processAssistantReplyNow(ctx context.Context, msg *tele.Messag
 	if ttsBlock := assistantTTSPreferenceBlock(policy.TTSMode, s.assistant.assistantTTSReady(settings)); ttsBlock != "" {
 		system += "\n" + ttsBlock
 	}
-	s.assistant.toolRuntime = &assistantToolRuntime{msg: msg, mode: mode, settings: settings, roles: roles, current: current}
-	defer func() { s.assistant.toolRuntime = nil }()
-	replyCtx, replyCancel := context.WithTimeout(ctx, assistantReplyTimeout(settings))
-	defer replyCancel()
-	answer, _, err := s.assistant.dispatchTools(replyCtx, msg.Chat.ID, pool, policy, system, messages, assistantToolsFor(policy, settings, s.assistant.assistantTTSReady(settings)))
+	runtime := &assistantToolRuntime{msg: msg, mode: mode, settings: settings, roles: roles, current: current}
+	ctx = withAssistantRuntime(ctx, runtime)
+	targetPrompt, targets := assistantReplyTargets(ctx, msg, history)
+	runtime.replyTargets = targets
+	system += "\n[TASK_PROMPT]\n" + assistantSkillPrompt + "\n" + assistantReplyProtocol + "\n" + targetPrompt
+	index := s.assistant.recallIndex(ctx, msg.Chat.ID, int32(msg.ThreadID), current, history, settings)
+	messages := assistantBudgetedContext(system, policy, memories, history, current, sender, index)
+	messages[len(messages)-1].Content = s.assistant.describeAssistantVisual(ctx, msg, current, pool, policy)
+	answer, _, err := s.assistant.dispatchTools(ctx, msg.Chat.ID, pool, policy, system, messages, assistantToolsFor(policy, settings, s.assistant.assistantTTSReady(settings)))
 	if err != nil {
 		s.logger.Warn("group assistant chat failed", zap.Error(err), zap.Int64("chat_id", msg.Chat.ID), zap.Int("message_id", msg.ID))
 		return nil
 	}
-	answer = strings.TrimSpace(answer)
-	if answer == "" {
-		return nil
-	}
-	if !s.assistantPreSendReview(ctx, msg, mode) {
-		s.logger.Info("group assistant response dropped before send", zap.Int64("chat_id", msg.Chat.ID), zap.Int("message_id", msg.ID))
-		return nil
-	}
-	sendCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
-	defer cancel()
-	sendOptions := &tele.SendOptions{ParseMode: tele.ModeHTML, ThreadID: msg.ThreadID}
-	if mode == assistantReplyDirect {
-		sendOptions.ReplyTo = msg
-	}
-	replySourceID := assistantOutgoingReplySourceID(sendOptions)
-	sent, err := s.sendThrottled(sendCtx, msg.Chat, html.EscapeString(truncateAssistant(answer, assistantMaxTelegramText)), sendOptions)
-	if err != nil {
-		s.logger.Warn("send group assistant response failed", zap.Error(err), zap.Int64("chat_id", msg.Chat.ID), zap.Int("message_id", msg.ID))
-		return nil
-	}
-	if normalizeAssistantTTSMode(policy.TTSMode) == assistantTTSModeAlways {
-		if !settings.TTSEnabled || !s.assistant.assistantTTSReady(settings) {
-			s.assistant.logTTSSkip(msg.Chat.ID, "始终语音已开，但全局未启用或未配置密钥，不假装发送成功")
-		} else {
-			synth := s.assistant.ttsSynthesizer(settings)
-			ttsResult := synth.Synthesize(sendCtx, answer)
-			if !ttsResult.OK {
-				s.assistant.logTTSSkip(msg.Chat.ID, "始终语音合成失败："+ttsResult.Error)
-			} else if _, voiceErr := s.sendAssistantVoice(sendCtx, msg.Chat, ttsResult.Audio, ttsResult.Format, sendOptions); voiceErr != nil {
-				s.assistant.logTTSSkip(msg.Chat.ID, "始终语音发送失败")
-			}
-		}
-	}
-	assistantMessageID := int64(0)
-	if sent != nil {
-		assistantMessageID = int64(sent.ID)
-	}
-	if assistantMessageID == 0 {
-		assistantMessageID = -time.Now().UnixNano()
-	}
-	retentionDays := policy.RetentionDays
-	if retentionDays <= 0 {
-		retentionDays = assistantDefaultRetentionDays
-	}
-	expiresAt := time.Now().UTC().Add(time.Duration(retentionDays) * 24 * time.Hour)
-	hash := sha256.Sum256([]byte(answer))
-	botID := int64(0)
-	botName := ""
-	if s.bot != nil && s.bot.Me != nil {
-		botID = s.bot.Me.ID
-		botName = s.bot.Me.Username
-	}
-	_, err = s.queries.UpsertGroupAssistantMessage(ctx, store.UpsertGroupAssistantMessageParams{
-		ChatID: msg.Chat.ID, ThreadID: int32(msg.ThreadID), TelegramMessageID: assistantMessageID,
-		SenderID: botID, SenderName: botName, Role: "assistant", Text: answer,
-		Approved: true, Delivered: true, ContentHash: hex.EncodeToString(hash[:]), ExpiresAt: expiresAt,
-		SourceType: "telegram_assistant_reply", SourceID: replySourceID,
-	})
-	if err != nil {
-		s.logger.Warn("store group assistant response failed", zap.Error(err), zap.Int64("chat_id", msg.Chat.ID))
-	}
-	if mode == assistantReplyDirect {
-		s.assistant.markSession(msg, policy)
-	}
-	return nil
+	return s.deliverAssistantReply(ctx, msg, policy, mode, settings, pool, history, answer)
 }
 
 func assistantMentionsOtherUser(msg *tele.Message, bot *tele.Bot) bool {
@@ -469,7 +408,6 @@ func (a *GroupAssistant) decideInterjection(ctx context.Context, msg *tele.Messa
 	}
 	settings := a.loadRuntimeSettings(ctx)
 	roles := parseAssistantRoleSet(settings.ModelRoles)
-	pool = applyAssistantRolesToPool(pool, roles, policy)
 	task := "chat"
 	if _, ok := assistantTaskEndpointIDs(pool, "decision"); ok {
 		task = "decision"
@@ -497,6 +435,14 @@ func (s *Service) assistantPreSendReview(ctx context.Context, msg *tele.Message,
 	if s == nil || s.assistant == nil || s.queries == nil || msg == nil || msg.Chat == nil || ctx == nil || ctx.Err() != nil {
 		return false
 	}
+	if sources, ok := ctx.Value(assistantBatchSourcesKey{}).(map[int64]string); ok {
+		for id, hash := range sources {
+			valid, err := s.queries.AssistantRecallSourceValid(ctx, msg.Chat.ID, id, hash)
+			if err != nil || !valid {
+				return false
+			}
+		}
+	}
 	fresh, err := s.assistant.Policy(ctx, msg.Chat.ID)
 	if err != nil || !fresh.ChatEnabled {
 		return false
@@ -504,8 +450,19 @@ func (s *Service) assistantPreSendReview(ctx context.Context, msg *tele.Message,
 	if mode == assistantReplyJoin && !fresh.ProactiveInterjectEnabled {
 		return false
 	}
-	latest, err := s.queries.GetLatestGroupAssistantUserMessage(ctx, msg.Chat.ID)
+	latest, err := s.queries.LatestAssistantUserInThread(ctx, msg.Chat.ID, int32(msg.ThreadID))
 	if err != nil || latest.ChatID != msg.Chat.ID || latest.TelegramMessageID != int64(msg.ID) {
+		return false
+	}
+	original := strings.TrimSpace(msg.Text)
+	if original == "" {
+		original = strings.TrimSpace(msg.Caption)
+	}
+	if original == "" {
+		original = "[已审核媒体] " + assistantMessageType(msg)
+	}
+	hash := sha256.Sum256([]byte(original))
+	if latest.ContentHash != hex.EncodeToString(hash[:]) {
 		return false
 	}
 	readiness := s.assistant.ChatReadiness(ctx, msg.Chat.ID)

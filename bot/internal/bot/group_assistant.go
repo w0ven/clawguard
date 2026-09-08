@@ -33,17 +33,17 @@ const (
 	assistantMaxFallbackAttempts  = 16
 	assistantMaxChatTokens        = 1200
 	assistantMaxLearningTokens    = 700
-	assistantMaxToolRounds        = 4
+	assistantMaxToolRounds        = 6
 	assistantMaxToolCalls         = 8
-	assistantMaxHistoryMessages   = 60
+	assistantMaxHistoryMessages   = 500
 	assistantMaxMemoryItems       = 50
 	assistantMaxTelegramText      = 4000
 	assistantMaxWebBytes          = 2 << 20
 	assistantMaxWebRedirects      = 3
 	assistantMimicSampleWindow    = 200
 	assistantColdCheckInterval    = time.Minute
-	assistantReplyMergeWindow     = 400 * time.Millisecond
-	assistantReplyMergeMaxItems   = 8
+	assistantReplyMergeWindow     = 5 * time.Second
+	assistantReplyMergeMaxItems   = 20
 )
 
 var assistantToolNames = []string{"knowledge_query", "conversation_recall", "webfetch_readonly", "send_sticker", "doubao_tts"}
@@ -57,6 +57,7 @@ type AssistantPoolEndpoint struct {
 	ModelRef        string `json:"model_ref"`
 	Role            string `json:"role"`
 	Priority        int    `json:"priority"`
+	Weight          int    `json:"weight,omitempty"`
 	MaxConcurrency  int    `json:"max_concurrency"`
 	TimeoutMs       int    `json:"timeout_ms"`
 	CooldownSeconds int    `json:"cooldown_duration_sec"`
@@ -64,11 +65,18 @@ type AssistantPoolEndpoint struct {
 }
 
 type AssistantTaskAssignment struct {
-	Primary string   `json:"primary"`
-	Backups []string `json:"backups"`
+	// Inherited is projection provenance, never stored or accepted from JSON.
+	// Equal endpoint chains can still be independently configured roles.
+	Inherited   bool     `json:"-"`
+	Strategy    string   `json:"strategy,omitempty"`
+	Temperature *float64 `json:"temperature,omitempty"`
+	MaxTokens   int      `json:"max_tokens,omitempty"`
+	Primary     string   `json:"primary"`
+	Backups     []string `json:"backups"`
 }
 
 type AssistantPoolConfig struct {
+	InheritGlobal   *bool                              `json:"inherit_global,omitempty"`
 	Strategy        string                             `json:"strategy"`
 	TaskAssignments map[string]AssistantTaskAssignment `json:"task_assignments"`
 	Endpoints       []AssistantPoolEndpoint            `json:"endpoints"`
@@ -163,8 +171,10 @@ type assistantReplyBatchItem struct {
 }
 
 type assistantReplyBatch struct {
-	items  []assistantReplyBatchItem
-	direct bool
+	items   []assistantReplyBatchItem
+	direct  bool
+	flushAt time.Time
+	wake    chan struct{}
 }
 
 type AssistantReadiness struct {
@@ -182,6 +192,8 @@ type GroupAssistant struct {
 	logger    *zap.Logger
 	ctx       context.Context
 
+	scheduleMu   sync.Mutex
+	weights      map[string]map[string]int
 	runtimeMu    sync.Mutex
 	runtimes     map[string]*assistantEndpointRuntime
 	sessionsMu   sync.Mutex
@@ -195,7 +207,6 @@ type GroupAssistant struct {
 	coldHandled  map[int64]int64
 	coldRunning  map[int64]int64
 	ttsSynth     assistantTTSSynthesizer
-	toolRuntime  *assistantToolRuntime
 }
 
 func NewGroupAssistant(service *Service) *GroupAssistant {
@@ -229,6 +240,8 @@ func NewGroupAssistant(service *Service) *GroupAssistant {
 		service.wg.Add(1)
 		go a.retentionWorker()
 		service.wg.Add(1)
+		go a.assistantIndexWorker()
+		service.wg.Add(1)
 		go a.styleWorker()
 		service.wg.Add(1)
 		go a.coldTopicWorker()
@@ -255,6 +268,7 @@ func (a *GroupAssistant) enqueueReplyBatch(service *Service, msg *tele.Message, 
 	if key == "" {
 		return false
 	}
+	window := assistantMergeWindow(a.loadRuntimeSettings(a.ctx))
 	copyMessage := *msg
 	item := assistantReplyBatchItem{msg: &copyMessage, text: text, direct: direct, isAdmin: isAdmin}
 	a.replyMu.Lock()
@@ -263,7 +277,7 @@ func (a *GroupAssistant) enqueueReplyBatch(service *Service, msg *tele.Message, 
 	}
 	batch, exists := a.replyBatches[key]
 	if !exists {
-		batch = &assistantReplyBatch{}
+		batch = &assistantReplyBatch{wake: make(chan struct{}, 1)}
 		a.replyBatches[key] = batch
 	}
 	batch.items = append(batch.items, item)
@@ -271,6 +285,11 @@ func (a *GroupAssistant) enqueueReplyBatch(service *Service, msg *tele.Message, 
 		batch.items = batch.items[len(batch.items)-assistantReplyMergeMaxItems:]
 	}
 	batch.direct = batch.direct || direct
+	batch.flushAt = assistantNextFlushAt(item, len(batch.items), window, time.Now(), batch.flushAt)
+	select {
+	case batch.wake <- struct{}{}:
+	default:
+	}
 	first := !exists
 	a.replyMu.Unlock()
 	if first {
@@ -280,21 +299,27 @@ func (a *GroupAssistant) enqueueReplyBatch(service *Service, msg *tele.Message, 
 }
 
 func (a *GroupAssistant) flushReplyBatch(key string, batch *assistantReplyBatch, service *Service) {
-	window := assistantReplyMergeWindow
-	if a.queries != nil {
-		window = assistantMergeWindow(a.loadRuntimeSettings(a.ctx))
-	}
-	timer := time.NewTimer(window)
-	defer timer.Stop()
-	select {
-	case <-timer.C:
-	case <-a.ctx.Done():
+	for {
 		a.replyMu.Lock()
-		if a.replyBatches[key] == batch {
-			delete(a.replyBatches, key)
-		}
+		remaining := time.Until(batch.flushAt)
 		a.replyMu.Unlock()
-		return
+		if remaining <= 0 {
+			break
+		}
+		timer := time.NewTimer(remaining)
+		select {
+		case <-timer.C:
+		case <-batch.wake:
+		case <-a.ctx.Done():
+			timer.Stop()
+			a.replyMu.Lock()
+			if a.replyBatches[key] == batch {
+				delete(a.replyBatches, key)
+			}
+			a.replyMu.Unlock()
+			return
+		}
+		timer.Stop()
 	}
 	a.replyMu.Lock()
 	if a.replyBatches[key] != batch {
@@ -303,25 +328,42 @@ func (a *GroupAssistant) flushReplyBatch(key string, batch *assistantReplyBatch,
 	}
 	delete(a.replyBatches, key)
 	items := append([]assistantReplyBatchItem(nil), batch.items...)
-	direct := batch.direct
+	direct := false
 	a.replyMu.Unlock()
 	if len(items) == 0 || a.ctx.Err() != nil {
 		return
 	}
-	isAdmin := items[len(items)-1].isAdmin
-	latest := items[len(items)-1].msg
+	isAdmin := false
+	var latest *tele.Message
 	parts := make([]string, 0, len(items))
+	sources := map[int64]string{}
+	validItems := []assistantReplyBatchItem{}
 	for _, item := range items {
-		if strings.TrimSpace(item.text) != "" {
-			parts = append(parts, strings.TrimSpace(item.text))
+		if item.msg == nil || item.msg.Chat == nil || strings.TrimSpace(item.text) == "" {
+			continue
 		}
+		hash := sha256.Sum256([]byte(item.text))
+		hashText := hex.EncodeToString(hash[:])
+		if a.queries != nil {
+			valid, err := a.queries.AssistantRecallSourceValid(a.ctx, item.msg.Chat.ID, int64(item.msg.ID), hashText)
+			if err != nil || !valid {
+				continue
+			}
+		}
+		validItems = append(validItems, item)
+		latest, isAdmin = item.msg, item.isAdmin
+		direct = direct || item.direct
+		sources[int64(item.msg.ID)] = hashText
+		parts = append(parts, strings.TrimSpace(item.text))
 	}
 	if latest == nil || len(parts) == 0 {
 		return
 	}
 	mergedCount := len(parts)
-	merged := truncateAssistant(strings.Join(parts, "\n"), 1800)
-	if err := service.processQueuedAssistantReply(a.ctx, latest, merged, direct, isAdmin, mergedCount); err != nil {
+	merged := strings.Join(parts, "\n")
+	batchCtx := context.WithValue(a.ctx, assistantBatchSourcesKey{}, sources)
+	batchCtx = context.WithValue(batchCtx, assistantBatchItemsKey{}, validItems)
+	if err := service.processQueuedAssistantReply(batchCtx, latest, merged, direct, isAdmin, mergedCount); err != nil {
 		a.logger.Debug("queued group assistant reply failed", zap.Error(err), zap.Int64("chat_id", latest.Chat.ID), zap.Int("message_id", latest.ID))
 	}
 }
@@ -344,11 +386,11 @@ func (a *GroupAssistant) ValidatePoolConfig(cfg AssistantPoolConfig, taskTools b
 	if strings.TrimSpace(cfg.Strategy) == "" {
 		cfg.Strategy = "primary-overflow"
 	}
-	if cfg.Strategy != "primary-overflow" {
+	if cfg.Strategy != "primary-overflow" && cfg.Strategy != "weighted" {
 		return fmt.Errorf("unsupported pool strategy")
 	}
-	if len(cfg.Endpoints) == 0 || len(cfg.Endpoints) > 16 {
-		return fmt.Errorf("pool endpoints must contain 1 to 16 items")
+	if len(cfg.Endpoints) == 0 || len(cfg.Endpoints) > 96 {
+		return fmt.Errorf("模型池需包含1至96个角色引用，每个任务最多16个模型")
 	}
 	seen := make(map[string]struct{}, len(cfg.Endpoints))
 	chatEndpointIDs := make(map[string]struct{})
@@ -379,7 +421,7 @@ func (a *GroupAssistant) ValidatePoolConfig(cfg AssistantPoolConfig, taskTools b
 		}
 		if taskTools {
 			if _, chatEndpoint := chatEndpointIDs[ep.ID]; chatEndpoint && !model.SupportsTools {
-				return fmt.Errorf("chat endpoint %q does not support tools", ep.ID)
+				return fmt.Errorf("聊天模型 %q 未声明技能调用（tools）能力，请到现有模型管理核实声明或选择兼容模型", ep.ModelRef)
 			}
 		}
 		if a.providers == nil {
@@ -392,6 +434,9 @@ func (a *GroupAssistant) ValidatePoolConfig(cfg AssistantPoolConfig, taskTools b
 		if providerInfo, ok := a.providers.GetByKey(provider); !ok || !providerInfo.Enabled {
 			return fmt.Errorf("endpoint %q provider is unavailable", ep.ID)
 		}
+		if ep.Weight < 0 || ep.Weight > 1000 {
+			return fmt.Errorf("模型 %q 权重应为 1–1000", ep.ID)
+		}
 		if ep.MaxConcurrency < 1 || ep.MaxConcurrency > 100 {
 			return fmt.Errorf("endpoint %q max concurrency out of range", ep.ID)
 		}
@@ -402,10 +447,36 @@ func (a *GroupAssistant) ValidatePoolConfig(cfg AssistantPoolConfig, taskTools b
 			return fmt.Errorf("endpoint %q cooldown out of range", ep.ID)
 		}
 	}
-	for _, task := range []string{"chat", "learning"} {
-		assignment, ok := cfg.TaskAssignments[task]
-		if !ok || strings.TrimSpace(assignment.Primary) == "" {
-			return fmt.Errorf("missing %s primary endpoint", task)
+	if cfg.TaskAssignments["chat"].Primary == "" {
+		return fmt.Errorf("请选择聊天主模型")
+	}
+	for task, assignment := range cfg.TaskAssignments {
+		switch task {
+		case "chat", "learning", "decision", "vision", "compress", "vector":
+		default:
+			return fmt.Errorf("未知助手任务：%s", task)
+		}
+		if assignment.Strategy != "" && assignment.Strategy != "primary-overflow" && assignment.Strategy != "weighted" {
+			return fmt.Errorf("无效任务负载策略")
+		}
+		if assignment.Primary == "" {
+			continue
+		}
+		if len(assignment.Backups) > 15 {
+			return fmt.Errorf("每个任务最多16个模型")
+		}
+		if assignment.MaxTokens < 0 || assignment.MaxTokens > 32768 || (assignment.Temperature != nil && (*assignment.Temperature < 0 || *assignment.Temperature > 2)) {
+			return fmt.Errorf("角色生成参数超出范围")
+		}
+		if task == "vision" || task == "vector" {
+			for _, id := range append([]string{assignment.Primary}, assignment.Backups...) {
+				ep, ok := endpointByID(cfg, id)
+				if ok {
+					if err := a.ValidateTaskModelRef(ep.ModelRef, task); err != nil {
+						return err
+					}
+				}
+			}
 		}
 		if _, ok := seen[assignment.Primary]; !ok {
 			return fmt.Errorf("unknown %s primary endpoint", task)
@@ -440,7 +511,7 @@ func (a *GroupAssistant) ValidateModelRef(raw string, requireTools bool) error {
 		return fmt.Errorf("model is disabled or unknown")
 	}
 	if requireTools && !model.SupportsTools {
-		return fmt.Errorf("model does not support tools")
+		return fmt.Errorf("模型未声明技能调用（tools）能力，请到现有模型管理核实声明或选择兼容模型")
 	}
 	provider, _, parsed := ref.Parse()
 	if !parsed {
@@ -469,6 +540,22 @@ func normalizeAssistantModelRef(raw string) (ai.ModelRef, bool) {
 // enabled, its provider is enabled, and its registry capability declaration
 // explicitly says that read-only tools are supported.
 func (a *GroupAssistant) ChatReadinessForPool(cfg AssistantPoolConfig) AssistantReadiness {
+	first := a.assistantPrimaryReadiness(cfg)
+	if first.CanChat {
+		return first
+	}
+	ids, _ := assistantTaskEndpointIDs(cfg, "chat")
+	for _, id := range ids {
+		probe := cfg
+		probe.TaskAssignments = map[string]AssistantTaskAssignment{"chat": {Primary: id}}
+		if ready := a.assistantPrimaryReadiness(probe); ready.CanChat {
+			return ready
+		}
+	}
+	return first
+}
+
+func (a *GroupAssistant) assistantPrimaryReadiness(cfg AssistantPoolConfig) AssistantReadiness {
 	readiness := AssistantReadiness{Blockers: []string{}}
 	assignment, ok := cfg.TaskAssignments["chat"]
 	if !ok || strings.TrimSpace(assignment.Primary) == "" {
@@ -518,11 +605,7 @@ func (a *GroupAssistant) ChatReadinessForPool(cfg AssistantPoolConfig) Assistant
 }
 
 func (a *GroupAssistant) ChatReadiness(ctx context.Context, chatID int64) AssistantReadiness {
-	pool, err := a.Pool(ctx, chatID)
-	if err != nil {
-		return AssistantReadiness{Blockers: []string{"还不能回复：先选聊天模型"}}
-	}
-	cfg, err := decodeAssistantPool(pool.Config)
+	cfg, err := a.loadPool(ctx, chatID)
 	if err != nil {
 		return AssistantReadiness{Blockers: []string{"聊天模型池配置无效，请重新保存模型设置"}}
 	}
@@ -596,13 +679,28 @@ func (a *GroupAssistant) effectiveEndpointLimit(ctx context.Context, ref string,
 	if err != nil {
 		return fallback
 	}
-	limit := 0
+	limit := fallback
+	global := a.GlobalPool(a.loadRuntimeSettings(ctx).ModelRoles)
+	pools = append(pools, store.GroupAssistantPool{Config: EncodeAssistantPool(global)})
 	for _, pool := range pools {
 		cfg, decodeErr := decodeAssistantPool(pool.Config)
 		if decodeErr != nil {
 			continue
 		}
+		if cfg.InheritGlobal != nil && *cfg.InheritGlobal {
+			continue
+		}
+		used := map[string]bool{}
+		for _, assignment := range cfg.TaskAssignments {
+			used[assignment.Primary] = true
+			for _, id := range assignment.Backups {
+				used[id] = true
+			}
+		}
 		for _, ep := range cfg.Endpoints {
+			if !used[ep.ID] {
+				continue
+			}
 			epRef, ok := normalizeAssistantModelRef(ep.ModelRef)
 			if !ok || epRef.String() != ref || ep.MaxConcurrency < 1 {
 				continue
@@ -659,9 +757,13 @@ func (rt *assistantEndpointRuntime) releaseCanceledReservation() {
 }
 
 func (rt *assistantEndpointRuntime) release(success bool, err error, retryAfter time.Duration, fallbackCooldown time.Duration) {
+	rt.complete(success, err, retryAfter, fallbackCooldown, true)
+}
+
+func (rt *assistantEndpointRuntime) complete(success bool, err error, retryAfter time.Duration, fallbackCooldown time.Duration, release bool) {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
-	if rt.active > 0 {
+	if release && rt.active > 0 {
 		rt.active--
 	}
 	rt.lastEvent = time.Now().UTC()
@@ -710,6 +812,7 @@ type assistantLease struct {
 	reason   string
 	released bool
 	queued   bool
+	borrowed bool // synchronous embedding uses the parent's already-counted slot
 }
 
 func (l *assistantLease) finish(success bool, err error) {
@@ -717,8 +820,12 @@ func (l *assistantLease) finish(success bool, err error) {
 		return
 	}
 	l.released = true
+	if l.runtime != nil && (errors.Is(err, context.Canceled) || errors.Is(err, errAssistantPromptBudget)) {
+		l.discardReservation()
+		return
+	}
 	if l.runtime != nil {
-		l.runtime.release(success, err, 0, time.Duration(l.ep.CooldownSeconds)*time.Second)
+		l.runtime.complete(success, err, 0, time.Duration(l.ep.CooldownSeconds)*time.Second, !l.borrowed)
 	}
 }
 
@@ -856,7 +963,6 @@ func (a *GroupAssistant) acquireEndpointIDs(ctx context.Context, chatID int64, t
 		deadline = time.Now().Add(assistantDefaultQueueWait)
 	}
 	queued := false
-	primaryUnavailableReason := "primary_overflow_concurrency_full"
 	var lifecycleDone <-chan struct{}
 	if a.ctx != nil {
 		lifecycleDone = a.ctx.Done()
@@ -868,59 +974,22 @@ func (a *GroupAssistant) acquireEndpointIDs(ctx context.Context, chatID int64, t
 			}
 			return nil, err
 		}
-		primaryUnavailableReason = "primary_overflow_concurrency_full"
 		deferForQueuedChat := task == "learning" && a.hasQueuedChat()
 		if !deferForQueuedChat {
-			for idx, id := range ids {
-				if err := assistantAcquireContextError(ctx, a.ctx); err != nil {
-					if queued {
-						a.releaseQueuedWaiter(chatID, task)
-					}
-					return nil, err
+			lease, err := a.reserveAssistantCandidate(ctx, chatID, task, cfg, tools, ids)
+			if err != nil {
+				if queued {
+					a.releaseQueuedWaiter(chatID, task)
 				}
-				ep, found := endpointByID(cfg, id)
-				if !found {
-					continue
+				return nil, err
+			}
+			if lease != nil {
+				if queued {
+					lease.reason = "queue_released_" + lease.reason
+					a.markQueuedChatServed(task)
 				}
-				ref, parsed := normalizeAssistantModelRef(ep.ModelRef)
-				if !parsed || a.models == nil || a.providers == nil {
-					continue
-				}
-				model, exists := a.models.Get(ref)
-				if !exists || !model.Enabled || (tools && !model.SupportsTools) {
-					continue
-				}
-				provider, _, _ := ref.Parse()
-				if providerInfo, exists := a.providers.GetByKey(provider); !exists || !providerInfo.Enabled {
-					continue
-				}
-				limit := a.effectiveEndpointLimit(ctx, ref.String(), ep.MaxConcurrency)
-				rt := a.endpointRuntime(ref.String(), limit)
-				rt.setLimit(limit)
-				beforeStatus := rt.statusValue()
-				if rt.tryAcquire(time.Now()) {
-					if err := assistantAcquireContextError(ctx, a.ctx); err != nil {
-						rt.releaseCanceledReservation()
-						if queued {
-							a.releaseQueuedWaiter(chatID, task)
-						}
-						return nil, err
-					}
-					reason := "primary_selected"
-					if idx > 0 {
-						reason = primaryUnavailableReason
-					}
-					if idx == 0 {
-						primaryUnavailableReason = "primary_overflow_concurrency_full"
-					}
-					if queued {
-						reason = "queue_released_" + reason
-						a.markQueuedChatServed(task)
-					}
-					return &assistantLease{a: a, ep: ep, ref: ref, runtime: rt, reason: reason, queued: queued}, nil
-				} else if idx == 0 && (beforeStatus == "cooldown" || rt.statusValue() == "cooldown") {
-					primaryUnavailableReason = "primary_overflow_cooldown"
-				}
+				lease.queued = queued
+				return lease, nil
 			}
 		}
 		if !queued {
@@ -1064,6 +1133,9 @@ func (a *GroupAssistant) assistantFallbackEndpointIDs(cfg AssistantPoolConfig, t
 			break
 		}
 	}
+	if cfg.Strategy == "weighted" || cfg.TaskAssignments[task].Strategy == "weighted" {
+		start = 0
+	}
 	seenRefs := make(map[string]struct{}, len(attemptedRefs))
 	for ref := range attemptedRefs {
 		seenRefs[ref] = struct{}{}
@@ -1105,8 +1177,23 @@ func assistantFallbackLeaseReason(err error, previous AssistantPoolEndpoint) str
 }
 
 func (a *GroupAssistant) dispatchPlain(ctx context.Context, chatID int64, task string, cfg AssistantPoolConfig, policy store.GroupAssistantPolicy, req ai.CheckRequest) (*ai.ChatRawResult, AssistantPoolEndpoint, error) {
+	if params := cfg.TaskAssignments[task]; params.MaxTokens > 0 || params.Temperature != nil {
+		if params.MaxTokens > 0 {
+			req.MaxTokens = params.MaxTokens
+		}
+		if params.Temperature != nil {
+			req.Temperature = *params.Temperature
+		}
+	}
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	if task == "chat" {
+		messages, err := assistantFitPrompt(req.SystemPrompt, req.Messages, nil, req.MaxTokens)
+		if err != nil {
+			return nil, AssistantPoolEndpoint{}, err
+		}
+		req.Messages = messages
 	}
 	lease, err := a.acquire(ctx, chatID, task, cfg, false, policy)
 	if err != nil {
@@ -1288,13 +1375,27 @@ func (a *GroupAssistant) dispatchTools(ctx context.Context, chatID int64, cfg As
 		attemptMessages := append([]ai.Message(nil), messages...)
 		started := time.Now()
 		toolCalls := 0
+		mediaDelivered := func() bool { rt := assistantRuntime(ctx); return rt != nil && (rt.voiceSent || rt.stickerSent) }
 		var final string
 		var callErr error
 		toolsStarted := false
+		maxTokens, temperature := assistantMaxChatTokens, policy.Temperature
+		if params := cfg.TaskAssignments["chat"]; params.MaxTokens > 0 || params.Temperature != nil {
+			if params.MaxTokens > 0 {
+				maxTokens = params.MaxTokens
+			}
+			if params.Temperature != nil {
+				temperature = *params.Temperature
+			}
+		}
 		for round := 0; round < assistantMaxToolRounds; round++ {
+			attemptMessages, callErr = assistantFitPrompt(system, attemptMessages, tools, maxTokens)
+			if callErr != nil {
+				break
+			}
 			result, callErrForRound := toolClient.ChatWithTools(attemptCtx, ai.ToolChatRequest{
 				Model: assistantModelName(lease.ref), SystemPrompt: system, Messages: attemptMessages, Tools: tools,
-				MaxTokens: assistantMaxChatTokens, Temperature: policy.Temperature, Timeout: time.Duration(lease.ep.TimeoutMs) * time.Millisecond,
+				MaxTokens: maxTokens, Temperature: temperature, Timeout: time.Duration(lease.ep.TimeoutMs) * time.Millisecond,
 			})
 			if callErrForRound != nil {
 				if result != nil && len(result.ToolCalls) > 0 {
@@ -1308,15 +1409,25 @@ func (a *GroupAssistant) dispatchTools(ctx context.Context, chatID int64, cfg As
 				break
 			}
 			if len(result.ToolCalls) == 0 {
-				final = strings.TrimSpace(result.Content)
-				if final == "" {
-					callErr = fmt.Errorf("model returned empty assistant content")
+				if mediaDelivered() {
+					break
 				}
+				final = strings.TrimSpace(result.Content)
 				break
 			}
 			// Seeing a tool call binds the rest of this turn to this lease,
 			// even if executing the call or a later round fails.
 			toolsStarted = true
+			allowed := assistantMaxToolCalls - toolCalls
+			if allowed > 4 {
+				allowed = 4
+			}
+			if allowed <= 0 {
+				break
+			} // ordinary-chat fallback with actual tool transcript
+			if len(result.ToolCalls) > allowed {
+				result.ToolCalls = result.ToolCalls[:allowed]
+			}
 			attemptMessages = append(attemptMessages, ai.Message{Role: "assistant", Content: result.Content, ToolCalls: result.ToolCalls})
 			for _, call := range result.ToolCalls {
 				toolCalls++
@@ -1324,8 +1435,13 @@ func (a *GroupAssistant) dispatchTools(ctx context.Context, chatID int64, cfg As
 					callErr = fmt.Errorf("tool call budget exceeded")
 					break
 				}
-				content, execErr := a.executeReadOnlyTool(attemptCtx, chatID, policy, call)
+				toolCtx := context.WithValue(attemptCtx, assistantToolReservationKey{}, assistantToolReservation{chatID: chatID, lease: lease})
+				content, execErr := a.executeReadOnlyTool(toolCtx, chatID, policy, call)
 				attemptMessages = append(attemptMessages, ai.Message{Role: "tool", ToolCallID: call.ID, Name: call.Function.Name, Content: content})
+				if rt := assistantRuntime(ctx); rt != nil && rt.deliveryUncertain {
+					callErr = fmt.Errorf("媒体发送结果不确定，已停止本轮且不重试: %w", execErr)
+					break
+				}
 				if execErr != nil {
 					// A tool failure is data for the fixed endpoint, not a signal to
 					// silently restart the conversation on another endpoint.
@@ -1336,8 +1452,22 @@ func (a *GroupAssistant) dispatchTools(ctx context.Context, chatID int64, cfg As
 				break
 			}
 		}
-		if callErr == nil && final == "" {
-			callErr = fmt.Errorf("tool round limit reached without final answer")
+		if callErr == nil && final == "" && !mediaDelivered() {
+			// SGB ordinary-chat fallback after exhausted skill rounds. Stay on
+			// the same lease and feed the actual tool transcript, never replay tools.
+			plainSystem := system + "\n技能轮已结束，不再调用技能。根据真实结果给出简短回答；失败必须如实说明。"
+			plainMessages, plainErr := assistantFitPrompt(plainSystem, attemptMessages, nil, assistantMaxChatTokens)
+			var result *ai.ChatRawResult
+			if plainErr == nil {
+				result, plainErr = client.Chat(attemptCtx, ai.CheckRequest{Model: assistantModelName(lease.ref), SystemPrompt: plainSystem, Messages: plainMessages, MaxTokens: assistantMaxChatTokens, Temperature: policy.Temperature, Timeout: time.Duration(lease.ep.TimeoutMs) * time.Millisecond})
+			}
+			callErr = plainErr
+			if result != nil {
+				final = strings.TrimSpace(result.Content)
+			}
+			if callErr == nil && final == "" {
+				callErr = fmt.Errorf("tool round limit reached without final answer")
+			}
 		}
 		attemptCancel()
 		if contextErr := assistantAcquireContextError(ctx, a.ctx); contextErr != nil {
@@ -1458,9 +1588,11 @@ func assistantToolParameters(name string) map[string]any {
 			"limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 10},
 		}}
 	case "conversation_recall":
-		return map[string]any{"type": "object", "additionalProperties": false, "required": []string{"query"}, "properties": map[string]any{
-			"query": map[string]any{"type": "string", "maxLength": 200},
-			"limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 10},
+		return map[string]any{"type": "object", "additionalProperties": false, "properties": map[string]any{
+			"query":        map[string]any{"type": "string", "maxLength": 200},
+			"message_keys": map[string]any{"type": "array", "maxItems": 8, "uniqueItems": true, "items": map[string]any{"type": "string"}},
+			"before_after": map[string]any{"type": "integer", "minimum": 0, "maximum": 4, "default": 2},
+			"limit":        map[string]any{"type": "integer", "minimum": 1, "maximum": 24, "default": 12},
 		}}
 	case "webfetch_readonly":
 		return map[string]any{"type": "object", "additionalProperties": false, "required": []string{"url"}, "properties": map[string]any{
@@ -1491,11 +1623,8 @@ func assistantUntrustedContext(policy store.GroupAssistantPolicy, memories []sto
 }
 
 func (a *GroupAssistant) loadPool(ctx context.Context, chatID int64) (AssistantPoolConfig, error) {
-	pool, err := a.Pool(ctx, chatID)
-	if err != nil {
-		return AssistantPoolConfig{}, err
-	}
-	return decodeAssistantPool(pool.Config)
+	cfg, _, err := a.EffectivePool(ctx, chatID)
+	return cfg, err
 }
 
 func (a *GroupAssistant) loadMemories(ctx context.Context, chatID int64, query string) ([]store.GroupAssistantMemory, error) {
@@ -1582,34 +1711,7 @@ func (a *GroupAssistant) executeReadOnlyTool(ctx context.Context, chatID int64, 
 		}
 		return assistantJSONResult(result), nil
 	case "conversation_recall":
-		if err := validateAssistantToolKeys(args, "query", "limit"); err != nil {
-			return assistantToolError("invalid_arguments", err.Error()), err
-		}
-		query, _ := args["query"].(string)
-		query = strings.TrimSpace(query)
-		if query == "" || len(query) > 200 {
-			return assistantToolError("invalid_arguments", "query不能为空且不能超过200字符"), fmt.Errorf("invalid query")
-		}
-		limit, limitErr := assistantToolLimit(args)
-		if limitErr != nil {
-			return assistantToolError("invalid_arguments", limitErr.Error()), limitErr
-		}
-		settings := a.loadRuntimeSettings(ctx)
-		roles := parseAssistantRoleSet(settings.ModelRoles)
-		if a.toolRuntime != nil {
-			settings = a.toolRuntime.settings
-			roles = a.toolRuntime.roles
-		}
-		items, err := a.recallWithVector(ctx, chatID, query, limit, settings, roles)
-		if err != nil {
-			return assistantToolError("storage_unavailable", "历史暂时不可用"), err
-		}
-		result := make([]map[string]any, 0, len(items))
-		for _, item := range items {
-			result = append(result, map[string]any{"role": item.Role, "text": item.Text, "message_id": item.TelegramMessageID,
-				"created_at": item.CreatedAt, "source": map[string]any{"type": item.SourceType, "id": item.SourceID}})
-		}
-		return assistantJSONResult(result), nil
+		return a.executeAssistantRecall(ctx, chatID, args)
 	case "webfetch_readonly":
 		if err := validateAssistantToolKeys(args, "url"); err != nil {
 			return assistantToolError("invalid_arguments", err.Error()), err
@@ -1687,16 +1789,15 @@ func assistantToolError(code, message string) string {
 }
 
 func (a *GroupAssistant) Status(ctx context.Context, chatID int64) (AssistantStatus, error) {
-	pool, err := a.Pool(ctx, chatID)
-	if err != nil {
-		return AssistantStatus{}, err
-	}
-	cfg, err := decodeAssistantPool(pool.Config)
+	cfg, err := a.loadPool(ctx, chatID)
 	if err != nil {
 		return AssistantStatus{}, err
 	}
 	readiness := a.ChatReadinessForPool(cfg)
-	status := AssistantStatus{ChatID: chatID, ActiveStrategy: pool.Strategy, Endpoints: make([]AssistantEndpointStatus, 0, len(cfg.Endpoints)), RemoteQuotaNote: "未知（Provider未提供可靠远程配额接口，仅按本地并发与限流反馈控制）", CanChat: readiness.CanChat, Blockers: readiness.Blockers}
+	status := AssistantStatus{ChatID: chatID, ActiveStrategy: cfg.Strategy, Endpoints: make([]AssistantEndpointStatus, 0, len(cfg.Endpoints)), RemoteQuotaNote: "未知（Provider未提供可靠远程配额接口，仅按本地并发与限流反馈控制）", CanChat: readiness.CanChat, Blockers: readiness.Blockers}
+	if strategy := cfg.TaskAssignments["chat"].Strategy; strategy != "" {
+		status.ActiveStrategy = strategy
+	}
 	for _, ep := range cfg.Endpoints {
 		ref, _ := normalizeAssistantModelRef(ep.ModelRef)
 		effectiveLimit := a.effectiveEndpointLimit(ctx, ref.String(), ep.MaxConcurrency)
@@ -1728,6 +1829,20 @@ func (a *GroupAssistant) Status(ctx context.Context, chatID int64) (AssistantSta
 			rt.mu.Unlock()
 		} else {
 			item.Status = "unknown"
+		}
+		modelEnabled := false
+		if a.models != nil {
+			model, ok := a.models.Get(ref)
+			modelEnabled = ok && model.Enabled
+		}
+		providerEnabled := false
+		if a.providers != nil {
+			key, _, _ := ref.Parse()
+			provider, ok := a.providers.GetByKey(key)
+			providerEnabled = ok && provider.Enabled
+		}
+		if !modelEnabled || !providerEnabled {
+			item.Status = "disabled"
 		}
 		status.Endpoints = append(status.Endpoints, item)
 	}
@@ -1891,12 +2006,10 @@ func (a *GroupAssistant) runColdTopic(ctx context.Context, policy store.GroupAss
 	}
 	defer a.releaseColdTopic(policy.ChatID, latest.ID)
 	settings := a.loadRuntimeSettings(ctx)
-	roles := parseAssistantRoleSet(settings.ModelRoles)
 	pool, err := a.loadPool(ctx, policy.ChatID)
 	if err != nil {
 		return err
 	}
-	pool = applyAssistantRolesToPool(pool, roles, policy)
 	readiness := a.ChatReadinessForPool(pool)
 	if !readiness.CanChat {
 		return nil
@@ -1905,7 +2018,7 @@ func (a *GroupAssistant) runColdTopic(ctx context.Context, policy store.GroupAss
 	if historyLimit <= 0 || historyLimit > assistantMaxHistoryMessages {
 		historyLimit = assistantMaxHistoryMessages
 	}
-	history, err := a.queries.ListGroupAssistantMessages(ctx, store.ListGroupAssistantMessagesParams{ChatID: policy.ChatID, Limit: historyLimit})
+	history, err := a.queries.ListGroupAssistantMessages(ctx, store.ListGroupAssistantMessagesParams{ChatID: policy.ChatID, ThreadID: &latest.ThreadID, Limit: historyLimit})
 	if err != nil {
 		return err
 	}
@@ -1917,8 +2030,8 @@ func (a *GroupAssistant) runColdTopic(ctx context.Context, policy store.GroupAss
 		return err
 	}
 	current := "请结合最近群聊和已确认群知识，自然抛出一个适合接话的小话题。没有合适话题时只输出 SKIP_TASK。"
-	messages := assistantUntrustedContext(policy, memories, history, current)
-	system := assistantSystemPromptForModeWithOverrides(policy, "cold", a.loadPromptOverrides(ctx, policy.ChatID))
+	system := assistantSystemPromptForModeWithOverrides(policy, "cold", a.loadPromptOverrides(ctx, policy.ChatID)) + "\n" + assistantReplyProtocol
+	messages := assistantBudgetedContext(system, policy, memories, history, current, assistantPromptSender{}, "")
 	result, _, err := a.dispatchPlain(ctx, policy.ChatID, "chat", pool, policy, ai.CheckRequest{
 		Model: policy.ChatModelRef, SystemPrompt: system, Messages: messages,
 		MaxTokens: 280, Temperature: policy.Temperature, Timeout: 20 * time.Second,
@@ -1940,29 +2053,25 @@ func (a *GroupAssistant) runColdTopic(ctx context.Context, policy store.GroupAss
 	}
 	sendCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
-	sent, err := a.service.sendThrottled(sendCtx, chat, truncateAssistant(topic, assistantMaxTelegramText), &tele.SendOptions{ThreadID: int(latest.ThreadID)})
-	if err != nil {
-		return err
-	}
-	messageID := int64(0)
-	if sent != nil {
-		messageID = int64(sent.ID)
-	}
-	if messageID == 0 {
-		messageID = -time.Now().UnixNano()
-	}
-	expiresAt := now.Add(time.Duration(maxInt32(policy.RetentionDays, assistantDefaultRetentionDays)) * 24 * time.Hour)
-	hash := sha256.Sum256([]byte(topic))
-	botID, botName := int64(0), ""
-	if a.service.bot.Me != nil {
-		botID, botName = int64(a.service.bot.Me.ID), a.service.bot.Me.Username
-	}
-	_, _ = a.queries.UpsertGroupAssistantMessage(ctx, store.UpsertGroupAssistantMessageParams{
-		ChatID: policy.ChatID, ThreadID: latest.ThreadID, TelegramMessageID: messageID,
-		SenderID: botID, SenderName: botName, Role: "assistant", Text: topic, Approved: true, Delivered: true,
-		ContentHash: hex.EncodeToString(hash[:]), ExpiresAt: expiresAt, SourceType: "telegram_assistant_cold_topic", SourceID: "",
-	})
+	// Mark before transport: an ambiguous send must not be replayed on the next tick.
 	a.markColdTopicHandled(policy.ChatID, latest.ID)
+	msg := &tele.Message{Chat: chat, ThreadID: int(latest.ThreadID)}
+	for _, spec := range parseAssistantReplyOutput(topic) {
+		if !a.coldTopicPreSendValid(sendCtx, policy.ChatID, latest.ID, policy) {
+			return nil
+		}
+		opts := &tele.SendOptions{ThreadID: int(latest.ThreadID)}
+		sent, err := a.service.sendAssistantReplyPlan(sendCtx, chat, spec.Text, opts, policy, settings)
+		if err != nil {
+			return err
+		}
+		if sent == nil || sent.ID == 0 {
+			return fmt.Errorf("主动话题发送未确认")
+		}
+		if err = a.service.storeAssistantDelivery(sendCtx, msg, policy, spec.Text, sent, opts); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -2080,7 +2189,7 @@ func (a *GroupAssistant) distillMimicProfile(job assistantStyleJob) {
 	if err != nil {
 		return
 	}
-	if strings.TrimSpace(policy.LearningModelRef) == "" || strings.TrimSpace(pool.TaskAssignments["learning"].Primary) == "" {
+	if strings.TrimSpace(pool.TaskAssignments["learning"].Primary) == "" {
 		return
 	}
 	lines := make([]string, 0, len(samples))
@@ -2128,9 +2237,6 @@ func (a *GroupAssistant) extractAndStoreFact(job assistantLearningJob) {
 	pool, err := a.loadPool(a.ctx, job.chatID)
 	if err != nil {
 		a.logger.Warn("load group assistant learning pool failed", zap.Error(err), zap.Int64("chat_id", job.chatID))
-		return
-	}
-	if strings.TrimSpace(job.policy.LearningModelRef) == "" {
 		return
 	}
 	learningAssignment := pool.TaskAssignments["learning"]

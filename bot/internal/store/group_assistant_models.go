@@ -324,12 +324,22 @@ type ListGroupAssistantMessagesParams struct {
 	Limit    int32
 }
 
+// AssistantModelLoadOptions references existing registry models only.
+type AssistantModelLoadOptions struct {
+	Weight          int `json:"weight"`
+	MaxConcurrency  int `json:"max_concurrency"`
+	TimeoutMs       int `json:"timeout_ms"`
+	CooldownSeconds int `json:"cooldown_duration_sec"`
+}
+
 type AssistantModelRoleConfig struct {
-	ModelRef    string   `json:"model_ref"`
-	TimeoutSec  float64  `json:"timeout_sec"`
-	Temperature float64  `json:"temperature"`
-	MaxTokens   int      `json:"max_tokens"`
-	Fallbacks   []string `json:"fallbacks"`
+	Strategy     string                               `json:"strategy,omitempty"`
+	ModelOptions map[string]AssistantModelLoadOptions `json:"model_options,omitempty"`
+	ModelRef     string                               `json:"model_ref"`
+	TimeoutSec   float64                              `json:"timeout_sec"`
+	Temperature  float64                              `json:"temperature"`
+	MaxTokens    int                                  `json:"max_tokens"`
+	Fallbacks    []string                             `json:"fallbacks"`
 }
 
 type AssistantGlobalSettings struct {

@@ -68,6 +68,9 @@ export type AssistantPolicy = {
 };
 
 export type AssistantTaskAssignment = {
+  strategy?: "primary-overflow" | "weighted";
+  temperature?: number;
+  max_tokens?: number;
   primary: string;
   backups: string[];
 };
@@ -78,6 +81,7 @@ export type AssistantPoolEndpoint = {
   model_ref: string;
   role: "primary" | "backup" | string;
   priority: number;
+  weight?: number;
   max_concurrency: number;
   timeout_ms: number;
   cooldown_duration_sec: number;
@@ -85,6 +89,8 @@ export type AssistantPoolEndpoint = {
 };
 
 export type AssistantPoolConfig = {
+  inherit_global?: boolean;
+  strategy?: string;
   task_assignments: Record<string, AssistantTaskAssignment>;
   endpoints: AssistantPoolEndpoint[];
   max_queue_depth: number;
@@ -92,6 +98,10 @@ export type AssistantPoolConfig = {
 };
 
 export type AssistantPool = {
+  source?: "global" | "group" | "legacy_group";
+  saved_config?: AssistantPoolConfig;
+  // Derived routes in config only, not in the separately preserved saved_config.
+  inherited_tasks?: string[];
   version: number;
   strategy: "primary-overflow" | string;
   config: AssistantPoolConfig;
@@ -137,7 +147,11 @@ export type AssistantPolicyWrite = {
   proactive_task_brief: string;
 };
 
+export type AssistantModelLoadOptions = { weight: number; max_concurrency: number; timeout_ms: number; cooldown_duration_sec: number };
+
 export type AssistantModelRole = {
+  strategy?: "primary-overflow" | "weighted";
+  model_options?: Record<string, AssistantModelLoadOptions>;
   model_ref: string;
   timeout_sec?: number;
   temperature?: number;
@@ -383,8 +397,21 @@ export function assistantPath(chatId: number | string, suffix = "") {
   return `/api/admin/groups/${encodeURIComponent(String(chatId))}/assistant${suffix}`;
 }
 
-export function fetchAssistantOverview(chatId: number) {
-  return apiFetch<AssistantOverview>(assistantPath(chatId));
+// Decode nullable Go slices and goose32 string assignments once at the API
+// boundary, for both effective projections and preserved legacy drafts.
+export function normalizeAssistantPoolConfig(config?: AssistantPoolConfig | null): AssistantPoolConfig {
+  const assignments=Object.fromEntries(Object.entries(config?.task_assignments??{}).map(([task,value])=>{
+    const raw:Partial<AssistantTaskAssignment> = typeof value === "string" ? {primary:value} : value??{};
+    return [task,{...raw,primary:typeof raw.primary==="string"?raw.primary:"",backups:Array.isArray(raw.backups)?raw.backups:[]}];
+  }));
+  return {...config,task_assignments:assignments,endpoints:Array.isArray(config?.endpoints)?config.endpoints:[],max_queue_depth:config?.max_queue_depth??0,max_queue_wait_sec:config?.max_queue_wait_sec??0};
+}
+export function normalizeAssistantPool(pool: AssistantPool): AssistantPool {
+  return {...pool,config:normalizeAssistantPoolConfig(pool.config),saved_config:pool.saved_config?normalizeAssistantPoolConfig(pool.saved_config):undefined};
+}
+export async function fetchAssistantOverview(chatId: number) {
+  const result=await apiFetch<AssistantOverview>(assistantPath(chatId));
+  return {...result,model_pool:normalizeAssistantPool(result.model_pool)};
 }
 
 export function saveAssistantPolicy(
@@ -399,12 +426,12 @@ export function saveAssistantPolicy(
 }
 
 export function fetchAssistantPool(chatId: number) {
-  return apiFetch<AssistantPool>(assistantPath(chatId, "/model-pool"));
+  return apiFetch<AssistantPool>(assistantPath(chatId, "/model-pool")).then(normalizeAssistantPool);
 }
 
 export function saveAssistantPool(
   chatId: number,
-  pool: Omit<AssistantPool, "version" | "updated_at" | "config"> & AssistantPoolConfig,
+  pool: AssistantPoolConfig & { strategy: string },
   expectedVersion: number,
 ) {
   return apiFetch<AssistantPool>(assistantPath(chatId, "/model-pool"), {
@@ -412,12 +439,13 @@ export function saveAssistantPool(
     body: JSON.stringify({
       expected_version: expectedVersion,
       strategy: pool.strategy,
+      inherit_global: pool.inherit_global,
       task_assignments: pool.task_assignments,
       endpoints: pool.endpoints,
       max_queue_depth: pool.max_queue_depth,
       max_queue_wait_sec: pool.max_queue_wait_sec,
     }),
-  });
+  }).then(normalizeAssistantPool);
 }
 
 export function fetchAssistantStatus(chatId: number, signal?: AbortSignal) {

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -89,7 +90,7 @@ const assistantbotDefaultRetentionDays int32 = 7
 
 func defaultGroupAssistantPolicy(chatID int64) store.GroupAssistantPolicy {
 	return store.GroupAssistantPolicy{ChatID: chatID, Version: 0, TriggerMode: "mention_or_reply", FollowupWindowSec: 300,
-		MaxFollowupTurns: 5, Temperature: 0.3, HistoryLimit: 30, RetentionDays: 7,
+		MaxFollowupTurns: 5, Temperature: 0.3, HistoryLimit: 500, RetentionDays: 7,
 		CollectionPolicy: "history_7d_and_long_term_summary", ToolAllowlist: []string{"knowledge_query", "conversation_recall", "webfetch_readonly"}, AllowDomains: []string{},
 		MaxQueueDepth: 10, MaxQueueWaitSec: 15, ColdTopicIdleMinutes: 180, ColdTopicQuietStart: 0, ColdTopicQuietEnd: 8, TTSMode: "off", StickerFallbackFileIDs: []string{}}
 }
@@ -132,11 +133,8 @@ func (s *Server) handleGetGroupAssistant(c echo.Context) error {
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "load assistant policy failed"})
 	}
-	pool, poolErr := s.botService.Assistant().Pool(c.Request().Context(), chatID)
-	poolResponse := map[string]any{"version": 0, "strategy": "primary-overflow", "config": map[string]any{"task_assignments": map[string]any{}, "endpoints": []any{}}}
-	if poolErr == nil {
-		poolResponse = serializeGroupAssistantPool(pool)
-	} else if !errors.Is(poolErr, pgx.ErrNoRows) {
+	poolResponse, poolErr := s.assistantPoolResponse(c.Request().Context(), chatID)
+	if poolErr != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "load assistant pool failed"})
 	}
 	readiness := s.botService.Assistant().ChatReadiness(c.Request().Context(), chatID)
@@ -236,7 +234,7 @@ func validateGroupAssistantPolicyRequest(v *groupAssistantPolicyRequest) error {
 	if len([]rune(v.SystemPrompt)) > 8000 {
 		return fmt.Errorf("system_prompt too long")
 	}
-	if v.HistoryLimit < 1 || v.HistoryLimit > 200 {
+	if v.HistoryLimit < 1 || v.HistoryLimit > 500 {
 		return fmt.Errorf("history_limit out of range")
 	}
 	if v.RetentionDays < 1 || v.RetentionDays > 30 {
@@ -340,13 +338,41 @@ func buildAutoAssistantPool(current store.GroupAssistantPool, poolErr error, cha
 		}
 		assignment := cfg.TaskAssignments[item.task]
 		if strings.TrimSpace(assignment.Primary) != "" {
+			for _, ep := range cfg.Endpoints {
+				if ep.ID != assignment.Primary || ep.ModelRef == item.ref {
+					continue
+				}
+				// A shared endpoint may serve another task. Clone only the legacy
+				// field's primary, retaining its fallback order and load parameters.
+				ep.ID = autoAssistantEndpointID(item.task, item.ref, ids)
+				ids[ep.ID] = struct{}{}
+				ep.ModelRef, ep.Name = item.ref, item.ref
+				cfg.Endpoints = append(cfg.Endpoints, ep)
+				assignment.Primary = ep.ID
+				backups := []string{}
+				for _, id := range assignment.Backups {
+					duplicate := false
+					for _, candidate := range cfg.Endpoints {
+						if candidate.ID == id && candidate.ModelRef == item.ref {
+							duplicate = true
+						}
+					}
+					if !duplicate {
+						backups = append(backups, id)
+					}
+				}
+				assignment.Backups = backups
+				cfg.TaskAssignments[item.task] = assignment
+				changed = true
+				break
+			}
 			continue
 		}
 		id := autoAssistantEndpointID(item.task, item.ref, ids)
 		ids[id] = struct{}{}
 		cfg.Endpoints = append(cfg.Endpoints, assistantbot.AssistantPoolEndpoint{
 			ID: id, Name: item.ref, ModelRef: item.ref, Role: "primary", Priority: 0,
-			MaxConcurrency: 2, TimeoutMs: 30000, CooldownSeconds: 30, SupportsTools: item.task == "chat",
+			Weight: 1, MaxConcurrency: 2, TimeoutMs: 30000, CooldownSeconds: 30,
 		})
 		assignment.Primary = id
 		cfg.TaskAssignments[item.task] = assignment
@@ -370,7 +396,11 @@ func (s *Server) handlePutGroupAssistant(c echo.Context) error {
 	if err := validateGroupAssistantPolicyRequest(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
 	}
-	if req.ChatModelRef != "" {
+	updated, policyErr := s.botService.Assistant().Policy(c.Request().Context(), chatID)
+	if policyErr != nil && !errors.Is(policyErr, pgx.ErrNoRows) {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "load assistant policy failed"})
+	}
+	if req.ChatModelRef != "" && (policyErr != nil || strings.TrimSpace(req.ChatModelRef) != updated.ChatModelRef) {
 		if err := s.botService.Assistant().ValidateModelRef(req.ChatModelRef, true); err != nil {
 			if req.ChatEnabled {
 				return c.JSON(http.StatusBadRequest, map[string]string{"error": "还不能启用聊天，请先选择已声明能调用技能的聊天模型。"})
@@ -378,23 +408,71 @@ func (s *Server) handlePutGroupAssistant(c echo.Context) error {
 			return c.JSON(http.StatusBadRequest, map[string]string{"error": "聊天模型不可用，请选择已启用且已声明能调用技能的模型"})
 		}
 	}
-	if req.LearningModelRef != "" {
+	if req.LearningModelRef != "" && (policyErr != nil || strings.TrimSpace(req.LearningModelRef) != updated.LearningModelRef) {
 		if err := s.botService.Assistant().ValidateModelRef(req.LearningModelRef, false); err != nil {
 			return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid learning_model_ref: " + err.Error()})
 		}
 	}
-	updated, policyErr := s.botService.Assistant().Policy(c.Request().Context(), chatID)
-	if policyErr != nil && !errors.Is(policyErr, pgx.ErrNoRows) {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "load assistant policy failed"})
-	}
 	chatModelRef := strings.TrimSpace(req.ChatModelRef)
 	learningModelRef := strings.TrimSpace(req.LearningModelRef)
 	currentPool, poolErr := s.botService.Assistant().Pool(c.Request().Context(), chatID)
-	autoCfg, poolVersion, autoPool, err := buildAutoAssistantPool(currentPool, poolErr, chatModelRef, learningModelRef)
+	poolChatRef, poolLearningRef := chatModelRef, learningModelRef
+	if policyErr == nil && updated.ChatModelRef == chatModelRef {
+		poolChatRef = ""
+	}
+	if policyErr == nil && updated.LearningModelRef == learningModelRef {
+		poolLearningRef = ""
+	}
+	// Legacy model fields write through the same effective route, including
+	// global inheritance. Unchanged stale fields never overwrite a saved pool.
+	projected := currentPool
+	projectedErr := poolErr
+	if poolChatRef != "" || poolLearningRef != "" {
+		effective, _, e := s.botService.Assistant().EffectivePool(c.Request().Context(), chatID)
+		if e != nil {
+			return c.JSON(http.StatusBadRequest, map[string]string{"error": "读取当前负载失败"})
+		}
+		for _, task := range []string{"learning", "decision", "vision", "compress", "vector"} {
+			child := effective.TaskAssignments[task]
+			if child.Inherited {
+				child.Primary, child.Backups = "", nil
+				effective.TaskAssignments[task] = child
+			}
+		}
+		projected.Config = assistantbot.EncodeAssistantPool(effective)
+		projectedErr = nil
+	}
+	autoCfg, poolVersion, autoPool, err := buildAutoAssistantPool(projected, projectedErr, poolChatRef, poolLearningRef)
+	// Intent is a change to the saved policy field, even if its new value
+	// equals today's inherited endpoint. Persist that explicit group choice.
+	autoPool = autoPool || poolChatRef != "" || poolLearningRef != ""
+	if autoPool {
+		custom := false
+		autoCfg.InheritGlobal = &custom
+	}
+	if poolErr == nil && policyErr == nil {
+		for task, cleared := range map[string]bool{"chat": chatModelRef == "" && updated.ChatModelRef != "", "learning": learningModelRef == "" && updated.LearningModelRef != ""} {
+			if cleared {
+				delete(autoCfg.TaskAssignments, task)
+				autoCfg.InheritGlobal = nil // legacy per-task empty = inherit, not a dead second route
+				autoPool = true
+			}
+		}
+	}
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "模型池配置无效，请重新保存模型设置"})
 	}
-	readiness := s.botService.Assistant().ChatReadinessForPool(autoCfg)
+	readinessCfg := autoCfg
+	if !autoPool {
+		readinessCfg, _, err = s.botService.Assistant().EffectivePool(c.Request().Context(), chatID)
+	}
+	if readinessCfg.TaskAssignments["chat"].Primary == "" {
+		settings, settingsErr := s.botService.Queries().GetAssistantGlobalSettings(c.Request().Context())
+		if settingsErr == nil {
+			readinessCfg = s.botService.Assistant().GlobalPool(settings.ModelRoles)
+		}
+	}
+	readiness := s.botService.Assistant().ChatReadinessForPool(readinessCfg)
 	if req.ChatEnabled && !readiness.CanChat {
 		blocker := "还不能启用聊天，请先选择已声明能调用技能的聊天模型。"
 		if len(readiness.Blockers) > 0 {
@@ -456,17 +534,39 @@ func (s *Server) handleGetGroupAssistantPool(c echo.Context) error {
 	if err != nil {
 		return assistantAccessResponse(c, err)
 	}
-	pool, err := s.botService.Assistant().Pool(c.Request().Context(), chatID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return c.JSON(http.StatusOK, map[string]any{"version": 0, "strategy": "primary-overflow", "config": map[string]any{"task_assignments": map[string]any{}, "endpoints": []any{}}})
-	}
+	response, err := s.assistantPoolResponse(c.Request().Context(), chatID)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "load assistant pool failed"})
 	}
-	return c.JSON(http.StatusOK, serializeGroupAssistantPool(pool))
+	return c.JSON(http.StatusOK, response)
+}
+
+func (s *Server) assistantPoolResponse(ctx context.Context, chatID int64) (map[string]any, error) {
+	pool, err := s.botService.Assistant().Pool(ctx, chatID)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return nil, err
+	}
+	cfg, source, err := s.botService.Assistant().EffectivePool(ctx, chatID)
+	if err != nil {
+		return nil, err
+	}
+	response := serializeGroupAssistantPool(pool)
+	response["saved_config"] = response["config"]
+	response["config"], response["strategy"], response["source"] = cfg, cfg.Strategy, source
+	// Report provenance separately from persisted config. Do not infer it from
+	// endpoint equality: an explicit child may intentionally use the main chain.
+	inherited := []string{}
+	for _, task := range []string{"learning", "decision", "vision", "compress", "vector"} {
+		if cfg.TaskAssignments[task].Inherited {
+			inherited = append(inherited, task)
+		}
+	}
+	response["inherited_tasks"] = inherited
+	return response, nil
 }
 
 type groupAssistantPoolRequest struct {
+	InheritGlobal   *bool                                           `json:"inherit_global"`
 	ExpectedVersion int64                                           `json:"expected_version"`
 	Strategy        string                                          `json:"strategy"`
 	TaskAssignments map[string]assistantbot.AssistantTaskAssignment `json:"task_assignments"`
@@ -487,9 +587,12 @@ func (s *Server) handlePutGroupAssistantPool(c echo.Context) error {
 	if req.ExpectedVersion < 0 {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "expected_version cannot be negative"})
 	}
-	cfg := assistantbot.AssistantPoolConfig{Strategy: req.Strategy, TaskAssignments: req.TaskAssignments, Endpoints: req.Endpoints,
+	cfg := assistantbot.AssistantPoolConfig{InheritGlobal: req.InheritGlobal, Strategy: req.Strategy, TaskAssignments: req.TaskAssignments, Endpoints: req.Endpoints,
 		MaxQueueDepth: req.MaxQueueDepth, MaxQueueWaitSec: req.MaxQueueWaitSec}
-	if err := s.botService.Assistant().ValidatePoolConfig(cfg, true); err != nil {
+	if cfg.Strategy == "" {
+		cfg.Strategy = "primary-overflow"
+	}
+	if err := s.botService.Assistant().ValidatePoolConfig(cfg, true); err != nil && (cfg.InheritGlobal == nil || !*cfg.InheritGlobal) {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
 	}
 	raw, err := jsonMarshal(cfg)
@@ -511,7 +614,12 @@ func (s *Server) handlePutGroupAssistantPool(c echo.Context) error {
 		}
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "save assistant pool failed"})
 	}
-	return c.JSON(http.StatusOK, serializeGroupAssistantPool(pool))
+	_ = pool
+	response, responseErr := s.assistantPoolResponse(c.Request().Context(), chatID)
+	if responseErr != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "load effective pool failed"})
+	}
+	return c.JSON(http.StatusOK, response)
 }
 
 func (s *Server) handleGetGroupAssistantStatus(c echo.Context) error {

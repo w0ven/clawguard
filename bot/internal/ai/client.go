@@ -6,11 +6,14 @@ import (
 )
 
 type Message struct {
-	Role       string     `json:"role"`
-	Content    any        `json:"content"`
-	Name       string     `json:"name,omitempty"`
-	ToolCallID string     `json:"tool_call_id,omitempty"`
-	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
+	// OptionalContext is trusted, local-only provenance for prompt budgeting.
+	// Zero value is mandatory; neither user text nor provider JSON can set it.
+	OptionalContext string     `json:"-"`
+	Role            string     `json:"role"`
+	Content         any        `json:"content"`
+	Name            string     `json:"name,omitempty"`
+	ToolCallID      string     `json:"tool_call_id,omitempty"`
+	ToolCalls       []ToolCall `json:"tool_calls,omitempty"`
 }
 
 // ToolDefinition is the provider-neutral read-only tool schema used by the

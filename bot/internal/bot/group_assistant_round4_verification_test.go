@@ -164,8 +164,13 @@ func TestAssistantVerificationRound4UnrecoverableNoFallback(t *testing.T) {
 				if e == nil || answer != "" {
 					t.Errorf("unrecoverable/empty response falsely succeeded: answer=%q err=%v", answer, e)
 				}
-				if got := r.snapshot(); !reflect.DeepEqual(got, []string{"main"}) {
-					t.Errorf("unrecoverable error attempted backup: %v", got)
+				want := []string{"main"}
+				if task == "chat" && (mode == "empty_content" || mode == "whitespace_content") {
+					// SGB ordinary-chat fallback is one request on the SAME lease.
+					want = []string{"main", "main"}
+				}
+				if got := r.snapshot(); !reflect.DeepEqual(got, want) {
+					t.Errorf("unrecoverable response used unexpected route: %v want %v", got, want)
 				}
 				if mode == "empty_content" || mode == "whitespace_content" {
 					rt := a.runtimeSnapshot("mock:main")

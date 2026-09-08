@@ -103,8 +103,8 @@ func TestAssistantSGBParityTTSOffDoesNotSend(t *testing.T) {
 	a := NewGroupAssistant(nil)
 	a.ttsSynth = mockTTSSynth{available: true}
 	a.service = &Service{sender: sender, bot: &tele.Bot{Me: &tele.User{ID: 1}}}
-	a.toolRuntime = &assistantToolRuntime{current: "你好"}
-	out, err := a.executeDoubaoTTSTool(context.Background(), -1001, store.GroupAssistantPolicy{TTSMode: "off"}, map[string]any{"text": "你好"})
+	ctx := withAssistantRuntime(context.Background(), &assistantToolRuntime{current: "你好"})
+	out, err := a.executeDoubaoTTSTool(ctx, -1001, store.GroupAssistantPolicy{TTSMode: "off"}, map[string]any{"text": "你好"})
 	if err == nil {
 		t.Fatal("tts off sent voice")
 	}
@@ -140,19 +140,19 @@ func TestAssistantSGBParitySendStickerBindsCurrentGroup(t *testing.T) {
 	sender := &recordingTelegramSender{}
 	a := NewGroupAssistant(nil)
 	a.service = &Service{sender: sender, bot: &tele.Bot{Me: &tele.User{ID: 1}}}
-	a.toolRuntime = &assistantToolRuntime{msg: &tele.Message{ID: 9, Chat: &tele.Chat{ID: -1001}}}
+	ctx := withAssistantRuntime(context.Background(), &assistantToolRuntime{msg: &tele.Message{ID: 9, Chat: &tele.Chat{ID: -1001}}})
 	args, _ := json.Marshal(map[string]any{"sticker_file_id": "CAAC-file", "query": "开心", "group_id": float64(-9999)})
 	call := ai.ToolCall{}
 	call.Function.Name = "send_sticker"
 	call.Function.Arguments = string(args)
-	out, err := a.executeReadOnlyTool(context.Background(), -1001, store.GroupAssistantPolicy{TTSMode: "off", StickerFallbackFileIDs: []string{"fallback"}}, call)
+	out, err := a.executeReadOnlyTool(ctx, -1001, store.GroupAssistantPolicy{TTSMode: "off", StickerFallbackFileIDs: []string{"fallback"}}, call)
 	if err == nil {
 		t.Fatal("model-supplied group_id was accepted")
 	}
 	if !strings.Contains(out, "permission_denied") && !strings.Contains(out, "invalid_arguments") {
 		t.Fatalf("expected bound-scope refusal, got %s", out)
 	}
-	out, err = a.executeSendStickerTool(context.Background(), -1001, store.GroupAssistantPolicy{StickerFallbackFileIDs: []string{"fallback-id"}}, map[string]any{"sticker_file_id": "CAAC-current"})
+	out, err = a.executeSendStickerTool(ctx, -1001, store.GroupAssistantPolicy{StickerFallbackFileIDs: []string{"fallback-id"}}, map[string]any{"sticker_file_id": "CAAC-current"})
 	if err != nil {
 		t.Fatal(err)
 	}
