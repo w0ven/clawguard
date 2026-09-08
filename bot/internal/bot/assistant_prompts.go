@@ -284,14 +284,22 @@ func assistantUntrustedContextWithSender(policy store.GroupAssistantPolicy, memo
 // assistantDecisionContext mirrors SmartGroup's structured decision input. The
 // message and history blocks are data only; assistantDecisionPrompt defines
 // the decision policy and keeps the model from treating them as instructions.
-func assistantDecisionContext(bot *tele.Bot, sender assistantPromptSender, history []store.GroupAssistantMessage, current, mergedContext string, mergedCount int) string {
+func assistantDecisionContext(bot *tele.Bot, sender assistantPromptSender, history []store.GroupAssistantMessage, current, mergedContext string, mergedCount, limit int) string {
 	if mergedCount < 1 {
 		mergedCount = 1
 	}
-	recent := make([]string, 0, 5)
-	start := len(history) - 5
-	if start < 0 {
-		start = 0
+	if limit < 0 {
+		limit = 5
+	}
+	if limit > 20 {
+		limit = 20
+	}
+	recent := make([]string, 0, limit)
+	start := 0
+	if limit == 0 {
+		history = nil
+	} else if len(history) > limit {
+		start = len(history) - limit
 	}
 	for _, item := range history[start:] {
 		recent = append(recent, assistantHistoryLine(item))

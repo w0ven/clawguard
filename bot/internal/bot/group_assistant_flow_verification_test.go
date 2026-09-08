@@ -627,8 +627,15 @@ func TestAssistantVerificationFlowPostgres(t *testing.T) {
 			if mode == "send_failure" {
 				expectedHistory = 0
 			}
-			if chats.Load() != expectedChats || learns.Load() != 1 || tg.sends.Load() != 1 || count(t, chat, "user") != 1 || count(t, chat, "assistant") != expectedHistory {
-				t.Fatalf("full pipeline chats=%d learns=%d sends=%d history(user=%d assistant=%d)", chats.Load(), learns.Load(), tg.sends.Load(), count(t, chat, "user"), count(t, chat, "assistant"))
+			flushDeadline := time.Now().Add(3 * time.Second)
+			for {
+				if chats.Load() == expectedChats && learns.Load() == 1 && tg.sends.Load() == 1 && count(t, chat, "user") == 1 && count(t, chat, "assistant") == expectedHistory {
+					break
+				}
+				if time.Now().After(flushDeadline) {
+					t.Fatalf("full pipeline chats=%d learns=%d sends=%d history(user=%d assistant=%d)", chats.Load(), learns.Load(), tg.sends.Load(), count(t, chat, "user"), count(t, chat, "assistant"))
+				}
+				time.Sleep(time.Millisecond)
 			}
 			if tg.lastSent.Load() != expectedText {
 				t.Fatalf("Telegram received wrong reply: %v", tg.lastSent.Load())

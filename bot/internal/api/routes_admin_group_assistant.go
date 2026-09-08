@@ -45,6 +45,8 @@ func (s *Server) registerGroupAssistantRoutes(admin *echo.Group) {
 	group.POST("/conflicts/:id/resolve", s.handleResolveGroupAssistantConflict)
 	group.GET("/history", s.handleListGroupAssistantHistory)
 	group.GET("/dispatches", s.handleListGroupAssistantDispatches)
+	group.GET("/prompts", s.handleGetGroupAssistantPrompts)
+	group.PUT("/prompts", s.handlePutGroupAssistantPrompts)
 }
 
 func (s *Server) assistantAccess(c echo.Context) (store.Admin, int64, error) {
@@ -89,7 +91,7 @@ func defaultGroupAssistantPolicy(chatID int64) store.GroupAssistantPolicy {
 	return store.GroupAssistantPolicy{ChatID: chatID, Version: 0, TriggerMode: "mention_or_reply", FollowupWindowSec: 300,
 		MaxFollowupTurns: 5, Temperature: 0.3, HistoryLimit: 30, RetentionDays: 7,
 		CollectionPolicy: "history_7d_and_long_term_summary", ToolAllowlist: []string{"knowledge_query", "conversation_recall", "webfetch_readonly"}, AllowDomains: []string{},
-		MaxQueueDepth: 10, MaxQueueWaitSec: 15, ColdTopicIdleMinutes: 180, ColdTopicQuietStart: 0, ColdTopicQuietEnd: 8}
+		MaxQueueDepth: 10, MaxQueueWaitSec: 15, ColdTopicIdleMinutes: 180, ColdTopicQuietStart: 0, ColdTopicQuietEnd: 8, TTSMode: "off", StickerFallbackFileIDs: []string{}}
 }
 
 func serializeGroupAssistantPolicy(v store.GroupAssistantPolicy) map[string]any {
@@ -104,6 +106,7 @@ func serializeGroupAssistantPolicy(v store.GroupAssistantPolicy) map[string]any 
 		"cold_topic_idle_minutes": v.ColdTopicIdleMinutes, "cold_topic_quiet_start": v.ColdTopicQuietStart, "cold_topic_quiet_end": v.ColdTopicQuietEnd,
 		"mimic_target_user_id": v.MimicTargetUserID, "mimic_target_user_name": v.MimicTargetUserName, "mimic_profile_text": v.MimicProfileText,
 		"mimic_sample_count": v.MimicSampleCount, "mimic_distilled_at_count": v.MimicDistilledAtCount,
+		"tts_mode": v.TTSMode, "sticker_fallback_file_ids": v.StickerFallbackFileIDs, "proactive_task_brief": v.ProactiveTaskBrief,
 		"updated_by": v.UpdatedBy, "created_at": v.CreatedAt, "updated_at": v.UpdatedAt,
 	}
 }
@@ -170,6 +173,9 @@ type groupAssistantPolicyRequest struct {
 	MimicProfileText          string   `json:"mimic_profile_text"`
 	MimicSampleCount          int32    `json:"mimic_sample_count"`
 	MimicDistilledAtCount     int32    `json:"mimic_distilled_at_count"`
+	TTSMode                   string   `json:"tts_mode"`
+	StickerFallbackFileIDs    []string `json:"sticker_fallback_file_ids"`
+	ProactiveTaskBrief        string   `json:"proactive_task_brief"`
 }
 
 func validateGroupAssistantPolicyRequest(v *groupAssistantPolicyRequest) error {
@@ -239,7 +245,21 @@ func validateGroupAssistantPolicyRequest(v *groupAssistantPolicyRequest) error {
 	if v.MaxQueueDepth < 0 || v.MaxQueueDepth > 100 || v.MaxQueueWaitSec < 1 || v.MaxQueueWaitSec > 60 {
 		return fmt.Errorf("queue settings out of range")
 	}
-	known := map[string]struct{}{"knowledge_query": {}, "conversation_recall": {}, "webfetch_readonly": {}}
+	switch strings.ToLower(strings.TrimSpace(v.TTSMode)) {
+	case "", "off":
+		v.TTSMode = "off"
+	case "on", "always":
+		v.TTSMode = strings.ToLower(strings.TrimSpace(v.TTSMode))
+	default:
+		return fmt.Errorf("invalid tts_mode")
+	}
+	if len(v.StickerFallbackFileIDs) > 50 {
+		return fmt.Errorf("too many sticker fallback file ids")
+	}
+	if len([]rune(v.ProactiveTaskBrief)) > 2000 {
+		return fmt.Errorf("proactive_task_brief too long")
+	}
+	known := map[string]struct{}{"knowledge_query": {}, "conversation_recall": {}, "webfetch_readonly": {}, "send_sticker": {}, "doubao_tts": {}}
 	if len(v.ToolAllowlist) == 0 {
 		v.ToolAllowlist = []string{"knowledge_query", "conversation_recall", "webfetch_readonly"}
 	}
@@ -391,7 +411,7 @@ func (s *Server) handlePutGroupAssistant(c echo.Context) error {
 		ProactiveInterjectEnabled: req.ProactiveInterjectEnabled, ProactiveColdTopicEnabled: req.ProactiveColdTopicEnabled,
 		ColdTopicIdleMinutes: *req.ColdTopicIdleMinutes, ColdTopicQuietStart: *req.ColdTopicQuietStart, ColdTopicQuietEnd: *req.ColdTopicQuietEnd,
 		MimicTargetUserID: req.MimicTargetUserID, MimicTargetUserName: strings.TrimSpace(req.MimicTargetUserName), MimicProfileText: strings.TrimSpace(req.MimicProfileText),
-		MimicSampleCount: req.MimicSampleCount, MimicDistilledAtCount: req.MimicDistilledAtCount, UpdatedBy: &admin.TelegramID}
+		MimicSampleCount: req.MimicSampleCount, MimicDistilledAtCount: req.MimicDistilledAtCount, TTSMode: req.TTSMode, StickerFallbackFileIDs: req.StickerFallbackFileIDs, ProactiveTaskBrief: strings.TrimSpace(req.ProactiveTaskBrief), UpdatedBy: &admin.TelegramID}
 	if arg.CollectionPolicy == "" {
 		arg.CollectionPolicy = "history_7d_and_long_term_summary"
 	}
@@ -525,6 +545,7 @@ func (s *Server) handleListGroupAssistantTools(c echo.Context) error {
 		{"name": "knowledge_query", "read_only": true, "enabled": toolEnabled(policy.ToolAllowlist, "knowledge_query"), "scope": "current_group"},
 		{"name": "conversation_recall", "read_only": true, "enabled": toolEnabled(policy.ToolAllowlist, "conversation_recall"), "scope": "current_group_retention"},
 		{"name": "webfetch_readonly", "read_only": true, "enabled": toolEnabled(policy.ToolAllowlist, "webfetch_readonly"), "scope": "public_allowlisted_domains", "allow_domains": policy.AllowDomains},
+		{"name": "send_sticker", "read_only": false, "enabled": true, "scope": "current_group"},
 	}
 	return c.JSON(http.StatusOK, map[string]any{"chat_id": chatID, "tools": tools, "write_tools": []any{}, "server_bound_scope": true})
 }

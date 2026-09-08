@@ -13,7 +13,7 @@ import (
 	"go.uber.org/zap"
 )
 
-var assistantVerificationRoutes = []struct{ method, path string }{{"GET", ""}, {"PUT", ""}, {"GET", "/model-pool"}, {"PUT", "/model-pool"}, {"GET", "/status"}, {"GET", "/tools"}, {"GET", "/memories"}, {"POST", "/memories"}, {"GET", "/memories/1"}, {"PUT", "/memories/1"}, {"POST", "/memories/1/forget"}, {"GET", "/memories/1/versions"}, {"GET", "/conflicts"}, {"POST", "/conflicts/1/resolve"}, {"GET", "/history"}, {"GET", "/dispatches"}}
+var assistantVerificationRoutes = []struct{ method, path string }{{"GET", ""}, {"PUT", ""}, {"GET", "/model-pool"}, {"PUT", "/model-pool"}, {"GET", "/status"}, {"GET", "/tools"}, {"GET", "/memories"}, {"POST", "/memories"}, {"GET", "/memories/1"}, {"PUT", "/memories/1"}, {"POST", "/memories/1/forget"}, {"GET", "/memories/1/versions"}, {"GET", "/conflicts"}, {"POST", "/conflicts/1/resolve"}, {"GET", "/history"}, {"GET", "/dispatches"}, {"GET", "/prompts"}, {"PUT", "/prompts"}}
 
 func TestAssistantVerificationAPINoJWT(t *testing.T) {
 	s := NewServer(config.Config{JWTSecret: "assistant-test-fake-secret"}, zap.NewNop(), nil, nil)
@@ -21,6 +21,35 @@ func TestAssistantVerificationAPINoJWT(t *testing.T) {
 		for _, token := range []string{"", "not-a-valid-jwt"} {
 			t.Run(route.method+route.path+token, func(t *testing.T) {
 				req := httptest.NewRequest(route.method, "/api/admin/groups/-1/assistant"+route.path, strings.NewReader(`{}`))
+				if token != "" {
+					req.Header.Set("Authorization", "Bearer "+token)
+				}
+				rec := httptest.NewRecorder()
+				s.echo.ServeHTTP(rec, req)
+				if rec.Code != 401 {
+					t.Fatalf("expected JWT refusal: %d %s", rec.Code, rec.Body)
+				}
+				var out map[string]any
+				if e := json.Unmarshal(rec.Body.Bytes(), &out); e != nil || out["error"] == nil {
+					t.Fatalf("nonstructured error %s", rec.Body)
+				}
+			})
+		}
+	}
+}
+
+func TestAssistantGlobalVerificationAPINoJWT(t *testing.T) {
+	s := NewServer(config.Config{JWTSecret: "assistant-test-fake-secret"}, zap.NewNop(), nil, nil)
+	routes := []struct{ method, path string }{
+		{"GET", "/api/admin/assistant/global"},
+		{"PUT", "/api/admin/assistant/global"},
+		{"GET", "/api/admin/assistant/prompts"},
+		{"PUT", "/api/admin/assistant/prompts"},
+	}
+	for _, route := range routes {
+		for _, token := range []string{"", "not-a-valid-jwt"} {
+			t.Run(route.method+route.path+token, func(t *testing.T) {
+				req := httptest.NewRequest(route.method, route.path, strings.NewReader(`{}`))
 				if token != "" {
 					req.Header.Set("Authorization", "Bearer "+token)
 				}

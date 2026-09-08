@@ -3,7 +3,9 @@ import { apiFetch } from "@/lib/api";
 export type AssistantToolName =
   | "knowledge_query"
   | "conversation_recall"
-  | "webfetch_readonly";
+  | "webfetch_readonly"
+  | "send_sticker"
+  | "doubao_tts";
 
 export type AssistantMemoryValidScope =
   | "today"
@@ -57,6 +59,9 @@ export type AssistantPolicy = {
   mimic_profile_text?: string;
   mimic_sample_count?: number;
   mimic_distilled_at_count?: number;
+  tts_mode?: "off" | "on" | "always" | string;
+  sticker_fallback_file_ids?: string[];
+  proactive_task_brief?: string;
   updated_by?: number | null;
   created_at?: string;
   updated_at?: string;
@@ -127,6 +132,56 @@ export type AssistantPolicyWrite = {
   mimic_profile_text: string;
   mimic_sample_count: number;
   mimic_distilled_at_count: number;
+  tts_mode: "off" | "on" | "always" | string;
+  sticker_fallback_file_ids: string[];
+  proactive_task_brief: string;
+};
+
+export type AssistantModelRole = {
+  model_ref: string;
+  timeout_sec?: number;
+  temperature?: number;
+  max_tokens?: number;
+  fallbacks: string[];
+};
+
+export type AssistantGlobalSettings = {
+  version: number;
+  model_roles: Record<string, AssistantModelRole>;
+  bot: {
+    inbound_merge_window_sec: number;
+    reply_total_timeout_sec: number;
+    decision_context_items: number;
+    keep_original_text: boolean;
+    memory_recall_enabled: boolean;
+    hot_window_compress_enabled: boolean;
+    proactive_idle_minutes: number;
+    proactive_quiet_start: number;
+    proactive_quiet_end: number;
+    proactive_check_interval_sec: number;
+  };
+  tts: {
+    enabled: boolean;
+    http_timeout_sec: number;
+    max_text_length: number;
+    api_base: string;
+    app_id: string;
+    app_key_configured: boolean;
+    access_key_configured: boolean;
+    resource_id: string;
+    model: string;
+    speaker: string;
+    audio_format: string;
+    sample_rate: number;
+    bit_rate: number;
+    emotion: string;
+    emotion_scale: number;
+    speech_rate: number;
+    loudness_rate: number;
+    silence_duration_ms: number;
+  };
+  stickers: { fallback_file_ids: string[] };
+  updated_at?: string;
 };
 
 export type AssistantReadiness = {
@@ -502,4 +557,32 @@ export function fetchAssistantDispatches(chatId: number, limit = 50, signal?: Ab
 
 export function fetchRegistryModels() {
   return apiFetch<{ models: RegistryModel[] }>("/api/admin/llm/models");
+}
+
+export function fetchAssistantGlobal() {
+  return apiFetch<AssistantGlobalSettings>("/api/admin/assistant/global");
+}
+
+export function saveAssistantGlobal(payload: Record<string, unknown>) {
+  return apiFetch<AssistantGlobalSettings>("/api/admin/assistant/global", {
+    method: "PUT",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function fetchAssistantPrompts(chatId?: number) {
+  const path = chatId
+    ? assistantPath(chatId, "/prompts")
+    : "/api/admin/assistant/prompts";
+  return apiFetch<{ chat_id: number; prompts: Record<string, string> }>(path);
+}
+
+export function saveAssistantPrompts(prompts: Record<string, string>, chatId?: number) {
+  const path = chatId
+    ? assistantPath(chatId, "/prompts")
+    : "/api/admin/assistant/prompts";
+  return apiFetch<{ chat_id: number; prompts: Record<string, string> }>(path, {
+    method: "PUT",
+    body: JSON.stringify({ prompts }),
+  });
 }

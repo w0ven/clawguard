@@ -95,7 +95,7 @@ func TestAssistantChatBrainPromptContracts(t *testing.T) {
 		}
 	}
 
-	decisionContext := assistantDecisionContext(&tele.Bot{Me: &tele.User{ID: 900, Username: "assistant_test_bot"}}, sender, history, "当前消息", "合并消息上下文", 2)
+	decisionContext := assistantDecisionContext(&tele.Bot{Me: &tele.User{ID: 900, Username: "assistant_test_bot"}}, sender, history, "当前消息", "合并消息上下文", 2, 5)
 	for _, want := range []string{"skip", "casual"} {
 		if !strings.Contains(assistantDecisionPrompt, want) {
 			t.Fatalf("decision policy missing %q", want)

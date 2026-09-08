@@ -223,7 +223,7 @@ export default function LLMAdminPage() {
   return (
     <AdminShell
       title="模型管理"
-      subtitle="Provider / Model / 健康统计 / AdKiller"
+      subtitle="供应商和模型条目。群助手角色只引用这里的模型，不在本页复制供应商。"
       actions={
         <Button variant="secondary" onClick={reloadAll} disabled={loading}>
           <RefreshCw

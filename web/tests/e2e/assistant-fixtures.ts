@@ -4,7 +4,7 @@ import {policy as guardPolicy, login} from './ui-fixtures';
 export {expect, login};
 export const groups = [-1001,-1002].map((id,i)=>({chat_id:id,title:`Fixture 助手${i?'乙':'甲'}群 · 非线上`,enabled:true,type:'supergroup',member_count:12,config:{},created_at:'2026-09-01T00:00:00Z'}));
 export const tools=['knowledge_query','conversation_recall','webfetch_readonly'];
-export function defaultPolicy(chat_id=-1001){return {chat_id,version:0,chat_enabled:false,learning_enabled:false,trigger_mode:'mention_or_reply',followup_window_sec:300,max_followup_turns:5,chat_model_ref:'',learning_model_ref:'',temperature:0.3,system_prompt:'',history_limit:30,retention_days:7,collection_policy:'history_7d_and_long_term_summary',tool_allowlist:[...tools],allow_domains:[],max_queue_depth:10,max_queue_wait_sec:15,proactive_interject_enabled:false,proactive_cold_topic_enabled:false,cold_topic_idle_minutes:180,cold_topic_quiet_start:0,cold_topic_quiet_end:8,mimic_target_user_id:0,mimic_target_user_name:'',mimic_profile_text:'',mimic_sample_count:0,mimic_distilled_at_count:0};}
+export function defaultPolicy(chat_id=-1001){return {chat_id,version:0,chat_enabled:false,learning_enabled:false,trigger_mode:'mention_or_reply',followup_window_sec:300,max_followup_turns:5,chat_model_ref:'',learning_model_ref:'',temperature:0.3,system_prompt:'',history_limit:30,retention_days:7,collection_policy:'history_7d_and_long_term_summary',tool_allowlist:[...tools],allow_domains:[],max_queue_depth:10,max_queue_wait_sec:15,proactive_interject_enabled:false,proactive_cold_topic_enabled:false,cold_topic_idle_minutes:180,cold_topic_quiet_start:0,cold_topic_quiet_end:8,mimic_target_user_id:0,mimic_target_user_name:'',mimic_profile_text:'',mimic_sample_count:0,mimic_distilled_at_count:0,tts_mode:'off',sticker_fallback_file_ids:[],proactive_task_brief:''};}
 export const models=[['tools',true,true,'declared'],['backup',true,true,'declared'],['text',false,true,'unspecified'],['no-tools',false,true,'unsupported'],['disabled',true,false,'declared']].map(([key,supports_tools,enabled,tool_capability],i)=>({id:i+1,provider_id:1,provider_key:'fixture',model_key:key,ref:`fixture:${key}`,label:`Fixture ${key}`,api_format:'openai_chat',enabled,supports_tools,tools_declared:tool_capability==='declared'?true:undefined,supports_tools_declared:tool_capability==='declared'?true:undefined,tool_capability, supports_vision:false,supports_json:true,capability_tags:[],priority:i}));
 export function configuredPool(){return {version:3,strategy:'primary-overflow',config:{max_queue_depth:10,max_queue_wait_sec:15,task_assignments:{chat:{primary:'ep-main',backups:['ep-backup']},learning:{primary:'ep-text',backups:[]}},endpoints:[['ep-main','tools','primary'],['ep-backup','backup','backup'],['ep-text','text','primary']].map(([id,model,role],i)=>({id,name:`Fixture ${id}`,model_ref:`fixture:${model}`,role,priority:i,max_concurrency:3,timeout_ms:15000,cooldown_duration_sec:30,supports_tools:model!=='text'}))}};}
 export function memory(id=1,chat_id=-1001):any {return {id,chat_id,subject:`Fixture ${chat_id} 事实${id}`,content:`Fixture 本群事实内容 ${id}`,memory_type:'base',authority_level:'admin_base',valid_scope:'long_term',source:{source_type:'admin_base',source_chat_id:chat_id,operator_id:7,operator_name:'Fixture 管理员',snippet:'Fixture 来源摘要',verified:'server_verified',currently_verified:true},expires_at:'2099-01-01T00:00:00Z',active:true,version:2,created_at:'2026-09-01T00:00:00Z',updated_at:'2026-09-01T00:00:00Z'};}
@@ -34,7 +34,7 @@ export const test=base.extend<{api:Harness}>({api:[async({page},use,info)=>{
   else if(path==='/api/admin/groups')data={groups};
   else if(path==='/api/admin/llm/models')data={models};
   else if(/^\/api\/admin\/groups\/-\d+$/.test(path))data={group:groups.find(g=>g.chat_id===Number(path.split('/').at(-1))),merged_policy:guardPolicy};
-  else if(/\/assistant(?:\/|$)/.test(path)){
+  else if(/\/groups\/-\d+\/assistant(?:\/|$)/.test(path)){
    const [,id,suffix='']=path.match(/\/groups\/(-\d+)\/assistant(.*)/)??[];const p=api.policies[id],pool=api.pools[id];
    if(!p)return reject(404,'missing group');
    const mid=Number(suffix.split('/')[2]);const stored=api.memories[id].find(m=>m.id===mid&&m.chat_id===Number(id));
@@ -81,6 +81,8 @@ export const test=base.extend<{api:Harness}>({api:[async({page},use,info)=>{
     data={conflict:{...conflict,status:body.accept?'accepted':'rejected'}};api.conflicts[id]=api.conflicts[id].filter(c=>c.id!==cid);
    }
    else if(suffix==='/history'&&method==='GET')data={chat_id:Number(id),history:[{id:1,chat_id:Number(id),thread_id:Number(url.searchParams.get('thread_id')||11),telegram_message_id:42,sender_id:Number(url.searchParams.get('sender_id')||7),sender_name:'Fixture 成员',role:'user',text:`Fixture ${id} 保留期历史`,approved:true,delivered:true,expires_at:'2099-01-01T00:00:00Z',source:{type:'telegram_message',id:'42'},created_at:'2026-09-01T00:00:00Z'}],retention_days:p.retention_days,expired_auto_removed:true};
+   else if(suffix==='/prompts'&&method==='GET')data={chat_id:Number(id),prompts:{persona:'',casual:'',decision:'',proactive_topic:'',style_distill:''}};
+   else if(suffix==='/prompts'&&method==='PUT')data={chat_id:Number(id),prompts:body?.prompts??{}};
    else known=false;
   }else if(path==='/api/admin/stats')data={groups_count:2,active_verifications:0,today_violations:0};
   else if(path==='/api/admin/system-state')data={state:{ai_paused:false,actions_paused:false,frozen:false}};
@@ -89,6 +91,10 @@ export const test=base.extend<{api:Harness}>({api:[async({page},use,info)=>{
   else if(path==='/api/admin/profile-check-logs')data={items:[],total:0};
   else if(path==='/api/admin/events')data={events:[],total:0,has_more:false};
   else if(path.endsWith('/join-protection'))data={join_protection:{enabled:false},defaults:{},status:{}};
+  else if(path==='/api/admin/assistant/global'&&method==='GET')data={version:1,model_roles:{main:{model_ref:'',fallbacks:[]},decision:{model_ref:'',fallbacks:[]},vision:{model_ref:'',fallbacks:[]},compress:{model_ref:'',fallbacks:[]},vector:{model_ref:'',fallbacks:[]}},bot:{inbound_merge_window_sec:5,reply_total_timeout_sec:45,decision_context_items:5,keep_original_text:true,memory_recall_enabled:true,hot_window_compress_enabled:false,proactive_idle_minutes:180,proactive_quiet_start:0,proactive_quiet_end:8,proactive_check_interval_sec:60},tts:{enabled:false,http_timeout_sec:20,max_text_length:500,api_base:'https://openspeech.bytedance.com',app_id:'',app_key_configured:false,access_key_configured:false,resource_id:'seed-tts-2.0',model:'',speaker:'',audio_format:'ogg_opus',sample_rate:48000,bit_rate:96000,emotion:'',emotion_scale:4,speech_rate:0,loudness_rate:0,silence_duration_ms:0},stickers:{fallback_file_ids:[]}};
+  else if(path==='/api/admin/assistant/global'&&method==='PUT')data={version:(body?.expected_version??1)+1,model_roles:body?.model_roles??{},bot:body?.bot??{},tts:{...(body?.tts??{}),app_key_configured:Boolean(body?.tts?.app_key),access_key_configured:Boolean(body?.tts?.access_key),app_key:undefined,access_key:undefined},stickers:body?.stickers??{fallback_file_ids:[]}};
+  else if(path==='/api/admin/assistant/prompts'&&method==='GET')data={chat_id:0,prompts:{persona:'',casual:'',decision:'',proactive_topic:'',style_distill:''}};
+  else if(path==='/api/admin/assistant/prompts'&&method==='PUT')data={chat_id:0,prompts:body?.prompts??{}};
   else known=false;
   if(!known){api.unknown.push(`${method} ${full}`);return route.fulfill({status:501,json:{error:'UNMAPPED TEST API'}});}
   return route.fulfill({json:data});
@@ -100,7 +106,7 @@ export const test=base.extend<{api:Harness}>({api:[async({page},use,info)=>{
  expect.soft(unexpected,'unexpected console errors (injected HTTP separated)').toEqual([]);
  },{auto:true}]});
 export async function openAssistant(page:Page){await login(page);await page.context().addCookies([{name:'cg_csrf',value:'fixture-csrf',domain:'127.0.0.1',path:'/'}]);await page.goto('/groups/-1001/assistant');await expect(page.getByText('实际状态',{exact:true})).toBeVisible();await expect(page.getByLabel('切换群组')).toBeVisible();}
-const sectionAliases:Record<string,string>={'总览':'开始使用','聊天与学习':'怎么说话','记忆中心':'群记忆','模型池':'模型与负载（高级）','只读技能':'能查什么'};
+const sectionAliases:Record<string,string>={'总览':'开始使用','聊天与学习':'回复与媒体','怎么说话':'回复与媒体','记忆中心':'群记忆','模型池':'全局','模型与负载（高级）':'全局','只读技能':'能查什么'};
 export async function tab(page:Page,name:string){await page.getByRole('button',{name:sectionAliases[name]??name,exact:true}).click();}
 export async function memoryTab(page:Page){await tab(page,'群记忆');await expect(page.getByText('Fixture -1001 事实1',{exact:true})).toBeVisible();}
 export function deferred(){let release!:()=>void;const wait=new Promise<void>(r=>release=r);return {wait,release};}
