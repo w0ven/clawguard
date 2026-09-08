@@ -125,3 +125,7 @@ type LLMClient interface {
 	// Used by the admin "test" button and any free-form diagnostic flow.
 	Chat(ctx context.Context, req CheckRequest) (*ChatRawResult, error)
 }
+
+type EmbeddingClient interface {
+	Embed(ctx context.Context, model, input string, timeout time.Duration) ([]float64, error)
+}

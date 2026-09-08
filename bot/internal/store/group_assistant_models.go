@@ -32,6 +32,9 @@ type GroupAssistantPolicy struct {
 	MimicProfileText          string
 	MimicSampleCount          int32
 	MimicDistilledAtCount     int32
+	TTSMode                   string
+	StickerFallbackFileIDs    []string
+	ProactiveTaskBrief        string
 	UpdatedBy                 *int64
 	CreatedAt                 time.Time
 	UpdatedAt                 time.Time
@@ -66,6 +69,9 @@ type UpsertGroupAssistantPolicyParams struct {
 	MimicProfileText          string
 	MimicSampleCount          int32
 	MimicDistilledAtCount     int32
+	TTSMode                   string
+	StickerFallbackFileIDs    []string
+	ProactiveTaskBrief        string
 	UpdatedBy                 *int64
 }
 
@@ -316,4 +322,119 @@ type ListGroupAssistantMessagesParams struct {
 	SenderID *int64
 	Query    string
 	Limit    int32
+}
+
+type AssistantModelRoleConfig struct {
+	ModelRef    string   `json:"model_ref"`
+	TimeoutSec  float64  `json:"timeout_sec"`
+	Temperature float64  `json:"temperature"`
+	MaxTokens   int      `json:"max_tokens"`
+	Fallbacks   []string `json:"fallbacks"`
+}
+
+type AssistantGlobalSettings struct {
+	ID                        int16
+	Version                   int64
+	ModelRoles                []byte
+	InboundMergeWindowSec     float64
+	ReplyTotalTimeoutSec      float64
+	DecisionContextItems      int32
+	KeepOriginalText          bool
+	MemoryRecallEnabled       bool
+	HotWindowCompressEnabled  bool
+	ProactiveIdleMinutes      int32
+	ProactiveQuietStart       int32
+	ProactiveQuietEnd         int32
+	ProactiveCheckIntervalSec float64
+	TTSEnabled                bool
+	TTSHTTPTimeoutSec         float64
+	TTSMaxTextLength          int32
+	TTSAPIBase                string
+	TTSAppID                  string
+	TTSAppKeyEnc              string
+	TTSAccessKeyEnc           string
+	TTSResourceID             string
+	TTSModel                  string
+	TTSSpeaker                string
+	TTSAudioFormat            string
+	TTSSampleRate             int32
+	TTSBitRate                int32
+	TTSEmotion                string
+	TTSEmotionScale           int32
+	TTSSpeechRate             int32
+	TTSLoudnessRate           int32
+	TTSSilenceDurationMS      int32
+	StickerFallbackFileIDs    []string
+	UpdatedBy                 *int64
+	CreatedAt                 time.Time
+	UpdatedAt                 time.Time
+}
+
+type UpsertAssistantGlobalSettingsParams struct {
+	ExpectedVersion           int64
+	ModelRoles                []byte
+	InboundMergeWindowSec     float64
+	ReplyTotalTimeoutSec      float64
+	DecisionContextItems      int32
+	KeepOriginalText          bool
+	MemoryRecallEnabled       bool
+	HotWindowCompressEnabled  bool
+	ProactiveIdleMinutes      int32
+	ProactiveQuietStart       int32
+	ProactiveQuietEnd         int32
+	ProactiveCheckIntervalSec float64
+	TTSEnabled                bool
+	TTSHTTPTimeoutSec         float64
+	TTSMaxTextLength          int32
+	TTSAPIBase                string
+	TTSAppID                  string
+	TTSAppKeyEnc              string
+	TTSAccessKeyEnc           string
+	TTSResourceID             string
+	TTSModel                  string
+	TTSSpeaker                string
+	TTSAudioFormat            string
+	TTSSampleRate             int32
+	TTSBitRate                int32
+	TTSEmotion                string
+	TTSEmotionScale           int32
+	TTSSpeechRate             int32
+	TTSLoudnessRate           int32
+	TTSSilenceDurationMS      int32
+	StickerFallbackFileIDs    []string
+	UpdatedBy                 *int64
+}
+
+type AssistantPromptOverride struct {
+	ChatID    int64
+	PromptKey string
+	Content   string
+	UpdatedAt time.Time
+}
+
+type AssistantStickerSample struct {
+	ID              int64
+	ChatID          int64
+	FileID          string
+	SourceMessageID *int64
+	Query           string
+	Emoji           string
+	SetName         string
+	Aliases         []string
+	SeenCount       int32
+	SentCount       int32
+	Source          string
+	CreatedAt       time.Time
+	LastSeenAt      *time.Time
+	LastSentAt      *time.Time
+}
+
+type UpsertAssistantStickerSampleParams struct {
+	ChatID          int64
+	FileID          string
+	SourceMessageID *int64
+	Query           string
+	Emoji           string
+	SetName         string
+	Source          string
 }

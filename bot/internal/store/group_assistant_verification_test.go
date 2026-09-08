@@ -48,6 +48,10 @@ func TestAssistantVerificationPostgres(t *testing.T) {
 		t.Fatal("migration 32:", err)
 	}
 	t.Log("PASS: actual goose 00001..00031 then 00032 on disposable PostgreSQL")
+	if err = goose.UpToContext(ctx, db, "../../migrations", 34); err != nil {
+		t.Fatal("migration 34:", err)
+	}
+	t.Log("PASS: actual goose 00033..00034 on disposable PostgreSQL")
 	var hashType string
 	if err = db.QueryRow(`SELECT data_type FROM information_schema.columns WHERE table_name='group_assistant_memories' AND column_name='source_content_hash'`).Scan(&hashType); err != nil || hashType != "text" {
 		t.Fatalf("new source_content_hash schema missing: %s %v", hashType, err)

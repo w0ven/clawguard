@@ -27,6 +27,7 @@ const groupAssistantPolicyColumns = `chat_id, version, chat_enabled, learning_en
 	max_queue_depth, max_queue_wait_sec, proactive_interject_enabled, proactive_cold_topic_enabled,
 	cold_topic_idle_minutes, cold_topic_quiet_start, cold_topic_quiet_end, mimic_target_user_id,
 	mimic_target_user_name, mimic_profile_text, mimic_sample_count, mimic_distilled_at_count,
+		tts_mode, sticker_fallback_file_ids, proactive_task_brief,
 	updated_by, created_at, updated_at`
 
 const getGroupAssistantPolicySQL = `SELECT ` + groupAssistantPolicyColumns + `
@@ -38,8 +39,9 @@ const insertGroupAssistantPolicySQL = `INSERT INTO group_assistant_policies
  collection_policy, tool_allowlist, allow_domains, max_queue_depth, max_queue_wait_sec,
  proactive_interject_enabled, proactive_cold_topic_enabled, cold_topic_idle_minutes,
  cold_topic_quiet_start, cold_topic_quiet_end, mimic_target_user_id, mimic_target_user_name,
- mimic_profile_text, mimic_sample_count, mimic_distilled_at_count, updated_by)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28)
+ mimic_profile_text, mimic_sample_count, mimic_distilled_at_count, tts_mode,
+ sticker_fallback_file_ids, proactive_task_brief, updated_by)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31)
 ON CONFLICT (chat_id) DO NOTHING
 RETURNING ` + groupAssistantPolicyColumns
 
@@ -57,7 +59,8 @@ const updateGroupAssistantPolicySQL = `WITH old_target AS (
 	mimic_profile_text=CASE WHEN COALESCE((SELECT mimic_target_user_id FROM old_target), 0) <> $24 THEN '' ELSE $26 END,
 	mimic_sample_count=CASE WHEN COALESCE((SELECT mimic_target_user_id FROM old_target), 0) <> $24 THEN 0 ELSE $27 END,
 	mimic_distilled_at_count=CASE WHEN COALESCE((SELECT mimic_target_user_id FROM old_target), 0) <> $24 THEN 0 ELSE $28 END,
-	updated_by=$29, version=version+1, updated_at=NOW()
+	tts_mode=$29, sticker_fallback_file_ids=$30, proactive_task_brief=$31,
+		updated_by=$32, version=version+1, updated_at=NOW()
 	WHERE chat_id=$1 AND version=$2
 	RETURNING ` + groupAssistantPolicyColumns + `
 ), cleared AS (
@@ -76,8 +79,17 @@ func scanGroupAssistantPolicy(row interface{ Scan(...any) error }) (GroupAssista
 		&v.ToolAllowlist, &v.AllowDomains, &v.MaxQueueDepth, &v.MaxQueueWaitSec,
 		&v.ProactiveInterjectEnabled, &v.ProactiveColdTopicEnabled, &v.ColdTopicIdleMinutes,
 		&v.ColdTopicQuietStart, &v.ColdTopicQuietEnd, &v.MimicTargetUserID, &v.MimicTargetUserName,
-		&v.MimicProfileText, &v.MimicSampleCount, &v.MimicDistilledAtCount, &v.UpdatedBy,
+		&v.MimicProfileText, &v.MimicSampleCount, &v.MimicDistilledAtCount, &v.TTSMode,
+		&v.StickerFallbackFileIDs, &v.ProactiveTaskBrief, &v.UpdatedBy,
 		&v.CreatedAt, &v.UpdatedAt)
+	if err == nil {
+		if v.TTSMode == "" {
+			v.TTSMode = "off"
+		}
+		if v.StickerFallbackFileIDs == nil {
+			v.StickerFallbackFileIDs = []string{}
+		}
+	}
 	return v, err
 }
 
@@ -106,13 +118,19 @@ func (q *Queries) UpsertGroupAssistantPolicy(ctx context.Context, arg UpsertGrou
 	if arg.MimicDistilledAtCount < 0 || arg.MimicDistilledAtCount > 1000 {
 		arg.MimicDistilledAtCount = 0
 	}
+	if arg.TTSMode == "" {
+		arg.TTSMode = "off"
+	}
+	if arg.StickerFallbackFileIDs == nil {
+		arg.StickerFallbackFileIDs = []string{}
+	}
 	params := []any{arg.ChatID, arg.ChatEnabled, arg.LearningEnabled, arg.TriggerMode, arg.FollowupWindowSec,
 		arg.MaxFollowupTurns, arg.ChatModelRef, arg.LearningModelRef, arg.Temperature, arg.SystemPrompt,
 		arg.HistoryLimit, arg.RetentionDays, arg.CollectionPolicy, arg.ToolAllowlist, arg.AllowDomains,
 		arg.MaxQueueDepth, arg.MaxQueueWaitSec, arg.ProactiveInterjectEnabled, arg.ProactiveColdTopicEnabled,
 		arg.ColdTopicIdleMinutes, arg.ColdTopicQuietStart, arg.ColdTopicQuietEnd, arg.MimicTargetUserID,
 		arg.MimicTargetUserName, arg.MimicProfileText, arg.MimicSampleCount, arg.MimicDistilledAtCount,
-		arg.UpdatedBy}
+		arg.TTSMode, arg.StickerFallbackFileIDs, arg.ProactiveTaskBrief, arg.UpdatedBy}
 	if arg.ExpectedVersion <= 0 {
 		v, err := scanGroupAssistantPolicy(q.db.QueryRow(ctx, insertGroupAssistantPolicySQL, params...))
 		if err == nil {

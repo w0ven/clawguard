@@ -56,7 +56,11 @@ import {
   fetchAssistantRecentSenders,
   fetchAssistantStatus,
   fetchAssistantTools,
+  fetchAssistantGlobal,
+  fetchAssistantPrompts,
   fetchRegistryModels,
+  saveAssistantGlobal,
+  saveAssistantPrompts,
   forgetAssistantMemory,
   resolveAssistantConflict,
   saveAssistantPolicy,
@@ -78,6 +82,8 @@ import {
   type AssistantStatus,
   type AssistantToolName,
   type AssistantToolsResponse,
+  type AssistantGlobalSettings,
+  type AssistantModelRole,
   type RegistryModel,
 } from "@/lib/group-assistant";
 import { cn } from "@/lib/utils";
@@ -86,21 +92,26 @@ const TOOL_NAMES: AssistantToolName[] = [
   "knowledge_query",
   "conversation_recall",
   "webfetch_readonly",
+  "send_sticker",
 ];
 
 const TOOL_LABELS: Record<AssistantToolName, string> = {
   knowledge_query: "查群知识",
   conversation_recall: "回忆近期聊天",
   webfetch_readonly: "读指定网页",
+  send_sticker: "发贴纸",
+  doubao_tts: "发语音",
 };
 
 const TOOL_DESCRIPTIONS: Record<AssistantToolName, string> = {
   knowledge_query: "只检索当前群已授权的事实和约定，不跨群读取。",
   conversation_recall: "只回忆当前群保留期内、已审核送达的聊天上下文。",
   webfetch_readonly: "只读取管理员登记的公开网页，受域名和超时限制。",
+  send_sticker: "只在当前群发送贴纸；不能指定别的群。无 file_id 时按语义挑选，失败用回退 File ID。",
+  doubao_tts: "按群语音模式合成并发送语音；没配置密钥时不会假装发送成功。",
 };
 
-type AssistantSection = "start" | "speech" | "memory" | "models" | "skills";
+type AssistantSection = "start" | "speech" | "style" | "memory" | "skills" | "global";
 type MemoryFilter = "active" | "base" | "learned" | "pending" | "expired" | "inactive";
 type ToolCapability = "declared" | "unsupported" | "unspecified";
 
@@ -297,6 +308,9 @@ function policyDraft(policy: AssistantPolicy): PolicyDraft {
     mimic_profile_text: policy.mimic_profile_text || "",
     mimic_sample_count: safeNumber(policy.mimic_sample_count, 0),
     mimic_distilled_at_count: safeNumber(policy.mimic_distilled_at_count, 0),
+    tts_mode: policy.tts_mode === "on" || policy.tts_mode === "always" ? policy.tts_mode : "off",
+    sticker_fallback_file_ids: Array.isArray(policy.sticker_fallback_file_ids) ? [...policy.sticker_fallback_file_ids] : [],
+    proactive_task_brief: policy.proactive_task_brief || "",
   };
 }
 
@@ -766,7 +780,7 @@ export function GroupAssistantWorkspace({ chatId }: { chatId: number }) {
   }, [chatId]);
 
   useEffect(() => {
-    if (section !== "models" || !Number.isFinite(chatId)) return;
+    if (section !== "global" || !Number.isFinite(chatId)) return;
     let alive = true;
     const controller = new AbortController();
     const refresh = async () => {
@@ -802,6 +816,12 @@ export function GroupAssistantWorkspace({ chatId }: { chatId: number }) {
   const changeSection = (next: string) => {
     const nextSection = next as AssistantSection;
     if (nextSection === section) return;
+    const sharedDraft = section === "speech" || section === "style" || section === "global";
+    const nextShared = nextSection === "speech" || nextSection === "style" || nextSection === "global";
+    if (sharedDraft && nextShared) {
+      setSection(nextSection);
+      return;
+    }
     if (!confirmWorkspaceNavigation("群助手设置还有未保存修改，确定切换分区吗？")) return;
     setSection(nextSection);
   };
@@ -984,10 +1004,11 @@ export function GroupAssistantWorkspace({ chatId }: { chatId: number }) {
           <Tabs
             tabs={[
               { value: "start", label: "开始使用" },
-              { value: "speech", label: "怎么说话" },
+              { value: "speech", label: "回复与媒体" },
+              { value: "style", label: "主动与风格" },
               { value: "memory", label: "群记忆" },
-              { value: "models", label: "模型与负载（高级）" },
               { value: "skills", label: "能查什么" },
+              { value: "global", label: "全局" },
             ]}
             value={section}
             onValueChange={changeSection}
@@ -1014,8 +1035,6 @@ export function GroupAssistantWorkspace({ chatId }: { chatId: number }) {
           <SpeechPanel
             draft={settingsDraft}
             models={models}
-            recentSenders={recentSenders}
-            recentSendersError={recentSendersError}
             registryError={registryError}
             readiness={readinessForDraft}
             saving={savingSettings}
@@ -1039,7 +1058,19 @@ export function GroupAssistantWorkspace({ chatId }: { chatId: number }) {
           />
         )}
         {section === "memory" && <MemoryPanel chatId={chatId} onToast={pushToast} />}
-        {section === "models" && (
+        {section === "style" && (
+          <StylePanel
+            draft={settingsDraft}
+            recentSenders={recentSenders}
+            recentSendersError={recentSendersError}
+            saving={savingSettings}
+            dirty={settingsDirty}
+            onChange={updateSetting}
+            onSave={saveSettings}
+            onCancel={cancelSettings}
+          />
+        )}
+        {section === "global" && (
           <ModelsPanel
             draft={settingsDraft}
             pool={pool}
@@ -1250,8 +1281,6 @@ function ToggleRow({
 function SpeechPanel({
   draft,
   models,
-  recentSenders,
-  recentSendersError,
   registryError,
   readiness,
   saving,
@@ -1263,8 +1292,6 @@ function SpeechPanel({
 }: {
   draft: PolicyDraft;
   models: RegistryModel[];
-  recentSenders: AssistantRecentSender[];
-  recentSendersError: string | null;
   registryError: string | null;
   readiness: ReadinessView;
   saving: boolean;
@@ -1277,12 +1304,6 @@ function SpeechPanel({
   const enabledModels = models.filter((model) => model.enabled);
   const currentChatMissing = Boolean(draft.chat_model_ref && !enabledModels.some((model) => model.ref === draft.chat_model_ref));
   const currentLearningMissing = Boolean(draft.learning_model_ref && !enabledModels.some((model) => model.ref === draft.learning_model_ref));
-  const selectedSender = recentSenders.find((sender) => sender.user_id === draft.mimic_target_user_id);
-  const mimicEnabled = draft.mimic_target_user_id > 0;
-  const collected = Math.max(0, draft.mimic_sample_count);
-  const distilled = Math.max(0, draft.mimic_distilled_at_count);
-  const progress = Math.min(100, Math.round((collected % 50) * 2));
-  const [profilePreviewOpen, setProfilePreviewOpen] = useState(false);
 
   return (
     <div className="space-y-4">
@@ -1367,6 +1388,20 @@ function SpeechPanel({
                 <option value="mention_only">只在 @ 我时回答</option>
               </Select>
             </Field>
+            <Field label="语音模式">
+              <Select aria-label="语音模式" value={draft.tts_mode} onChange={(event) => onChange("tts_mode", event.target.value)}>
+                <option value="off">关闭</option>
+                <option value="on">允许按需语音</option>
+                <option value="always">始终发送语音</option>
+              </Select>
+            </Field>
+            <Field label="贴纸回退 File ID" hint="多个用逗号分隔；当前群发送失败时使用。" className="sm:col-span-2">
+              <Input
+                aria-label="贴纸回退 File ID"
+                value={draft.sticker_fallback_file_ids.join(",")}
+                onChange={(event) => onChange("sticker_fallback_file_ids", event.target.value.split(/[,\s]+/).map((item) => item.trim()).filter(Boolean))}
+              />
+            </Field>
             <Field label="追问窗口（秒）" hint="服务端范围 30–3600">
               <Input type="number" min={30} max={3600} value={draft.followup_window_sec} onChange={(event) => onChange("followup_window_sec", Number(event.target.value))} />
             </Field>
@@ -1376,128 +1411,6 @@ function SpeechPanel({
             <Field label="历史上下文条数" hint="服务端范围 1–200">
               <Input type="number" min={1} max={200} value={draft.history_limit} onChange={(event) => onChange("history_limit", Number(event.target.value))} />
             </Field>
-            <div className="sm:col-span-2 lg:col-span-4 grid gap-3 md:grid-cols-2">
-              <ToggleRow
-                label="有把握才插一句"
-                hint="硬门禁先于决策：两人互回、已有人回答、纯附和或拿不准时不插。"
-                checked={draft.proactive_interject_enabled}
-                onChange={(value) => onChange("proactive_interject_enabled", value)}
-                ariaLabel="有把握才插一句"
-              />
-              <ToggleRow
-                label="冷群找话题"
-                hint="独立开关，默认关闭。闲置后才随口一提，发送前会再次检查群内活动。"
-                checked={draft.proactive_cold_topic_enabled}
-                onChange={(value) => onChange("proactive_cold_topic_enabled", value)}
-                ariaLabel="冷群找话题"
-              />
-            </div>
-            <Field label="闲置多久才找话题（分钟）" hint="最少 180 分钟">
-              <Input type="number" min={180} max={1440} value={draft.cold_topic_idle_minutes} onChange={(event) => onChange("cold_topic_idle_minutes", Math.max(180, Number(event.target.value) || 180))} />
-            </Field>
-            <Field label="静默开始（小时）" hint="0–23 点">
-              <Input type="number" min={0} max={23} value={draft.cold_topic_quiet_start} onChange={(event) => onChange("cold_topic_quiet_start", Number(event.target.value))} />
-            </Field>
-            <Field label="静默结束（小时）" hint="相等表示不设静默">
-              <Input type="number" min={0} max={23} value={draft.cold_topic_quiet_end} onChange={(event) => onChange("cold_topic_quiet_end", Number(event.target.value))} />
-            </Field>
-          </CardBody>
-        </Card>
-
-        <Card>
-          <CardHeader>
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <div>
-                <CardTitle>学习指定成员的语气</CardTitle>
-                <CardDescription>只从当前群近期发言人中选择，不发明全群成员列表。</CardDescription>
-              </div>
-              <Badge tone={mimicEnabled ? "success" : "default"}>{mimicEnabled ? "已开始学习" : "默认克制群友口吻"}</Badge>
-            </div>
-          </CardHeader>
-          <CardBody className="space-y-4">
-            <p className="text-sm leading-relaxed text-[var(--text-muted)]">
-              画像只影响说话方式，不覆盖安全、身份、权限和审核规则。群里不会说自己在模仿谁，也不会把画像正文发出去。
-            </p>
-            <Field label="学习谁" hint={recentSendersError ?? "只显示当前群保留期内已审核消息的去重发送者。"}>
-              <Select
-                aria-label="学习对象"
-                value={draft.mimic_target_user_id ? String(draft.mimic_target_user_id) : ""}
-                onChange={(event) => {
-                  const nextId = Number(event.target.value) || 0;
-                  const sender = recentSenders.find((item) => item.user_id === nextId);
-                  onChange("mimic_target_user_id", nextId);
-                  onChange("mimic_target_user_name", sender?.user_name ?? "");
-                  if (!nextId) {
-                    onChange("mimic_profile_text", "");
-                    onChange("mimic_sample_count", 0);
-                    onChange("mimic_distilled_at_count", 0);
-                  } else if (nextId !== draft.mimic_target_user_id) {
-                    onChange("mimic_profile_text", "");
-                    onChange("mimic_sample_count", 0);
-                    onChange("mimic_distilled_at_count", 0);
-                  }
-                }}
-              >
-                <option value="">不学习，保持默认口吻</option>
-                {draft.mimic_target_user_id > 0 && !selectedSender && (
-                  <option value={String(draft.mimic_target_user_id)}>{draft.mimic_target_user_name || "当前学习对象"}</option>
-                )}
-                {recentSenders.map((sender) => (
-                  <option key={sender.user_id} value={String(sender.user_id)}>
-                    {sender.user_name} · 近期 {sender.message_count ?? 0} 条
-                  </option>
-                ))}
-              </Select>
-            </Field>
-            {mimicEnabled ? (
-              <div className="space-y-3 rounded-xl border border-[var(--border)] bg-[var(--surface-2)] p-4">
-                <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-[var(--text-muted)]">
-                  <span>当前对象：{draft.mimic_target_user_name || selectedSender?.user_name || "未知"}</span>
-                  <span>已采集 {collected} 条 · 已蒸馏 {distilled} 条</span>
-                </div>
-                <div className="h-2 overflow-hidden rounded-full bg-[var(--border)]">
-                  <div className="h-full rounded-full bg-[var(--accent)] transition-all" style={{ width: `${progress}%` }} />
-                </div>
-                <div className="rounded-lg border border-[var(--border)] bg-[var(--surface)] p-3 text-sm leading-relaxed">
-                  {draft.mimic_profile_text || "还在收集样本；达到一批审核通过的消息后会生成中文画像。"}
-                </div>
-                <div className="flex flex-wrap gap-2">
-                  <Button
-                    type="button"
-                    variant="secondary"
-                    size="sm"
-                    onClick={() => setProfilePreviewOpen(true)}
-                  >
-                    查看画像预览
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="danger"
-                    size="sm"
-                    onClick={() => {
-                      onChange("mimic_target_user_id", 0);
-                      onChange("mimic_target_user_name", "");
-                      onChange("mimic_profile_text", "");
-                      onChange("mimic_sample_count", 0);
-                      onChange("mimic_distilled_at_count", 0);
-                    }}
-                  >
-                    停止学习
-                  </Button>
-                </div>
-                {profilePreviewOpen && (
-                  <div className="rounded-xl border border-[var(--accent)]/20 bg-[var(--accent-soft)]/30 p-3 text-sm" role="region" aria-label="当前画像预览">
-                    <div className="flex items-center justify-between gap-2"><p className="font-medium">当前画像预览</p><Button type="button" variant="ghost" size="sm" onClick={() => setProfilePreviewOpen(false)}>收起</Button></div>
-                    <p className="mt-2 whitespace-pre-wrap leading-relaxed">{draft.mimic_profile_text || "还没有画像，继续收集审核通过的消息即可。"}</p>
-                    <p className="mt-2 text-xs text-[var(--text-muted)]">这段内容只在后台展示，群里发言不会念出画像。</p>
-                  </div>
-                )}
-              </div>
-            ) : (
-              <p className="rounded-xl border border-dashed border-[var(--border-strong)] p-4 text-xs leading-relaxed text-[var(--text-muted)]">
-                未指定学习对象。默认使用克制、短句、像普通群友的口吻。
-              </p>
-            )}
           </CardBody>
         </Card>
 
@@ -1554,6 +1467,108 @@ function SpeechPanel({
   );
 }
 
+function StylePanel({
+  draft,
+  recentSenders,
+  recentSendersError,
+  saving,
+  dirty,
+  onChange,
+  onSave,
+  onCancel,
+}: {
+  draft: PolicyDraft;
+  recentSenders: AssistantRecentSender[];
+  recentSendersError: string | null;
+  saving: boolean;
+  dirty: boolean;
+  onChange: <K extends keyof PolicyDraft>(key: K, value: PolicyDraft[K]) => void;
+  onSave: () => void;
+  onCancel: () => void;
+}) {
+  return (
+    <div className="space-y-4">
+      <fieldset disabled={saving} aria-busy={saving} className={cn("space-y-4 border-0 p-0", saving && "opacity-70")}>
+        <Card>
+          <CardHeader>
+            <CardTitle>主动与风格</CardTitle>
+            <CardDescription>插话、冷群和学语气。近期发言人点一下即可填入 ID 和名字。</CardDescription>
+          </CardHeader>
+          <CardBody className="space-y-4">
+            <ToggleRow label="有把握才插一句" hint="硬门禁先于决策。" checked={draft.proactive_interject_enabled} onChange={(value) => onChange("proactive_interject_enabled", value)} ariaLabel="有把握才插一句" />
+            <ToggleRow label="冷群找话题" hint="闲置后才随口一提。" checked={draft.proactive_cold_topic_enabled} onChange={(value) => onChange("proactive_cold_topic_enabled", value)} ariaLabel="冷群找话题" />
+            <Field label="闲置多久才找话题（分钟）" hint="最少 180 分钟">
+              <Input type="number" min={180} max={1440} value={draft.cold_topic_idle_minutes} onChange={(event) => onChange("cold_topic_idle_minutes", Math.max(180, Number(event.target.value) || 180))} />
+            </Field>
+            <Field label="静默开始（小时）" hint="0–23 点">
+              <Input type="number" min={0} max={23} value={draft.cold_topic_quiet_start} onChange={(event) => onChange("cold_topic_quiet_start", Number(event.target.value))} />
+            </Field>
+            <Field label="静默结束（小时）" hint="相等表示不设静默">
+              <Input type="number" min={0} max={23} value={draft.cold_topic_quiet_end} onChange={(event) => onChange("cold_topic_quiet_end", Number(event.target.value))} />
+            </Field>
+            <Field label="主动任务简述">
+              <Textarea aria-label="主动任务简述" rows={3} maxLength={2000} value={draft.proactive_task_brief} onChange={(event) => onChange("proactive_task_brief", event.target.value)} />
+            </Field>
+            <div className="grid gap-3 md:grid-cols-2">
+              <Field label="风格目标用户 ID">
+                <Input
+                  aria-label="风格目标用户 ID"
+                  type="number"
+                  min={0}
+                  value={draft.mimic_target_user_id || 0}
+                  onChange={(event) => {
+                    const nextId = Math.max(0, Number(event.target.value) || 0);
+                    onChange("mimic_target_user_id", nextId);
+                    if (!nextId) {
+                      onChange("mimic_target_user_name", "");
+                      onChange("mimic_profile_text", "");
+                      onChange("mimic_sample_count", 0);
+                      onChange("mimic_distilled_at_count", 0);
+                    } else if (nextId !== draft.mimic_target_user_id) {
+                      onChange("mimic_profile_text", "");
+                      onChange("mimic_sample_count", 0);
+                      onChange("mimic_distilled_at_count", 0);
+                    }
+                  }}
+                />
+              </Field>
+              <Field label="风格目标名称">
+                <Input aria-label="风格目标名称" maxLength={80} value={draft.mimic_target_user_name} onChange={(event) => onChange("mimic_target_user_name", event.target.value)} />
+              </Field>
+            </div>
+            <Field label="说话风格画像" hint={`已采样 ${draft.mimic_sample_count} 条，最近蒸馏点 ${draft.mimic_distilled_at_count} 条`}>
+              <Textarea aria-label="说话风格画像" rows={5} maxLength={1200} value={draft.mimic_profile_text} onChange={(event) => onChange("mimic_profile_text", event.target.value)} />
+            </Field>
+            <Field label="近期发言人一键填入" hint={recentSendersError ?? "只列出当前群近期发言人。"}>
+              <Select
+                aria-label="近期发言人"
+                value={draft.mimic_target_user_id ? String(draft.mimic_target_user_id) : ""}
+                onChange={(event) => {
+                  const nextId = Number(event.target.value) || 0;
+                  const sender = recentSenders.find((item) => item.user_id === nextId);
+                  onChange("mimic_target_user_id", nextId);
+                  onChange("mimic_target_user_name", sender?.user_name ?? "");
+                  onChange("mimic_profile_text", "");
+                  onChange("mimic_sample_count", 0);
+                  onChange("mimic_distilled_at_count", 0);
+                }}
+              >
+                <option value="">不学习，保持默认口吻</option>
+                {recentSenders.map((sender) => (
+                  <option key={sender.user_id} value={String(sender.user_id)}>
+                    {sender.user_name} · {sender.user_id}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+          </CardBody>
+        </Card>
+      </fieldset>
+      <SaveBar dirty={dirty} saving={saving} onSave={onSave} onCancel={onCancel} scope="群助手设置" />
+    </div>
+  );
+}
+
 function ModelsPanel({
   draft,
   pool,
@@ -1594,7 +1609,7 @@ function ModelsPanel({
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div>
               <CardTitle>模型与负载</CardTitle>
-              <CardDescription>高级设置。日常只需要在「怎么说话」中选择聊天模型。</CardDescription>
+              <CardDescription>高级设置。日常只需要在「回复与媒体」中选择聊天模型。</CardDescription>
             </div>
             <Badge tone="info">主模型优先，忙时自动用备用</Badge>
           </div>
@@ -1689,6 +1704,7 @@ function ModelsPanel({
         </CardBody>
       </Card>
       <SaveBar dirty={dirty} saving={saving} onSave={onSave} onCancel={onCancel} scope="群助手设置" />
+      <GlobalAssistantBlock models={[...modelByRef.values()]} />
     </div>
   );
 }
@@ -1754,7 +1770,7 @@ function SkillsPanel({
     <div className="grid gap-4 lg:grid-cols-[minmax(0,1.3fr)_minmax(280px,0.7fr)]">
       <Card>
         <CardHeader>
-          <SectionTitle icon={Wrench} title="能查什么" description="三个只读技能，范围由服务端绑定。" />
+          <SectionTitle icon={Wrench} title="能查什么" description="现有只读三件套，加上当前群贴纸发送。语音按模式，不是随便写库。" />
         </CardHeader>
         <CardBody>
           {tools ? (
@@ -1765,7 +1781,7 @@ function SkillsPanel({
                   <div key={tool} className="rounded-xl border border-[var(--border)] p-4">
                     <div className="flex flex-wrap items-center justify-between gap-2">
                       <div className="flex items-center gap-2"><span className="font-medium">{TOOL_LABELS[tool]}</span><Badge tone={actual?.enabled ? "success" : "default"}>{actual?.enabled ? "已启用" : "未启用"}</Badge></div>
-                      <Badge tone={actual?.read_only === false ? "danger" : "success"}>{actual?.read_only === false ? "异常：可写" : "只读"}</Badge>
+                      <Badge tone={tool === "send_sticker" ? "info" : actual?.read_only === false ? "danger" : "success"}>{tool === "send_sticker" ? "当前群" : actual?.read_only === false ? "异常：可写" : "只读"}</Badge>
                     </div>
                     <p className="mt-2 text-xs leading-relaxed text-[var(--text-muted)]">{TOOL_DESCRIPTIONS[tool]}</p>
                     {tool === "webfetch_readonly" && <p className="mt-2 text-xs text-[var(--text-subtle)]">只允许服务端约束的公开网页读取；失败、超时或截断会明确返回失败。</p>}
@@ -1792,7 +1808,7 @@ function SkillsPanel({
             </div>
           ))}
           <div className="border-t border-[var(--border)] pt-3 text-xs text-[var(--text-muted)]"><p>网页域名白名单</p><p className="mt-1 break-words">{policy.allow_domains.length ? policy.allow_domains.join("、") : "未设置"}</p></div>
-          <Button type="button" variant="secondary" size="sm" onClick={onOpenSettings}>去怎么说话设置</Button>
+          <Button type="button" variant="secondary" size="sm" onClick={onOpenSettings}>去回复与媒体设置</Button>
         </CardBody>
       </Card>
     </div>
@@ -2292,6 +2308,260 @@ function MemoryEditorDialog({
           <div className="mt-5 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end"><Button type="button" variant="secondary" onClick={close}>取消</Button><Button type="button" onClick={() => { void save(); }} disabled={saving || !subject.trim() || !content.trim() || !scope.trim()}>{saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}{saving ? "保存中…" : "保存更正"}</Button></div>
         </fieldset>
       </div>
+    </div>
+  );
+}
+
+const ROLE_LABELS: Record<string, string> = {
+  main: "主模型",
+  decision: "决策",
+  vision: "视觉",
+  compress: "压缩",
+  vector: "向量",
+};
+
+function emptyRole(): AssistantModelRole {
+  return { model_ref: "", timeout_sec: 12, temperature: 0.7, max_tokens: 2048, fallbacks: [] };
+}
+
+function RoleFallbackList({
+  name,
+  label,
+  fallbacks,
+  models,
+  onChange,
+}: {
+  name: string;
+  label: string;
+  fallbacks: string[];
+  models: RegistryModel[];
+  onChange: (next: string[]) => void;
+}) {
+  const items = fallbacks.length > 0 ? fallbacks : [""];
+  return (
+    <div className="space-y-2 md:col-span-2">
+      {items.map((ref, index) => (
+        <div key={`${name}-fallback-${index}`} className="flex gap-2">
+          <Select
+            aria-label={index === 0 ? `${label}回退` : `${label}回退 ${index + 1}`}
+            value={ref}
+            onChange={(event) => {
+              const next = [...items];
+              next[index] = event.target.value;
+              onChange(next);
+            }}
+          >
+            <option value="">不设回退</option>
+            {models.map((model) => (
+              <option key={model.ref} value={model.ref}>{model.label || model.ref}</option>
+            ))}
+          </Select>
+          {items.length > 1 && (
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              onClick={() => onChange(items.filter((_, i) => i !== index).filter(Boolean))}
+            >
+              删除
+            </Button>
+          )}
+        </div>
+      ))}
+      <Button
+        type="button"
+        variant="secondary"
+        size="sm"
+        onClick={() => onChange([...items, ""])}
+      >
+        添加回退模型
+      </Button>
+    </div>
+  );
+}
+
+function GlobalAssistantBlock({ models }: { models: RegistryModel[] }) {
+  const { pushToast } = useToast();
+  const [globalSettings, setGlobalSettings] = useState<AssistantGlobalSettings | null>(null);
+  const [prompts, setPrompts] = useState<Record<string, string>>({ persona: "", casual: "", decision: "", proactive_topic: "", style_distill: "" });
+  const [appKey, setAppKey] = useState("");
+  const [accessKey, setAccessKey] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const enabledModels = models.filter((model) => model.enabled);
+
+  const loadGlobal = () => {
+    setLoading(true);
+    setLoadError(null);
+    void Promise.all([fetchAssistantGlobal(), fetchAssistantPrompts()])
+      .then(([nextGlobal, nextPrompts]) => {
+        setGlobalSettings(nextGlobal);
+        setPrompts({ persona: "", casual: "", decision: "", proactive_topic: "", style_distill: "", ...(nextPrompts.prompts ?? {}) });
+        setLoadError(null);
+      })
+      .catch((error) => {
+        const message = errorText(error, "全局助手设置暂时无法加载。");
+        setLoadError(message);
+        pushToast(message, "error");
+      })
+      .finally(() => {
+        setLoading(false);
+      });
+  };
+
+  useEffect(() => {
+    loadGlobal();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pushToast]);
+
+  if (loadError) {
+    return (
+      <div className="mb-3 rounded-xl border border-[var(--warning)]/30 bg-[var(--warning-soft)]/40 p-3 text-sm text-[var(--warning)]">
+        <p>{loadError}</p>
+        <Button type="button" variant="secondary" size="sm" className="mt-2" onClick={() => loadGlobal()}>重试</Button>
+      </div>
+    );
+  }
+
+  if (loading || !globalSettings) {
+    return <p className="mb-3 text-xs text-[var(--text-muted)]">正在加载全局模型角色、提示词和媒体设置…</p>;
+  }
+
+  const updateRole = (name: string, patch: Partial<AssistantModelRole>) => {
+    const current = globalSettings.model_roles[name] ?? emptyRole();
+    setGlobalSettings({
+      ...globalSettings,
+      model_roles: { ...globalSettings.model_roles, [name]: { ...current, ...patch } },
+    });
+  };
+
+  const save = async () => {
+    setSaving(true);
+    try {
+      const roles = Object.fromEntries(
+        Object.entries(globalSettings.model_roles).map(([key, role]) => [
+          key,
+          { ...role, fallbacks: (role.fallbacks ?? []).map((item) => item.trim()).filter(Boolean) },
+        ]),
+      );
+      const saved = await saveAssistantGlobal({
+        expected_version: globalSettings.version,
+        model_roles: roles,
+        bot: globalSettings.bot,
+        tts: { ...globalSettings.tts, app_key: appKey, access_key: accessKey },
+        stickers: globalSettings.stickers,
+      });
+      setGlobalSettings(saved);
+      setAppKey("");
+      setAccessKey("");
+      await saveAssistantPrompts(prompts);
+      pushToast("全局助手设置已保存", "success");
+    } catch (error) {
+      pushToast(errorText(error, "保存全局助手设置失败。"), "error");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="mb-4 space-y-4">
+      <Card>
+        <CardHeader>
+          <CardTitle>模型角色</CardTitle>
+          <CardDescription>只引用现有模型，不另建供应商。空白非主模型继承主模型。</CardDescription>
+        </CardHeader>
+        <CardBody className="space-y-3">
+          {(["main", "decision", "vision", "compress", "vector"] as const).map((name) => {
+            const role = globalSettings.model_roles[name] ?? emptyRole();
+            return (
+              <div key={name} className="rounded-xl border border-[var(--border)] p-3">
+                <p className="mb-2 text-sm font-medium">{ROLE_LABELS[name]}</p>
+                <div className="grid gap-2 md:grid-cols-2">
+                  <Select aria-label={`${ROLE_LABELS[name]}模型`} value={role.model_ref} onChange={(event) => updateRole(name, { model_ref: event.target.value })}>
+                    <option value="">空白则继承主模型</option>
+                    {enabledModels.map((model) => (
+                      <option key={model.ref} value={model.ref}>{model.label || model.ref}</option>
+                    ))}
+                  </Select>
+                  <RoleFallbackList
+                    name={name}
+                    label={ROLE_LABELS[name]}
+                    fallbacks={role.fallbacks ?? []}
+                    models={enabledModels}
+                    onChange={(fallbacks) => updateRole(name, { fallbacks })}
+                  />
+                  <Input aria-label={`${ROLE_LABELS[name]}超时`} type="number" min={1} max={120} placeholder="超时秒" value={role.timeout_sec ?? ""} onChange={(event) => updateRole(name, { timeout_sec: Number(event.target.value) || 0 })} />
+                  <Input aria-label={`${ROLE_LABELS[name]}温度`} type="number" min={0} max={2} step={0.1} placeholder="温度" value={role.temperature ?? ""} onChange={(event) => updateRole(name, { temperature: Number(event.target.value) })} />
+                  <Input aria-label={`${ROLE_LABELS[name]}最大输出`} type="number" min={0} max={8192} placeholder="最大输出" value={role.max_tokens ?? ""} onChange={(event) => updateRole(name, { max_tokens: Number(event.target.value) || 0 })} />
+                </div>
+              </div>
+            );
+          })}
+        </CardBody>
+      </Card>
+      <Card>
+        <CardHeader>
+          <CardTitle>提示词</CardTitle>
+          <CardDescription>空则用内嵌默认。安全段、只读边界和 ACTIVE_PERSONA 规则仍由程序追加。</CardDescription>
+        </CardHeader>
+        <CardBody className="space-y-3">
+          {(["persona", "casual", "decision", "proactive_topic", "style_distill"] as const).map((key) => {
+            const label = key === "persona" ? "人格" : key === "casual" ? "日常对话" : key === "decision" ? "回复决策" : key === "proactive_topic" ? "主动话题" : "风格提炼";
+            return (
+            <Field key={key} label={label}>
+              <Textarea aria-label={label} rows={4} value={prompts[key] ?? ""} onChange={(event) => setPrompts({ ...prompts, [key]: event.target.value })} />
+            </Field>
+            );
+          })}
+        </CardBody>
+      </Card>
+      <Card>
+        <CardHeader>
+          <CardTitle>机器人行为</CardTitle>
+          <CardDescription>入站合并、回复时限、上下文条数和召回开关。</CardDescription>
+        </CardHeader>
+        <CardBody className="grid gap-3 md:grid-cols-3">
+          <Field label="入站合并窗口（秒）"><Input type="number" min={0} max={60} step={0.1} value={globalSettings.bot.inbound_merge_window_sec} onChange={(event) => setGlobalSettings({ ...globalSettings, bot: { ...globalSettings.bot, inbound_merge_window_sec: Number(event.target.value) } })} /></Field>
+          <Field label="回复总时限（秒）"><Input type="number" min={5} max={120} value={globalSettings.bot.reply_total_timeout_sec} onChange={(event) => setGlobalSettings({ ...globalSettings, bot: { ...globalSettings.bot, reply_total_timeout_sec: Number(event.target.value) } })} /></Field>
+          <Field label="决策上下文条数"><Input type="number" min={0} max={20} value={globalSettings.bot.decision_context_items} onChange={(event) => setGlobalSettings({ ...globalSettings, bot: { ...globalSettings.bot, decision_context_items: Number(event.target.value) } })} /></Field>
+          <ToggleRow label="原文保留" hint="默认开。开启时热窗口压缩不会用摘要替换原文。" checked={globalSettings.bot.keep_original_text} onChange={(value) => setGlobalSettings({ ...globalSettings, bot: { ...globalSettings.bot, keep_original_text: value } })} ariaLabel="原文保留" />
+          <ToggleRow label="召回开关" hint="关闭后会话召回不再补充向量候选。" checked={globalSettings.bot.memory_recall_enabled} onChange={(value) => setGlobalSettings({ ...globalSettings, bot: { ...globalSettings.bot, memory_recall_enabled: value } })} ariaLabel="召回开关" />
+          <ToggleRow label="热窗口压缩" hint="默认关。配了压缩模型且开启才压热窗口，不删原文档案。" checked={globalSettings.bot.hot_window_compress_enabled} onChange={(value) => setGlobalSettings({ ...globalSettings, bot: { ...globalSettings.bot, hot_window_compress_enabled: value } })} ariaLabel="热窗口压缩" />
+          <Field label="空闲触发（分钟）"><Input type="number" min={180} max={43200} value={globalSettings.bot.proactive_idle_minutes} onChange={(event) => setGlobalSettings({ ...globalSettings, bot: { ...globalSettings.bot, proactive_idle_minutes: Number(event.target.value) } })} /></Field>
+          <Field label="安静时段开始"><Input type="number" min={0} max={23} value={globalSettings.bot.proactive_quiet_start} onChange={(event) => setGlobalSettings({ ...globalSettings, bot: { ...globalSettings.bot, proactive_quiet_start: Number(event.target.value) } })} /></Field>
+          <Field label="安静时段结束"><Input type="number" min={0} max={23} value={globalSettings.bot.proactive_quiet_end} onChange={(event) => setGlobalSettings({ ...globalSettings, bot: { ...globalSettings.bot, proactive_quiet_end: Number(event.target.value) } })} /></Field>
+          <Field label="检查间隔（秒）"><Input type="number" min={15} max={3600} value={globalSettings.bot.proactive_check_interval_sec} onChange={(event) => setGlobalSettings({ ...globalSettings, bot: { ...globalSettings.bot, proactive_check_interval_sec: Number(event.target.value) } })} /></Field>
+        </CardBody>
+      </Card>
+      <Card>
+        <CardHeader>
+          <CardTitle>媒体</CardTitle>
+          <CardDescription>豆包语音全局开关与连接参数；密钥不回显。贴纸回退 File ID 是全局默认。</CardDescription>
+        </CardHeader>
+        <CardBody className="grid gap-3 md:grid-cols-2">
+          <ToggleRow label="启用语音合成" hint="关闭后任何群都不发语音。" checked={globalSettings.tts.enabled} onChange={(value) => setGlobalSettings({ ...globalSettings, tts: { ...globalSettings.tts, enabled: value } })} ariaLabel="启用语音合成" />
+          <Field label="接口地址"><Input value={globalSettings.tts.api_base} onChange={(event) => setGlobalSettings({ ...globalSettings, tts: { ...globalSettings.tts, api_base: event.target.value } })} /></Field>
+          <Field label="应用编号"><Input value={globalSettings.tts.app_id} onChange={(event) => setGlobalSettings({ ...globalSettings, tts: { ...globalSettings.tts, app_id: event.target.value } })} /></Field>
+          <Field label="音色"><Input value={globalSettings.tts.speaker} onChange={(event) => setGlobalSettings({ ...globalSettings, tts: { ...globalSettings.tts, speaker: event.target.value } })} /></Field>
+          <Field label="应用密钥">{globalSettings.tts.app_key_configured ? "已配置" : "未配置"}<Input type="password" value={appKey} onChange={(event) => setAppKey(event.target.value)} placeholder="空白不覆盖" /></Field>
+          <Field label="访问密钥">{globalSettings.tts.access_key_configured ? "已配置" : "未配置"}<Input type="password" value={accessKey} onChange={(event) => setAccessKey(event.target.value)} placeholder="空白不覆盖" /></Field>
+          <Field label="请求超时（秒）"><Input type="number" min={1} max={300} step={0.1} value={globalSettings.tts.http_timeout_sec} onChange={(event) => setGlobalSettings({ ...globalSettings, tts: { ...globalSettings.tts, http_timeout_sec: Number(event.target.value) } })} /></Field>
+          <Field label="最大文本长度"><Input type="number" min={1} max={10000} value={globalSettings.tts.max_text_length} onChange={(event) => setGlobalSettings({ ...globalSettings, tts: { ...globalSettings.tts, max_text_length: Number(event.target.value) } })} /></Field>
+          <Field label="资源编号"><Input value={globalSettings.tts.resource_id} onChange={(event) => setGlobalSettings({ ...globalSettings, tts: { ...globalSettings.tts, resource_id: event.target.value } })} /></Field>
+          <Field label="模型"><Input value={globalSettings.tts.model} onChange={(event) => setGlobalSettings({ ...globalSettings, tts: { ...globalSettings.tts, model: event.target.value } })} /></Field>
+          <Field label="音频格式"><Input value={globalSettings.tts.audio_format} onChange={(event) => setGlobalSettings({ ...globalSettings, tts: { ...globalSettings.tts, audio_format: event.target.value } })} /></Field>
+          <Field label="采样率"><Input type="number" min={8000} max={192000} value={globalSettings.tts.sample_rate} onChange={(event) => setGlobalSettings({ ...globalSettings, tts: { ...globalSettings.tts, sample_rate: Number(event.target.value) } })} /></Field>
+          <Field label="比特率"><Input type="number" min={0} max={512000} value={globalSettings.tts.bit_rate} onChange={(event) => setGlobalSettings({ ...globalSettings, tts: { ...globalSettings.tts, bit_rate: Number(event.target.value) } })} /></Field>
+          <Field label="情感"><Input value={globalSettings.tts.emotion} onChange={(event) => setGlobalSettings({ ...globalSettings, tts: { ...globalSettings.tts, emotion: event.target.value } })} /></Field>
+          <Field label="情感强度"><Input type="number" min={1} max={5} value={globalSettings.tts.emotion_scale} onChange={(event) => setGlobalSettings({ ...globalSettings, tts: { ...globalSettings.tts, emotion_scale: Number(event.target.value) } })} /></Field>
+          <Field label="语速调整"><Input type="number" min={-100} max={100} value={globalSettings.tts.speech_rate} onChange={(event) => setGlobalSettings({ ...globalSettings, tts: { ...globalSettings.tts, speech_rate: Number(event.target.value) } })} /></Field>
+          <Field label="音量调整"><Input type="number" min={-100} max={100} value={globalSettings.tts.loudness_rate} onChange={(event) => setGlobalSettings({ ...globalSettings, tts: { ...globalSettings.tts, loudness_rate: Number(event.target.value) } })} /></Field>
+          <Field label="尾部静音（毫秒）"><Input type="number" min={0} max={10000} value={globalSettings.tts.silence_duration_ms} onChange={(event) => setGlobalSettings({ ...globalSettings, tts: { ...globalSettings.tts, silence_duration_ms: Number(event.target.value) } })} /></Field>
+          <Field label="贴纸回退 File ID" className="md:col-span-2"><Input value={globalSettings.stickers.fallback_file_ids.join(",")} onChange={(event) => setGlobalSettings({ ...globalSettings, stickers: { fallback_file_ids: event.target.value.split(/[,\s]+/).map((item) => item.trim()).filter(Boolean) } })} /></Field>
+        </CardBody>
+      </Card>
+      <Button type="button" size="sm" disabled={saving} onClick={() => { void save(); }}>{saving ? "保存中…" : "保存全局设置"}</Button>
     </div>
   );
 }

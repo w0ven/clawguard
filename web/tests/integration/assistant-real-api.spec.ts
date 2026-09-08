@@ -20,7 +20,7 @@ const test=base.extend<{journal:IntegrationJournal}>({journal:[async({page}:{pag
  },{auto:true}]});
 async function login(page:Page,token=session.ownerToken){await page.context().addCookies([{name:'cg_admin',value:token,url:session.baseURL,httpOnly:true,sameSite:'Lax'},{name:'cg_csrf',value:session.csrf,url:session.baseURL,sameSite:'Lax'}]);}
 async function open(page:Page,chat:number){await login(page);await page.goto(`/groups/${chat}/assistant`);await expect(page.getByText('实际状态',{exact:true})).toBeVisible();await expect(page.getByLabel('切换群组')).toBeVisible();}
-const sectionAliases:Record<string,string>={'总览':'开始使用','聊天与学习':'怎么说话','记忆中心':'群记忆','模型池':'模型与负载（高级）','只读技能':'能查什么'};
+const sectionAliases:Record<string,string>={'总览':'开始使用','聊天与学习':'回复与媒体','怎么说话':'回复与媒体','记忆中心':'群记忆','模型池':'全局','模型与负载（高级）':'全局','只读技能':'能查什么'};
 async function tab(page:Page,name:string){await page.getByRole('button',{name:sectionAliases[name]??name,exact:true}).click();}
 async function checkedResponse<T>(response:Promise<Response>,status:number):Promise<T>{const r=await response;const body:T=await r.json();expect(r.status(),`${r.request().method()} ${r.url()} body=${JSON.stringify(body)}`).toBe(status);return body;}
 async function write<T=unknown>(page:Page,chat:number,suffix:string,method:string,click:()=>Promise<void>,status=200):Promise<T>{const waiting=page.waitForResponse(r=>new URL(r.url()).pathname===path(chat,suffix)&&r.request().method()===method);await click();return checkedResponse<T>(waiting,status);}

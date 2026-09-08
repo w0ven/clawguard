@@ -113,6 +113,7 @@ func (s *Service) handleApprovedAssistantMessage(ctx context.Context, msg *tele.
 		}
 		return nil
 	}
+	s.assistant.collectApprovedSticker(ctx, msg)
 	if !policy.ChatEnabled && !policy.LearningEnabled {
 		// Mimic is an explicit, independent opt-in. It may collect only the
 		// approved target text, without enabling ordinary history/chat writes.
@@ -132,6 +133,7 @@ func (s *Service) handleApprovedAssistantMessage(ctx context.Context, msg *tele.
 		text = strings.TrimSpace(msg.Caption)
 	}
 	if text == "" {
+		s.assistant.collectApprovedSticker(ctx, msg)
 		return nil
 	}
 	if isEdited {
@@ -202,6 +204,8 @@ func (s *Service) processQueuedAssistantReply(ctx context.Context, msg *tele.Mes
 }
 
 func (s *Service) processAssistantReplyNow(ctx context.Context, msg *tele.Message, text string, policy store.GroupAssistantPolicy, direct bool, mode assistantReplyMode, isAdmin bool, mergedCount int) error {
+	settings := s.assistant.loadRuntimeSettings(ctx)
+	roles := parseAssistantRoleSet(settings.ModelRoles)
 	pool, err := s.assistant.loadPool(ctx, msg.Chat.ID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -210,6 +214,7 @@ func (s *Service) processAssistantReplyNow(ctx context.Context, msg *tele.Messag
 		}
 		return err
 	}
+	pool = applyAssistantRolesToPool(pool, roles, policy)
 	readiness := s.assistant.ChatReadinessForPool(pool)
 	if !readiness.CanChat {
 		reason := "聊天模型未就绪"
@@ -237,6 +242,7 @@ func (s *Service) processAssistantReplyNow(ctx context.Context, msg *tele.Messag
 	for left, right := 0, len(history)-1; left < right; left, right = left+1, right-1 {
 		history[left], history[right] = history[right], history[left]
 	}
+	history = s.assistant.compressHotWindow(ctx, msg.Chat.ID, pool, policy, history, settings, roles)
 	if !direct && !assistantHardInterjectionGate(msg, history, s.bot) {
 		return nil
 	}
@@ -246,8 +252,22 @@ func (s *Service) processAssistantReplyNow(ctx context.Context, msg *tele.Messag
 		return nil
 	}
 	messages := assistantUntrustedContextWithSender(policy, memories, history, current, sender)
-	system := assistantSystemPromptForRuntime(policy, string(mode), s.bot, sender)
-	answer, _, err := s.assistant.dispatchTools(ctx, msg.Chat.ID, pool, policy, system, messages, assistantToolsFor(policy))
+	if len(messages) > 0 {
+		messages[len(messages)-1].Content = s.assistant.visionMessageParts(ctx, msg, current, roles)
+	}
+	overrides := s.assistant.loadPromptOverrides(ctx, msg.Chat.ID)
+	system := assistantSystemPromptForModeWithOverrides(policy, string(mode), overrides) + "\n" + assistantBotIdentityBlock(s.bot) + "\n" + assistantCurrentSenderBlock(sender)
+	if brief := strings.TrimSpace(policy.ProactiveTaskBrief); brief != "" && mode == assistantReplyJoin {
+		system += "\n[PROACTIVE_TASK_BRIEF]\n" + truncateAssistant(brief, 500)
+	}
+	if ttsBlock := assistantTTSPreferenceBlock(policy.TTSMode, s.assistant.assistantTTSReady(settings)); ttsBlock != "" {
+		system += "\n" + ttsBlock
+	}
+	s.assistant.toolRuntime = &assistantToolRuntime{msg: msg, mode: mode, settings: settings, roles: roles, current: current}
+	defer func() { s.assistant.toolRuntime = nil }()
+	replyCtx, replyCancel := context.WithTimeout(ctx, assistantReplyTimeout(settings))
+	defer replyCancel()
+	answer, _, err := s.assistant.dispatchTools(replyCtx, msg.Chat.ID, pool, policy, system, messages, assistantToolsFor(policy, settings, s.assistant.assistantTTSReady(settings)))
 	if err != nil {
 		s.logger.Warn("group assistant chat failed", zap.Error(err), zap.Int64("chat_id", msg.Chat.ID), zap.Int("message_id", msg.ID))
 		return nil
@@ -271,6 +291,19 @@ func (s *Service) processAssistantReplyNow(ctx context.Context, msg *tele.Messag
 	if err != nil {
 		s.logger.Warn("send group assistant response failed", zap.Error(err), zap.Int64("chat_id", msg.Chat.ID), zap.Int("message_id", msg.ID))
 		return nil
+	}
+	if normalizeAssistantTTSMode(policy.TTSMode) == assistantTTSModeAlways {
+		if !settings.TTSEnabled || !s.assistant.assistantTTSReady(settings) {
+			s.assistant.logTTSSkip(msg.Chat.ID, "始终语音已开，但全局未启用或未配置密钥，不假装发送成功")
+		} else {
+			synth := s.assistant.ttsSynthesizer(settings)
+			ttsResult := synth.Synthesize(sendCtx, answer)
+			if !ttsResult.OK {
+				s.assistant.logTTSSkip(msg.Chat.ID, "始终语音合成失败："+ttsResult.Error)
+			} else if _, voiceErr := s.sendAssistantVoice(sendCtx, msg.Chat, ttsResult.Audio, ttsResult.Format, sendOptions); voiceErr != nil {
+				s.assistant.logTTSSkip(msg.Chat.ID, "始终语音发送失败")
+			}
+		}
 	}
 	assistantMessageID := int64(0)
 	if sent != nil {
@@ -434,11 +467,24 @@ func (a *GroupAssistant) decideInterjection(ctx context.Context, msg *tele.Messa
 			current = strings.TrimSpace(msg.Caption)
 		}
 	}
-	prompt := assistantDecisionContext(a.botForPrompt(), sender, history, current, mergedContext, mergedCount)
-	result, _, err := a.dispatchPlain(ctx, msg.Chat.ID, "chat", pool, policy, ai.CheckRequest{
+	settings := a.loadRuntimeSettings(ctx)
+	roles := parseAssistantRoleSet(settings.ModelRoles)
+	pool = applyAssistantRolesToPool(pool, roles, policy)
+	task := "chat"
+	if _, ok := assistantTaskEndpointIDs(pool, "decision"); ok {
+		task = "decision"
+	}
+	prompt := assistantDecisionContext(a.botForPrompt(), sender, history, current, mergedContext, mergedCount, assistantDecisionHistoryLimit(settings))
+	decisionPrompt := assistantResolvedPrompt(a.loadPromptOverrides(ctx, msg.Chat.ID), "decision")
+	decisionRole := roles.effective("decision")
+	timeout := time.Duration(decisionRole.TimeoutSec * float64(time.Second))
+	if timeout < time.Second {
+		timeout = 10 * time.Second
+	}
+	result, _, err := a.dispatchPlain(ctx, msg.Chat.ID, task, pool, policy, ai.CheckRequest{
 		Model:        policy.ChatModelRef,
-		SystemPrompt: assistantDecisionPrompt,
-		Messages:     []ai.Message{{Role: "user", Content: prompt}}, MaxTokens: 8, Temperature: 0, Timeout: 10 * time.Second,
+		SystemPrompt: decisionPrompt,
+		Messages:     []ai.Message{{Role: "user", Content: prompt}}, MaxTokens: 8, Temperature: 0, Timeout: timeout,
 	})
 	if err != nil || result == nil {
 		return false
@@ -542,6 +588,9 @@ func (a *GroupAssistant) storeIncoming(ctx context.Context, policy store.GroupAs
 		Approved: true, Delivered: true, ContentHash: hex.EncodeToString(hash[:]), ExpiresAt: expiresAt,
 		SourceType: sourceType, SourceID: assistantMessageReplySourceID(msg),
 	})
+	if err == nil {
+		a.collectApprovedSticker(ctx, msg)
+	}
 	return err
 }
 
