@@ -61,7 +61,11 @@ async def test_engaged_adds_only_trusted_policy_and_preserves_output_contract():
     assert decision_system_policy("engaged") in system
     for marker in (
         "natural, specific, timely, non-repetitive contribution",
+        "Do not wait for a mention",
         "Do not answer every message",
+        "Po0, 5gpn, RFCHOST, KFCHOST, wiki tutorials",
+        "airport/proxy/node/subscription",
+        "high-value teaching turns",
         "pure emoji/sticker/GIF",
         "a pure link with no comment or question",
         "clear two-person/private-style exchange",
