@@ -38,6 +38,13 @@ print("INSERT INTO group_assistant_messages(chat_id,telegram_message_id,role,tex
 PY
 docker exec -i "$pg" psql -v ON_ERROR_STOP=1 -U cg_native_test -d cg_native_test <"$output/schema.sql" >"$output/schema.log"
 docker run -d --name "$tg" --label openbear-task=a5854b6b --network "$network" --network-alias api.telegram.org -v "$output:/test:ro" python:3.12.14-slim-bookworm python /test/fake_telegram.py >/dev/null
+tg_ready=0
+for i in $(seq 1 100); do
+ if docker logs "$tg" 2>&1 | grep -q FAKE_TELEGRAM_LISTEN; then tg_ready=1; break; fi
+ if [ "$(docker inspect --format '{{.State.Running}}' "$tg")" != true ]; then docker logs "$tg"; exit 1; fi
+ sleep .2
+done
+if [ "$tg_ready" != 1 ]; then docker logs "$tg"; exit 1; fi
 docker run -d --name "$app" --label openbear-task=a5854b6b --network "$network" \
  --read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges \
  -v "$output/cert.pem:/test-cert.pem:ro" --entrypoint /usr/local/bin/clawguard \
