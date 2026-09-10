@@ -10,8 +10,45 @@ from bot.services.proactive import get_cooldown_task_state,is_cooldown_task_enab
 from bot.services.skills import SkillService
 
 
+INTERJECTION_MODES = frozenset({"balanced", "engaged"})
+DEFAULT_INTERJECTION_MODE = "balanced"
+
+# ClawGuard adapter policy: this is deliberately request-scoped and is never
+# written into the shared/source decision Prompt.  The source decision rules
+# remain authoritative; this block only gives an explicitly opted-in group a
+# narrower, more useful unsolicited-interjection preference.
+_ENGAGED_INTERJECTION_POLICY = """[CLAWGUARD_GROUP_INTERJECTION_POLICY]
+This trusted policy is active only when this group's exact interjection_mode is `engaged`. It supplements the active decision Prompt and never overrides it.
+For an ordinary group message that does not directly address the bot, be somewhat more willing to choose `casual` only when the current topic has a natural, specific, timely, non-repetitive contribution the bot can make now. Do not answer every message: casual acknowledgements, low-value chatter, and messages with no concrete contribution remain `skip`. Use recent group context to avoid repeating the bot or interrupting a human exchange.
+Preserve every existing hard-skip rule. In particular, do not reply to pure emoji/sticker/GIF content without a clear question, a pure link with no comment or question, a clear two-person/private-style exchange, or a message with [MENTIONS_OTHER_USER]=yes when [IS_MENTIONED]=no and [IS_REPLY_TO_BOT]=no. Preserve the existing [IS_REPLY_TO_OTHER]=yes rule and its human-conversation safeguard; do not treat a reply to another member as an invitation to the bot unless the existing decision rules clearly identify a pivot toward the bot.
+Never change the mandatory behavior for an explicit bot mention or a reply to the bot. [SENDER_IS_OWNER] and [SENDER_IS_TG_ADMIN] are identity metadata only and must not lower the threshold. Do not implement or promise a fixed reply probability or frequency.
+Keep the strict output contract: output exactly one lowercase word, only `skip` or `casual`, with no explanation or additional text."""
+
+
+def normalize_interjection_mode(value: object) -> str:
+    """Validate the persisted group-level interjection mode exactly."""
+    if not isinstance(value, str) or value not in INTERJECTION_MODES:
+        raise ValueError("invalid interjection mode")
+    return value
+
+
+def effective_interjection_mode(values: dict | None) -> str:
+    """Return the group mode; a missing key intentionally means balanced."""
+    values = values or {}
+    if "interjection_mode" not in values:
+        return DEFAULT_INTERJECTION_MODE
+    return normalize_interjection_mode(values["interjection_mode"])
+
+
+def decision_system_policy(interjection_mode: object) -> str:
+    """Return only the fixed trusted policy for a validated group mode."""
+    mode = normalize_interjection_mode(interjection_mode)
+    return _ENGAGED_INTERJECTION_POLICY if mode == "engaged" else ""
+
+
 def effective_group(values,settings,llm):
     values=dict(values or {})
+    values['interjection_mode']=effective_interjection_mode(values)
     task=get_cooldown_task_state(values)
     task['enabled']=is_cooldown_task_enabled(values,default_enabled=settings.bot.proactive_default_enabled)
     values['scheduled_tasks']={**values.get('scheduled_tasks',{}),'cooldown_topic':task}

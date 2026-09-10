@@ -105,3 +105,31 @@ def test_wal_checkpoint_bounds_wal_file(tmp_path):
     # TRUNCATE either empties or removes the WAL; both bound its growth.
     truncated = os.path.getsize(wal_path) if os.path.exists(wal_path) else 0
     assert truncated < wal_size, f"WAL not truncated: {wal_size} -> {truncated}"
+
+
+def test_logging_level_is_persisted_and_applied(tmp_path):
+    """Log level must round-trip through configuration and reach the logger."""
+    import logging
+
+    from clawguard_native.configuration import Configuration
+
+    from bot.utils.logging_setup import shutdown_logging
+
+    try:
+        path = tmp_path / "control.sqlite3"
+        config = Configuration(path)
+        assert config.read()["log_levels"][0] == "DEBUG"
+
+        # Source default is INFO; native previously never applied it, leaving the
+        # root logger at WARNING and hiding decision logs.
+        config.apply(__import__("bot.config", fromlist=["Settings"]).Settings(_env_file=None))
+        assert logging.getLogger().level == logging.INFO
+
+        payload = config.write({"logging": {"level": "WARNING"}, "revision": config.read()["revision"]})
+        assert payload["logging"]["level"] == "WARNING"
+        config.apply(__import__("bot.config", fromlist=["Settings"]).Settings(_env_file=None))
+        assert logging.getLogger().level == logging.WARNING
+    finally:
+        # Stop the test-created listener while pytest's captured stdout is
+        # still open; this does not alter the persisted logging behavior.
+        shutdown_logging()

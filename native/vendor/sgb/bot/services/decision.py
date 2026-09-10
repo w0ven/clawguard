@@ -71,6 +71,7 @@ class DecisionService:
         *,
         merged_count: int,
         merged_context: str,
+        interjection_mode: str,
     ) -> str:
         sender_block = f"[CURRENT_SENDER_TAG]\n{clean_text(user_tag, max_len=180)}\n" if user_tag else ""
         merged_context_block = ""
@@ -101,7 +102,13 @@ class DecisionService:
             f"[CURRENT_MESSAGE]\n{wrap_untrusted('current_message', normalized, max_len=1800)}"
         )
 
-        result = await self.llm.decision(build_defended_system(get_prompt("decision")), context)
+        # ClawGuard adapter seam: the default source system remains byte-for-
+        # byte unchanged; only an explicitly validated group mode adds policy.
+        system = build_defended_system(get_prompt("decision"))
+        if interjection_mode != "balanced":
+            from clawguard_native.group_config import decision_system_policy
+            system += "\n\n" + decision_system_policy(interjection_mode)
+        result = await self.llm.decision(system, context)
         result = result.strip().lower()
         log.info(
             "decision llm returned=%s mention=%s msg_type=%s merged=%s",
@@ -127,6 +134,7 @@ class DecisionService:
         history: list[dict[str, str]] | None = None,
         merged_count: int = 1,
         merged_context: str = "",
+        interjection_mode: str = "balanced",
     ) -> str:
         """Return one of: skip / casual."""
         max_len = 1800 if merged_count > 1 else 1200
@@ -149,6 +157,7 @@ class DecisionService:
             history,
             merged_count=max(1, int(merged_count or 1)),
             merged_context=clean_text(merged_context, max_len=1800),
+            interjection_mode=interjection_mode,
         )
 
         if result == "question":
