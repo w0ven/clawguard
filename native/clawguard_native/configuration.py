@@ -7,11 +7,13 @@ import sqlite3
 from pathlib import Path
 
 from bot.services.runtime_config import (BotBehaviorConfig, PromptSettingsConfig, RuntimeConfig,
-    MusicSettingsConfig,MovieInfoSettingsConfig,StickerSettingsConfig,SecretCipher)
+    LoggingSettingsConfig,MusicSettingsConfig,MovieInfoSettingsConfig,StickerSettingsConfig,SecretCipher)
 from bot.utils.prompts import set_runtime_prompts
+from bot.utils.logging_setup import configure_logging
 
 PROMPTS = ("decision","casual","manage_intent","compress","skill_tools","sticker_decision",
            "reply_mode","persona","proactive_topic","style_distill")
+LOG_LEVELS = ("DEBUG","INFO","WARNING","ERROR","CRITICAL")
 SOURCE_UNWIRED = {"proactive_retry_minutes":"源82c3703仅postpone_cooldown_task读取，无生产调用者；不承诺失败重试。"}
 EXCLUDED_BOT = {"drop_pending_updates","auto_delete_minutes"}
 CATEGORIES = {"reply","media","proactive"}
@@ -29,6 +31,7 @@ class Configuration:
                        "prompts":{k:v for k,v in PromptSettingsConfig.defaults().model_dump().items() if k in PROMPTS}}
             default["bot"]["auto_delete_categories"] = []
             default.update({key:model().model_dump() for key,model in EXTRA_TYPES.items()})
+            default["logging"]=LoggingSettingsConfig().model_dump()
             db.execute("INSERT OR IGNORE INTO cg_runtime VALUES (1,1,?)",(json.dumps(default,ensure_ascii=False),))
         path.chmod(0o600)
 
@@ -37,6 +40,7 @@ class Configuration:
             revision,raw=db.execute("SELECT revision,payload FROM cg_runtime WHERE id=1").fetchone()
         value=json.loads(raw)
         for key,model in EXTRA_TYPES.items():value.setdefault(key,model().model_dump())
+        value.setdefault("logging",LoggingSettingsConfig().model_dump())
         return revision,value
 
     def read(self):
@@ -50,10 +54,11 @@ class Configuration:
                 "extra_schema":{key:model.model_json_schema() for key,model in EXTRA_TYPES.items()},
                 "movie_secret_fields":sorted(MOVIE_SECRETS),"movie_secrets_configured":{key:bool(encrypted.get(key)) for key in MOVIE_SECRETS},
                 "secret_storage_ready":SecretCipher(os.environ.get("CONFIG_MASTER_KEY","")).configured,
-                "engine":"native","automatic_fact_learning":False}
+                "engine":"native","automatic_fact_learning":False,
+                "log_levels":list(LOG_LEVELS)}
 
     def write(self,payload: dict):
-        if set(payload)-{"bot","prompts","revision","music","movie_info","stickers","clear_movie_secrets"}:
+        if set(payload)-{"bot","prompts","revision","music","movie_info","stickers","logging","clear_movie_secrets"}:
             raise ValueError("unsupported configuration namespace")
         _,old=self._read()
         bot_values={**old["bot"],**payload.get("bot",{})}
@@ -64,7 +69,10 @@ class Configuration:
         if set(payload.get("prompts",{}))-set(PROMPTS):raise ValueError("unsupported assistant prompt")
         prompts={**old["prompts"],**payload.get("prompts",{})}
         PromptSettingsConfig.model_validate(prompts)
-        value={"bot":{k:v for k,v in bot.model_dump().items() if k not in EXCLUDED_BOT},"prompts":prompts}
+        logging_values={**old["logging"],**payload.get("logging",{})}
+        log_settings=LoggingSettingsConfig.model_validate(logging_values)
+        value={"bot":{k:v for k,v in bot.model_dump().items() if k not in EXCLUDED_BOT},"prompts":prompts,
+               "logging":log_settings.model_dump()}
         encrypted=dict(old.get("_movie_secrets",{}))
         clear=set(payload.get("clear_movie_secrets",[]))
         if clear-MOVIE_SECRETS:raise ValueError("unsupported movie secret")
@@ -86,6 +94,7 @@ class Configuration:
 
     def apply(self,settings):
         _,value=self._read()
+        configure_logging(force=True,config=LoggingSettingsConfig.model_validate(value["logging"]))
         bot_models={key:getattr(settings.bot,key) for key in ("main_model","decision_model","compress_model","vision_model","moderation_model","embed_model")}
         connections={key:getattr(settings,key) for key in settings.__class__.model_fields if key.startswith("doubao_tts_")}
         movie=dict(value["movie_info"])

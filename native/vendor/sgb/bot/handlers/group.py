@@ -91,6 +91,7 @@ from bot.services.speech_style import (
 )
 # CG connection boundary: source service methods; registry-only dispatch.
 from clawguard_native.boundary import LLMService, prepare_batch, native_context
+from clawguard_native.group_config import effective_interjection_mode
 from bot.services.join_verification import (
     UnbanRecovery,
     activate_manual_unban_recovery,
@@ -4566,6 +4567,9 @@ async def _resolve_pending_reply_action(
     merged_count: int,
     merged_context: str,
 ) -> tuple[str, bool]:
+    # Resolve and validate the persisted mode at the source decision seam too;
+    # explicit direct paths must not make an invalid policy silently acceptable.
+    interjection_mode = effective_interjection_mode(group_settings)
     if explicit_mention or is_reply_to_bot:
         return "casual", True
 
@@ -4586,6 +4590,7 @@ async def _resolve_pending_reply_action(
         history=history,
         merged_count=merged_count,
         merged_context=merged_context,
+        interjection_mode=interjection_mode,
     )
     return action, False
 

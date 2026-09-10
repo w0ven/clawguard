@@ -164,11 +164,16 @@ class NativeHost:
     async def configure_group(self, group_id: int, *, background_grant: str, values: dict, revision: int, operator_id: int = 0):
         from bot.services.group_settings import acquire_group_settings_write_intent
         from bot.services.speech_style import set_style_target
+        from .group_config import effective_interjection_mode, normalize_interjection_mode
         scope = await self.scope(group_id,0,background_grant)
         allowed = {"at_reply_mode", "tts_mode", "api_model_query", "mute_all_replies",
-                   "mimic_target", "cooldown_topic"}
+                   "mimic_target", "cooldown_topic", "interjection_mode"}
         if set(values) - allowed:
             raise ValueError("unsupported assistant group settings")
+        if "interjection_mode" in values:
+            # ClawGuard group policy is a closed enum; never persist arbitrary
+            # text that could later become part of a source system prompt.
+            values = {**values, "interjection_mode": normalize_interjection_mode(values["interjection_mode"])}
         for key in ("at_reply_mode","mute_all_replies"):
             if key in values and not isinstance(values[key],bool):
                 raise ValueError(key+" must be boolean")
@@ -178,6 +183,9 @@ class NativeHost:
             await acquire_group_settings_write_intent(session,group_id)
             row = await session.get(Group,group_id,populate_existing=True)
             current = dict(row.settings or {})
+            # Validate old rows too: an invalid persisted value must fail closed
+            # rather than reach the source DecisionService as prompt policy.
+            effective_interjection_mode(current)
             if int(current.get("cg_config_revision",0)) != revision:
                 raise ValueError("group configuration changed; refresh before saving")
             if "api_model_query" in values:
