@@ -91,6 +91,8 @@ class NativeHost:
         configure_telegram_cleanup_scheduler(ScopedCleanup())
 
     async def activate(self):
+        from .sqlite_tuning import apply_sqlite_tuning
+        self._sqlite_tuning = apply_sqlite_tuning()
         if not self.activation_required:return
         path=self.data/"migration-manifest.json"
         manifest=json.loads(path.read_text())

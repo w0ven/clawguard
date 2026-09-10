@@ -13,6 +13,7 @@ from fastapi.responses import JSONResponse
 from .boundary import Broker
 from .configuration import Configuration
 from .host import NativeHost
+from .sqlite_tuning import run_wal_checkpoint_loop
 from . import SOURCE_COMMIT, wiki
 
 
@@ -35,11 +36,13 @@ def create_app(*, data: Path | None = None, broker=None, secret: str | None = No
             await host.close()
             raise
         background = asyncio.create_task(host.bootstrap_loop(),name="cg-native-bootstrap")
+        wal = asyncio.create_task(run_wal_checkpoint_loop(host.scopes),name="cg-native-wal-checkpoint")
         try:
             yield
         finally:
             background.cancel()
-            await asyncio.gather(background,return_exceptions=True)
+            wal.cancel()
+            await asyncio.gather(background,wal,return_exceptions=True)
             await host.close()
 
     app = FastAPI(docs_url=None,redoc_url=None,openapi_url=None,lifespan=lifespan)
