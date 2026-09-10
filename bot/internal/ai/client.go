@@ -40,13 +40,16 @@ type ToolCall struct {
 }
 
 type ToolChatRequest struct {
-	Model        string
-	SystemPrompt string
-	Messages     []Message
-	Tools        []ToolDefinition
-	MaxTokens    int
-	Temperature  float64
-	Timeout      time.Duration
+	// PreserveMessages is trusted internal provenance, not provider/model input.
+	// Native SGB has already assembled the complete ordered system/user payload.
+	PreserveMessages bool
+	Model            string
+	SystemPrompt     string
+	Messages         []Message
+	Tools            []ToolDefinition
+	MaxTokens        int
+	Temperature      float64
+	Timeout          time.Duration
 }
 
 type ToolChatResult struct {
@@ -87,12 +90,13 @@ func (e *ProviderError) Unwrap() error {
 }
 
 type CheckRequest struct {
-	Model        string
-	SystemPrompt string
-	Messages     []Message
-	MaxTokens    int
-	Temperature  float64
-	Timeout      time.Duration
+	PreserveMessages bool
+	Model            string
+	SystemPrompt     string
+	Messages         []Message
+	MaxTokens        int
+	Temperature      float64
+	Timeout          time.Duration
 }
 
 type Verdict struct {

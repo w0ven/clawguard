@@ -39,6 +39,9 @@ type Config struct {
 	TurnstileSecret          string  `env:"TURNSTILE_SECRET_KEY"`
 	EncryptionKey            string  `env:"ENCRYPTION_KEY"`
 	LLMProviders             string  `env:"LLM_PROVIDERS"`
+	AssistantEngine          string  `env:"ASSISTANT_ENGINE" envDefault:"legacy"`
+	AssistantNativeURL       string  `env:"ASSISTANT_NATIVE_URL"`
+	AssistantBrokerSecret    string  `env:"ASSISTANT_BROKER_SECRET"`
 	Retention                RetentionConfig
 }
 
@@ -73,6 +76,18 @@ func Load() (Config, error) {
 }
 
 func (c Config) Validate() error {
+	if c.AssistantEngine != "" && c.AssistantEngine != "legacy" && c.AssistantEngine != "native" && c.AssistantEngine != "paused" {
+		return errors.New("ASSISTANT_ENGINE must be legacy, native or paused")
+	}
+	if c.AssistantEngine == "native" || c.AssistantEngine == "paused" {
+		u, err := url.Parse(c.AssistantNativeURL)
+		if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil {
+			return errors.New("ASSISTANT_NATIVE_URL must be an internal HTTP(S) URL")
+		}
+		if len(c.AssistantBrokerSecret) < 32 || isPlaceholderSecret(c.AssistantBrokerSecret) {
+			return errors.New("ASSISTANT_BROKER_SECRET requires at least 32 non-placeholder characters")
+		}
+	}
 	publicURL, err := url.Parse(strings.TrimSpace(c.PublicBaseURL))
 	if err != nil || publicURL.Host == "" || (publicURL.Scheme != "http" && publicURL.Scheme != "https") {
 		return errors.New("PUBLIC_BASE_URL must be an absolute HTTP(S) URL")

@@ -112,6 +112,54 @@ jobs:
         working-directory: web
         run: npm run test:e2e
 
+  test-native:
+    name: Test native assistant
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: bot/go.mod
+          cache-dependency-path: bot/go.sum
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.9"
+          python-version: "3.12.14"
+      - name: Source host and private API tests (fixed transports only)
+        working-directory: native
+        run: uv run --frozen python -m pytest
+      - name: Real Go-native-SQL-fake-Telegram wire
+        run: sh native/scripts/test-wire.sh
+      - name: Offline latest-state migration and native increment restore
+        run: sh native/scripts/test-migration.sh
+      - name: Native runtime image build
+        run: docker build -t clawguard-native-ci native
+      - name: Native image ffmpeg is present for default ogg TTS
+        run: docker run --rm --user 10001:10001 --entrypoint ffmpeg clawguard-native-ci -version
+
+  test-guard-rescue:
+    name: Test old guard-only rescue
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: bot/go.mod
+          cache-dependency-path: bot/go.sum
+      - name: Prepare fixed old baseline with assistant disabled
+        run: sh native/scripts/prepare-rescue.sh .rescue
+      - name: Old guard and zero-assistant regression
+        working-directory: .rescue/bot
+        run: go test ./internal/bot ./internal/api -run '^(TestRescue|TestApplyFilter|TestSafeUnban|TestNoUnban|TestHandleUnban|TestCreateAuthorizedGroup)' -count=1
+      - name: Build and run rescue against isolated schema36 and TLS fake Telegram
+        run: |
+          docker build -t openbear/clawguard-guard-rescue:abe2089-assistant-off .rescue/bot
+          sh native/scripts/test-rescue-runtime.sh .rescue-evidence
+
   test-runtime:
     name: Test runtime hardening
     runs-on: ubuntu-latest
@@ -124,7 +172,7 @@ jobs:
 
   build-and-push:
     name: Build ${{ matrix.service }}
-    needs: [test-bot, test-web, test-runtime]
+    needs: [test-bot, test-web, test-runtime, test-native, test-guard-rescue]
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
@@ -139,10 +187,21 @@ jobs:
           - service: web
             context: ./web
             image: clawguard-web
+          - service: native
+            context: ./native
+            image: clawguard-assistant-native
+          - service: guard-rescue
+            context: ./.rescue/bot
+            image: clawguard-guard-rescue
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Prepare accepted old guard-only rescue source
+        if: matrix.service == 'guard-rescue'
+        run: sh native/scripts/prepare-rescue.sh .rescue
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v4

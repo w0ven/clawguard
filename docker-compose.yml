@@ -97,6 +97,9 @@ services:
     environment:
       APP_ENV: production
       HTTP_PORT: 8080
+      ASSISTANT_ENGINE: ${ASSISTANT_ENGINE:-legacy}
+      ASSISTANT_NATIVE_URL: ${ASSISTANT_NATIVE_URL:-http://assistant-native:8091}
+      ASSISTANT_BROKER_SECRET: ${ASSISTANT_BROKER_SECRET:-}
     depends_on:
       postgres:
         condition: service_healthy
@@ -119,6 +122,36 @@ services:
       - /tmp:mode=1777
     pids_limit: 512
     mem_limit: 1g
+    logging: *default-logging
+
+  # Opt-in application unit only. Never load the full CG .env into Python.
+  # Publisher enables this profile after the latest paused migration verifies.
+  assistant-native:
+    image: kelework/clawguard-assistant-native:${CLAWGUARD_TAG:?set accepted immutable application tag}
+    profiles: ["native-assistant"]
+    restart: unless-stopped
+    environment:
+      CG_BROKER_URL: http://bot:8080/internal/native
+      ASSISTANT_BROKER_SECRET: ${ASSISTANT_BROKER_SECRET:-}
+      CONFIG_MASTER_KEY: ${NATIVE_CONFIG_MASTER_KEY:-}
+      NATIVE_DATA_DIR: /data
+      NATIVE_PORT: 8091
+      NATIVE_REQUIRE_MIGRATION: "true"
+      TZ: Asia/Shanghai
+    depends_on:
+      bot:
+        condition: service_healthy
+    volumes:
+      - assistant_native_data:/data
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777
+    pids_limit: 256
+    mem_limit: 1g
+    stop_grace_period: 90s
     logging: *default-logging
 
   web:
@@ -186,3 +219,4 @@ volumes:
   redisdata:
   caddydata:
   caddyconfig:
+  assistant_native_data:

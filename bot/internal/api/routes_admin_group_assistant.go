@@ -138,7 +138,7 @@ func (s *Server) handleGetGroupAssistant(c echo.Context) error {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "load assistant pool failed"})
 	}
 	readiness := s.botService.Assistant().ChatReadiness(c.Request().Context(), chatID)
-	return c.JSON(http.StatusOK, map[string]any{"policy": serializeGroupAssistantPolicy(policy), "model_pool": poolResponse,
+	return c.JSON(http.StatusOK, map[string]any{"native_engine": s.botService.NativeAssistantSelected(), "policy": serializeGroupAssistantPolicy(policy), "model_pool": poolResponse,
 		"readiness": readiness,
 		"defaults":  map[string]any{"disabled": true, "retention_days": 7, "history_retention": "7 days", "remote_quota": "unknown"}})
 }
@@ -643,6 +643,9 @@ func (s *Server) handleListGroupAssistantTools(c echo.Context) error {
 	if err != nil {
 		return assistantAccessResponse(c, err)
 	}
+	if s.botService.NativeAssistantSelected() {
+		return s.nativeControl(c, "/groups/read", chatID, nil)
+	}
 	policy, err := s.botService.Assistant().Policy(c.Request().Context(), chatID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		policy = defaultGroupAssistantPolicy(chatID)
@@ -765,6 +768,9 @@ func (s *Server) handleCreateGroupAssistantMemory(c echo.Context) error {
 	if err != nil {
 		return assistantAccessResponse(c, err)
 	}
+	if s.botService.NativeAssistantSelected() {
+		return c.JSON(409, map[string]string{"error": "旧助手记忆已冻结只读；请使用原生永久记忆入口"})
+	}
 	var req assistantMemoryRequest
 	if err := bindAssistantJSON(c, &req); err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid memory"})
@@ -824,6 +830,9 @@ func (s *Server) handleUpdateGroupAssistantMemory(c echo.Context) error {
 	if err != nil {
 		return assistantAccessResponse(c, err)
 	}
+	if s.botService.NativeAssistantSelected() {
+		return c.JSON(409, map[string]string{"error": "旧助手记忆已冻结只读；请使用原生永久记忆入口"})
+	}
 	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid memory id"})
@@ -877,6 +886,9 @@ func (s *Server) handleForgetGroupAssistantMemory(c echo.Context) error {
 	admin, chatID, err := s.assistantAccess(c)
 	if err != nil {
 		return assistantAccessResponse(c, err)
+	}
+	if s.botService.NativeAssistantSelected() {
+		return c.JSON(409, map[string]string{"error": "旧助手记忆已冻结只读；请使用原生永久记忆入口"})
 	}
 	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil {
@@ -951,6 +963,9 @@ func (s *Server) handleResolveGroupAssistantConflict(c echo.Context) error {
 	admin, chatID, err := s.assistantAccess(c)
 	if err != nil {
 		return assistantAccessResponse(c, err)
+	}
+	if s.botService.NativeAssistantSelected() {
+		return c.JSON(409, map[string]string{"error": "旧助手记忆已冻结只读；请使用原生永久记忆入口"})
 	}
 	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil {

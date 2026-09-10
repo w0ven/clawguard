@@ -215,6 +215,7 @@ export type AssistantRecentSender = {
 };
 
 export type AssistantOverview = {
+  native_engine?: boolean;
   policy: AssistantPolicy;
   model_pool: AssistantPool;
   defaults: AssistantDefaults;

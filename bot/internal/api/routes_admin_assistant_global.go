@@ -15,6 +15,7 @@ import (
 )
 
 func (s *Server) registerAssistantGlobalRoutes(admin *echo.Group) {
+	s.registerNativeAssistantRoutes(admin)
 	admin.GET("/assistant/global", s.handleGetAssistantGlobal)
 	admin.PUT("/assistant/global", s.handlePutAssistantGlobal)
 	admin.GET("/assistant/prompts", s.handleGetAssistantPrompts)

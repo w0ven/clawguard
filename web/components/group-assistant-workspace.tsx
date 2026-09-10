@@ -30,6 +30,7 @@ import {
 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { AdminShell } from "@/components/admin-shell";
+import { NativeGlobalSettings, NativeGroupSettings, NativePermanentMemories, NativeSkills } from "@/components/native-assistant-settings";
 import { GuardedLink } from "@/components/guarded-link";
 import { useDirtyGuard, useDirtyNavigation } from "@/components/dirty-guard";
 import { useToast } from "@/components/providers";
@@ -1040,7 +1041,8 @@ export function GroupAssistantWorkspace({ chatId }: { chatId: number }) {
           </span>
         </div>
 
-        {section === "start" && (
+        {overview.native_engine && section === "start" && <Card><CardHeader><CardTitle>原生 SGB 助手</CardTitle><CardDescription>运行固定源编排；普通聊天自动抽事实已停止，管理员永久记忆与长期 Wiki 按授权检索。原生故障不会切回旧 Go 重复处理。</CardDescription></CardHeader><CardBody>模型主备/权重、群覆盖及工具轮绑定仍在「全局」中配置；聊天、主动与学语气入口使用原生有效设置。</CardBody></Card>}
+        {section === "start" && !overview.native_engine && (
           <StartPanel
             policy={settingsDraft}
             defaults={defaults}
@@ -1053,7 +1055,8 @@ export function GroupAssistantWorkspace({ chatId }: { chatId: number }) {
             onOpen={changeSection}
           />
         )}
-        {section === "speech" && (
+        {overview.native_engine && (section === "speech" || section === "style") && <NativeGroupSettings key={`native-group-${chatId}`} chatId={chatId} chatEnabled={settingsDraft.chat_enabled} onChatChange={value=>updateSetting("chat_enabled",value)} onSaveChat={saveSettings} chatDirty={settingsDirty} />}
+        {section === "speech" && !overview.native_engine && (
           <SpeechPanel
             draft={settingsDraft}
             models={models}
@@ -1079,8 +1082,8 @@ export function GroupAssistantWorkspace({ chatId }: { chatId: number }) {
             onCancel={cancelSettings}
           />
         )}
-        {section === "memory" && <MemoryPanel chatId={chatId} onToast={pushToast} />}
-        {section === "style" && (
+        {section === "memory" && <>{overview.native_engine && <NativePermanentMemories key={`native-memory-${chatId}`} chatId={chatId} />}<MemoryPanel readOnly={!!overview.native_engine} chatId={chatId} onToast={pushToast} /></>}
+        {section === "style" && !overview.native_engine && (
           <StylePanel
             draft={settingsDraft}
             recentSenders={recentSenders}
@@ -1100,6 +1103,7 @@ export function GroupAssistantWorkspace({ chatId }: { chatId: number }) {
             void reloadRuntime();
           }} />}
           <ModelsPanel
+            nativeEnabled={!!overview.native_engine}
             draft={settingsDraft}
             pool={pool}
             status={status}
@@ -1125,7 +1129,8 @@ export function GroupAssistantWorkspace({ chatId }: { chatId: number }) {
           />
           </div>
         )}
-        {section === "skills" && (
+        {section === "skills" && overview.native_engine && <NativeSkills key={`native-skills-${chatId}`} chatId={chatId} />}
+        {section === "skills" && !overview.native_engine && (
           <SkillsPanel
             tools={tools}
             error={toolsError}
@@ -1605,6 +1610,7 @@ function StylePanel({
 }
 
 function ModelsPanel({
+  nativeEnabled = false,
   draft,
   pool,
   status,
@@ -1622,6 +1628,7 @@ function ModelsPanel({
   onRefreshStatus,
   onGlobalSaved,
 }: {
+  nativeEnabled?: boolean;
   draft: PolicyDraft;
   pool: AssistantPool | null;
   status: AssistantStatus | null;
@@ -1728,7 +1735,7 @@ function ModelsPanel({
         </CardBody>
       </Card>
       <SaveBar dirty={dirty} saving={saving} onSave={onSave} onCancel={onCancel} scope="群助手设置" />
-      <GlobalAssistantBlock models={[...modelByRef.values()]} registryError={registryError} onSaved={onGlobalSaved} />
+      <GlobalAssistantBlock nativeEnabled={nativeEnabled} models={[...modelByRef.values()]} registryError={registryError} onSaved={onGlobalSaved} />
     </div>
   );
 }
@@ -1839,9 +1846,9 @@ function SkillsPanel({
   );
 }
 
-type MemoryPanelProps = { chatId: number; onToast: (message: string, tone?: "success" | "error") => void };
+type MemoryPanelProps = { chatId: number; readOnly?: boolean; onToast: (message: string, tone?: "success" | "error") => void };
 
-function MemoryPanel({ chatId, onToast }: MemoryPanelProps) {
+function MemoryPanel({ chatId, onToast, readOnly = false }: MemoryPanelProps) {
   const [memories, setMemories] = useState<AssistantMemory[]>([]);
   const [conflicts, setConflicts] = useState<AssistantConflict[]>([]);
   const [memoryFilter, setMemoryFilter] = useState<MemoryFilter>("active");
@@ -2099,8 +2106,8 @@ function MemoryPanel({ chatId, onToast }: MemoryPanelProps) {
     <div className="space-y-4">
       <Card>
         <CardHeader className="flex-row flex-wrap items-start justify-between gap-3">
-          <div><SectionTitle icon={Database} title="群记忆" description="基础事实、学习沉淀、待处理冲突和历史检索均来自当前群接口。" /></div>
-          <Button type="button" size="sm" onClick={(event) => { void openEditor(null, event.currentTarget); }}><Plus className="h-3.5 w-3.5" />新增基础事实</Button>
+          <div><SectionTitle icon={Database} title={readOnly?"旧助手档案（只读）":"群记忆"} description={readOnly?"保留旧学习结果、出处、版本和有效性供查阅；不作为原生管理员永久事实，不接受旧域写入。新知识请使用上方永久记忆入口。":"基础事实、学习沉淀、待处理冲突和历史检索均来自当前群接口。"} /></div>
+          {!readOnly && <Button type="button" size="sm" onClick={(event) => { void openEditor(null, event.currentTarget); }}><Plus className="h-3.5 w-3.5" />新增基础事实</Button>}
         </CardHeader>
         <CardBody className="space-y-4">
           <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_180px_auto]">
@@ -2115,13 +2122,13 @@ function MemoryPanel({ chatId, onToast }: MemoryPanelProps) {
             <div className="flex items-end"><Button type="button" variant="ghost" size="sm" onClick={() => { void loadMemories(); }}><RefreshCw className="h-3.5 w-3.5" />刷新</Button></div>
           </div>
           <div className="flex flex-wrap gap-2 text-xs text-[var(--text-muted)]"><span className="rounded-lg border border-[var(--border)] px-2 py-1">接口返回 {memories.length} 条</span><span className="rounded-lg border border-[var(--border)] px-2 py-1">当前视图 {visibleMemories.length} 条</span>{memoryNotice && <span className="rounded-lg border border-[var(--border)] px-2 py-1">{displayServerText(memoryNotice)}</span>}</div>
-          {memoryError ? <ApiState label="记忆列表没有数据" error={memoryError} onRetry={() => { void loadMemories(); }} /> : loading ? <div className="py-8 text-center text-sm text-[var(--text-muted)]"><Loader2 className="mx-auto mb-2 h-4 w-4 animate-spin" />正在加载记忆…</div> : visibleMemories.length === 0 ? <EmptyState title="当前筛选没有记忆" detail="不会用原型示例填充服务端列表。" /> : <MemoryTable memories={visibleMemories} onDetail={openMemoryDetail} onEdit={openEditor} onForget={forgetMemory} />}
+          {memoryError ? <ApiState label="记忆列表没有数据" error={memoryError} onRetry={() => { void loadMemories(); }} /> : loading ? <div className="py-8 text-center text-sm text-[var(--text-muted)]"><Loader2 className="mx-auto mb-2 h-4 w-4 animate-spin" />正在加载记忆…</div> : visibleMemories.length === 0 ? <EmptyState title="当前筛选没有记忆" detail="不会用原型示例填充服务端列表。" /> : <MemoryTable readOnly={readOnly} memories={visibleMemories} onDetail={openMemoryDetail} onEdit={openEditor} onForget={forgetMemory} />}
         </CardBody>
       </Card>
 
       <Card>
         <CardHeader><SectionTitle icon={AlertTriangle} title="待处理冲突" description="只显示服务端标记为待处理的候选事实。" /></CardHeader>
-        <CardBody>{conflictError ? <ApiState label="冲突列表没有数据" error={conflictError} onRetry={() => { void loadMemories(); }} /> : conflicts.length === 0 ? <EmptyState title="没有待处理冲突" detail="服务端没有返回待处理记录。" /> : <div className="space-y-3">{conflicts.map((conflict) => <ConflictRow key={conflict.id} conflict={conflict} onResolve={resolveConflict} />)}</div>}</CardBody>
+        <CardBody>{conflictError ? <ApiState label="冲突列表没有数据" error={conflictError} onRetry={() => { void loadMemories(); }} /> : conflicts.length === 0 ? <EmptyState title="没有待处理冲突" detail="服务端没有返回待处理记录。" /> : <div className="space-y-3">{conflicts.map((conflict) => <ConflictRow readOnly={readOnly} key={conflict.id} conflict={conflict} onResolve={resolveConflict} />)}</div>}</CardBody>
       </Card>
 
       <Card>
@@ -2138,19 +2145,21 @@ function MemoryPanel({ chatId, onToast }: MemoryPanelProps) {
         </CardBody>
       </Card>
 
-      {selectedMemory && <MemoryDetailDialog memory={selectedMemory} versions={selectedVersions} loading={detailLoading} onClose={() => dismissSelectedMemory()} onEdit={() => { const memoryToEdit = selectedMemory; const detailTrigger = selectedTriggerRef.current; dismissSelectedMemory(false); void openEditor(memoryToEdit, detailTrigger); }} />}
-      {editorOpen && <MemoryEditorDialog chatId={chatId} memory={editorMemory} versions={editorVersions} onClose={() => closeEditor()} onSaved={afterMemorySaved} onToast={onToast} />}
+      {selectedMemory && <MemoryDetailDialog readOnly={readOnly} memory={selectedMemory} versions={selectedVersions} loading={detailLoading} onClose={() => dismissSelectedMemory()} onEdit={() => { const memoryToEdit = selectedMemory; const detailTrigger = selectedTriggerRef.current; dismissSelectedMemory(false); void openEditor(memoryToEdit, detailTrigger); }} />}
+      {!readOnly && editorOpen && <MemoryEditorDialog chatId={chatId} memory={editorMemory} versions={editorVersions} onClose={() => closeEditor()} onSaved={afterMemorySaved} onToast={onToast} />}
     </div>
   );
 }
 
 function MemoryTable({
   memories,
+  readOnly = false,
   onDetail,
   onEdit,
   onForget,
 }: {
   memories: AssistantMemory[];
+  readOnly?: boolean;
   onDetail: (memory: AssistantMemory, trigger: HTMLElement) => void;
   onEdit: (memory: AssistantMemory | null, trigger: HTMLElement) => void;
   onForget: (memory: AssistantMemory) => void;
@@ -2170,7 +2179,7 @@ function MemoryTable({
                 <td className="max-w-[150px] px-3 py-3 text-[var(--text-muted)]">{scopeLabel(memory.valid_scope)}</td>
                 <td className="max-w-[210px] px-3 py-3"><p>{sourceType(memory.source)}</p><p className="mt-1 text-[var(--text-muted)]">{memory.source.operator_name || (sourceMessageId(memory.source) != null ? `消息 ${sourceMessageId(memory.source)}` : "来源未知")}</p><p className="mt-1 text-[var(--text-subtle)]">校验：{verificationLabel(memory.source.verified)}{memory.source.currently_verified === undefined ? "" : memory.source.currently_verified ? " · 当前有效" : " · 未确认"}</p></td>
                 <td className="px-3 py-3 text-[var(--text-muted)]"><span className={expired ? "text-[var(--warning)]" : undefined}>{formatDate(memory.expires_at)}</span>{expired && <span className="mt-1 block">已过期</span>}</td>
-                <td className="px-3 py-3"><div className="flex flex-wrap gap-1"><Button type="button" variant="secondary" size="sm" onClick={(event) => onDetail(memory, event.currentTarget)}>来源</Button><Button type="button" variant="secondary" size="sm" onClick={(event) => onEdit(memory, event.currentTarget)}><Pencil className="h-3 w-3" />编辑</Button>{memory.active && <Button type="button" variant="danger" size="sm" onClick={() => onForget(memory)}><Trash2 className="h-3 w-3" />忘记</Button>}</div></td>
+                <td className="px-3 py-3"><div className="flex flex-wrap gap-1"><Button type="button" variant="secondary" size="sm" onClick={(event) => onDetail(memory, event.currentTarget)}>来源</Button>{!readOnly && <Button type="button" variant="secondary" size="sm" onClick={(event) => onEdit(memory, event.currentTarget)}><Pencil className="h-3 w-3" />编辑</Button>}{!readOnly && memory.active && <Button type="button" variant="danger" size="sm" onClick={() => onForget(memory)}><Trash2 className="h-3 w-3" />忘记</Button>}</div></td>
               </tr>
             );
           })}
@@ -2182,9 +2191,11 @@ function MemoryTable({
 
 function ConflictRow({
   conflict,
+  readOnly = false,
   onResolve,
 }: {
   conflict: AssistantConflict;
+  readOnly?: boolean;
   onResolve: (conflict: AssistantConflict, accept: boolean) => void;
 }) {
   const messageId = sourceMessageId(conflict.source);
@@ -2199,7 +2210,7 @@ function ConflictRow({
           {conflict.source.snippet && <p className="mt-2 rounded-lg border border-[var(--border)] bg-[var(--surface)] p-2 text-xs text-[var(--text-muted)]">{conflict.source.snippet}</p>}
           <p className="mt-2 text-xs text-[var(--text-muted)]">接受后会以当前管理员明确更正；普通来源不会自动提升为权威。</p>
         </div>
-        <div className="flex shrink-0 gap-2"><Button type="button" size="sm" onClick={() => onResolve(conflict, true)}><Check className="h-3.5 w-3.5" />接受</Button><Button type="button" variant="secondary" size="sm" onClick={() => onResolve(conflict, false)}><X className="h-3.5 w-3.5" />拒绝</Button></div>
+        {!readOnly && <div className="flex shrink-0 gap-2"><Button type="button" size="sm" onClick={() => onResolve(conflict, true)}><Check className="h-3.5 w-3.5" />接受</Button><Button type="button" variant="secondary" size="sm" onClick={() => onResolve(conflict, false)}><X className="h-3.5 w-3.5" />拒绝</Button></div>}
       </div>
     </div>
   );
@@ -2232,12 +2243,14 @@ function EmptyState({ title, detail }: { title: string; detail: string }) {
 
 function MemoryDetailDialog({
   memory,
+  readOnly = false,
   versions,
   loading,
   onClose,
   onEdit,
 }: {
   memory: AssistantMemory;
+  readOnly?: boolean;
   versions: AssistantMemoryVersion[];
   loading: boolean;
   onClose: () => void;
@@ -2250,7 +2263,7 @@ function MemoryDetailDialog({
         <div className="flex items-start justify-between gap-4"><div><p className="text-[10px] font-semibold tracking-[0.16em] text-[var(--accent)]">记忆来源</p><h2 className="mt-1 text-lg font-semibold">{memory.subject}</h2><p className="mt-1 text-xs text-[var(--text-muted)]">记忆编号 {memory.id} · 当前第 {memory.version} 版</p></div><Button type="button" variant="ghost" size="sm" onClick={onClose} aria-label="关闭" autoFocus><X className="h-4 w-4" /></Button></div>
         <div className="mt-5 grid gap-4 md:grid-cols-2"><div className="space-y-3"><div className="rounded-xl border border-[var(--border)] bg-[var(--surface-2)] p-3 text-sm whitespace-pre-wrap">{memory.content}</div><div className="grid gap-2 text-xs text-[var(--text-muted)]"><p>类型：{memoryTypeLabel(memory.memory_type)} · 权威：{authorityLabel(memory.authority_level)}</p><p>有效范围：{scopeLabel(memory.valid_scope)}</p><p>有效至：{formatDate(memory.expires_at)} · {memory.active ? "当前有效" : "已忘记"}</p></div></div><div className="space-y-3 text-xs"><div className="rounded-xl border border-[var(--border)] p-3"><p className="mb-2 font-medium">来源（服务端只读）</p><p>来源类型：{sourceType(memory.source)}</p><p>来源消息编号：{valueOrUnknown(sourceMessageId(memory.source))}</p><p>来源群编号：{valueOrUnknown(sourceChatId(memory.source))}</p><p>操作人：{memory.source.operator_name || valueOrUnknown(memory.source.operator_id)}</p><p>校验：{verificationLabel(memory.source.verified)}{memory.source.currently_verified === undefined ? "" : memory.source.currently_verified ? " · 当前有效" : " · 未确认"}</p>{memory.source.snippet && <p className="mt-2 rounded-lg bg-[var(--surface-2)] p-2 text-[var(--text-muted)]">{memory.source.snippet}</p>}</div><div className="rounded-xl border border-[var(--warning)]/30 bg-[var(--warning-soft)]/40 p-3">来源过期或未验证时，不会被后台升级为权威；管理员更正由服务端记录。</div></div></div>
         <div className="mt-5"><div className="mb-2 flex items-center justify-between"><h3 className="text-sm font-semibold">版本记录</h3>{loading && <Loader2 className="h-4 w-4 animate-spin text-[var(--accent)]" />}</div>{versions.length === 0 ? <p className="text-xs text-[var(--text-muted)]">暂时没有版本记录。</p> : <div className="space-y-2">{versions.map((version) => <div key={version.id} className="rounded-xl border border-[var(--border)] p-3 text-xs"><div className="flex flex-wrap gap-2"><Badge>第 {version.version} 版</Badge><span>{version.change_kind === "create" ? "创建" : "更新"}</span><span className="text-[var(--text-muted)]">{formatDate(version.created_at)}</span></div><p className="mt-2 whitespace-pre-wrap">{version.content}</p><p className="mt-1 text-[var(--text-muted)]">{authorityLabel(version.authority_level)} · {scopeLabel(version.valid_scope)} · {sourceLabel(version.source_type)}</p></div>)}</div>}</div>
-        <div className="mt-5 flex justify-end gap-2"><Button type="button" variant="secondary" onClick={onClose}>关闭</Button><Button type="button" onClick={onEdit}><Pencil className="h-3.5 w-3.5" />管理员更正</Button></div>
+        <div className="mt-5 flex justify-end gap-2"><Button type="button" variant="secondary" onClick={onClose}>关闭</Button>{!readOnly && <Button type="button" onClick={onEdit}><Pencil className="h-3.5 w-3.5" />管理员更正</Button>}</div>
       </div>
     </div>
   );
@@ -2404,7 +2417,7 @@ function RoleFallbackList({
   );
 }
 
-function GlobalAssistantBlock({ models, registryError, onSaved }: { models: RegistryModel[]; registryError: string | null; onSaved: () => void }) {
+function GlobalAssistantBlock({ models, registryError, onSaved, nativeEnabled = false }: { models: RegistryModel[]; registryError: string | null; onSaved: () => void; nativeEnabled?: boolean }) {
   const { pushToast } = useToast();
   const [globalSettings, setGlobalSettings] = useState<AssistantGlobalSettings | null>(null);
   const [prompts, setPrompts] = useState<Record<string, string>>({ persona: "", casual: "", decision: "", proactive_topic: "", style_distill: "" });
@@ -2528,7 +2541,7 @@ function GlobalAssistantBlock({ models, registryError, onSaved }: { models: Regi
           })}
         </CardBody>
       </Card>
-      <Card>
+      {!nativeEnabled && <><Card>
         <CardHeader>
           <CardTitle>提示词</CardTitle>
           <CardDescription>空则用内嵌默认。安全段、只读边界和 ACTIVE_PERSONA 规则仍由程序追加。</CardDescription>
@@ -2562,6 +2575,8 @@ function GlobalAssistantBlock({ models, registryError, onSaved }: { models: Regi
           <Field label="检查间隔（秒）"><Input type="number" min={15} max={3600} value={globalSettings.bot.proactive_check_interval_sec} onChange={(event) => setGlobalSettings({ ...globalSettings, bot: { ...globalSettings.bot, proactive_check_interval_sec: Number(event.target.value) } })} /></Field>
         </CardBody>
       </Card>
+      </>}
+      {nativeEnabled && <NativeGlobalSettings />}
       <Card>
         <CardHeader>
           <CardTitle>媒体</CardTitle>
