@@ -1,0 +1,10 @@
+# Publisher-only override. First stop assistant-native. No infrastructure units
+# or credentials are recreated. Both values must be preaccepted immutable images.
+services:
+  bot:
+    image: ${CLAWGUARD_GUARD_RESCUE_IMAGE:?set accepted old guard-only rescue image digest}
+    # Old migration binary does not know additive schema36. Run the old guard
+    # directly; never downgrade the database or restore a whole old .env.
+    entrypoint: ["/usr/local/bin/clawguard"]
+  web:
+    image: ${CLAWGUARD_ROLLBACK_WEB_IMAGE:?set retained old web image digest}

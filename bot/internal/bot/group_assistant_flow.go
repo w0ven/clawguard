@@ -96,6 +96,14 @@ func (s *Service) handleApprovedAssistantMessage(ctx context.Context, msg *tele.
 	if s == nil || s.assistant == nil || msg == nil || msg.Chat == nil || msg.Sender == nil {
 		return nil
 	}
+	if s.cfg.AssistantEngine == "paused" {
+		return nil
+	}
+	if s.assistant.native != nil {
+		// Native owns the complete assistant turn; failure never falls through
+		// into the legacy learner, batching, tools or sender.
+		return s.assistant.native.Incoming(ctx, msg, isEdited, eligibility, keywordReplied, isAdmin)
+	}
 	policy, err := s.assistant.Policy(ctx, msg.Chat.ID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {

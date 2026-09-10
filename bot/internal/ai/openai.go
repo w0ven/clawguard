@@ -241,8 +241,10 @@ func (c *OpenAICompatibleClient) Chat(ctx context.Context, req CheckRequest) (*C
 	ctx, cancel := c.withRequestTimeout(ctx, req.Timeout)
 	defer cancel()
 
-	msgs := append([]Message{}, Message{Role: "system", Content: req.SystemPrompt})
-	msgs = append(msgs, req.Messages...)
+	msgs := append([]Message{}, req.Messages...)
+	if !req.PreserveMessages {
+		msgs = append([]Message{{Role: "system", Content: req.SystemPrompt}}, msgs...)
+	}
 	body, err := json.Marshal(chatCompletionRequest{
 		Model:       req.Model,
 		Messages:    msgs,

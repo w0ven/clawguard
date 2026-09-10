@@ -207,6 +207,7 @@ type GroupAssistant struct {
 	coldHandled  map[int64]int64
 	coldRunning  map[int64]int64
 	ttsSynth     assistantTTSSynthesizer
+	native       *NativeAssistant
 }
 
 func NewGroupAssistant(service *Service) *GroupAssistant {
@@ -233,6 +234,15 @@ func NewGroupAssistant(service *Service) *GroupAssistant {
 		a.queries = service.queries
 		a.providers = service.aiProviders
 		a.models = service.aiModels
+		if service.cfg.AssistantEngine == "paused" {
+			// Offline migration fence: no assistant business workers or input.
+			return a
+		}
+		if service.cfg.AssistantEngine == "native" {
+			a.native = newNativeAssistant(a)
+			// The original Go business workers must not run beside SGB.
+			return a
+		}
 		for i := 0; i < 2; i++ {
 			service.wg.Add(1)
 			go a.learningWorker()
@@ -1188,7 +1198,7 @@ func (a *GroupAssistant) dispatchPlain(ctx context.Context, chatID int64, task s
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if task == "chat" {
+	if task == "chat" && !req.PreserveMessages {
 		messages, err := assistantFitPrompt(req.SystemPrompt, req.Messages, nil, req.MaxTokens)
 		if err != nil {
 			return nil, AssistantPoolEndpoint{}, err

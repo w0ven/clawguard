@@ -437,6 +437,10 @@ func (s *Service) registerHandlers() {
 		return s.runHandler("verify_admin", c, s.handleVerifyAdmin)
 	})
 
+	s.bot.Handle(tele.OnCallback, func(c tele.Context) error {
+		return s.runHandler("native_assistant_callback", c, s.handleNativeAssistantCallback)
+	})
+
 	s.bot.Handle(tele.OnText, func(c tele.Context) error {
 		return s.runHandler("text", c, s.handleIncomingMessage)
 	})

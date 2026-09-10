@@ -35,7 +35,10 @@ func providerHTTPError(resp *http.Response, err error) error {
 func (c *OpenAICompatibleClient) ChatWithTools(ctx context.Context, req ToolChatRequest) (*ToolChatResult, error) {
 	ctx, cancel := c.withRequestTimeout(ctx, req.Timeout)
 	defer cancel()
-	messages := append([]Message{{Role: "system", Content: req.SystemPrompt}}, req.Messages...)
+	messages := append([]Message{}, req.Messages...)
+	if !req.PreserveMessages {
+		messages = append([]Message{{Role: "system", Content: req.SystemPrompt}}, messages...)
+	}
 	body, err := json.Marshal(chatCompletionRequest{
 		Model: req.Model, Messages: messages, Temperature: req.Temperature,
 		MaxTokens: req.MaxTokens, Tools: req.Tools,

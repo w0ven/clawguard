@@ -1,0 +1,36 @@
+[project]
+name = "smart-group-bot"
+version = "0.1.0"
+description = "Telegram group management + AI chat bot"
+requires-python = ">=3.12"
+dependencies = [
+    # Bot API 10.1 rich messages (sendRichMessage / InputRichMessage) are
+    # imported at module scope, so anything older fails at startup.
+    "aiogram>=3.29",
+    "aiohttp>=3.9",
+    "aiosqlite>=0.20",
+    "sqlalchemy[asyncio]>=2.0",
+    # Async Responses API support is required so request timeouts can cancel
+    # the underlying operation instead of leaking blocking worker threads.
+    "litellm>=1.92",
+    "pydantic>=2.0",
+    "pydantic-settings>=2.0",
+    "python-dotenv>=1.0",
+    "cryptography>=41.0",
+    "ddgs>=9.0",
+    "regex>=2024.4.16",
+    # litellm >=1.92 imports its proxy/responses stack (fastapi, orjson) even
+    # for plain SDK usage with tools or the Responses API.
+    "fastapi>=0.110",
+    "orjson>=3.9",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["bot*"]
+
+[tool.setuptools.package-data]
+bot = ["web/static/*"]

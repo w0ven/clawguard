@@ -57,12 +57,19 @@ func NewServer(cfg config.Config, logger *zap.Logger, botService *bot.Service, s
 	e.GET("/healthz", server.healthz)
 	e.GET("/readyz", server.readyz)
 	e.POST("/webhook/:secret", server.handleWebhook)
+	if botService != nil {
+		e.POST("/internal/native/:operation", echo.WrapHandler(botService.NativeAssistantHandler()))
+	}
 	server.registerAuthRoutes()
 	server.registerPublicRoutes()
 	server.registerAdminRoutes()
 	server.registerVerifyRoutes()
 
 	return server
+}
+
+func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	s.echo.ServeHTTP(w, r)
 }
 
 func (s *Server) Start() error {

@@ -1,0 +1,19 @@
+[project]
+name = "clawguard-native-assistant"
+version = "0.1.0"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "smart-group-bot",
+  "uvicorn>=0.30",
+  "asyncpg>=0.31",
+]
+
+[dependency-groups]
+dev = ["pytest>=8", "pytest-asyncio>=0.24", "httpx>=0.27"]
+
+[tool.uv.sources]
+smart-group-bot = { path = "vendor/sgb", editable = true }
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
