@@ -73,6 +73,8 @@ async def test_engaged_adds_only_trusted_policy_and_preserves_output_contract():
         "mutual @ or mutual replies",
         "Several people discussing in the open group is not a two-person private chat",
         "Do not answer every message",
+        "already spoke in the last 2–3 minutes",
+        "Do not stack several short replies in the same burst",
         "explicit bot mention",
         "reply to the bot",
         "[SENDER_IS_OWNER]",
