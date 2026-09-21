@@ -22,6 +22,7 @@ import (
 
 	"github.com/openclaw/clawguard/internal/ai"
 	"github.com/openclaw/clawguard/internal/store"
+	"go.uber.org/zap"
 	tele "gopkg.in/telebot.v3"
 )
 
@@ -63,10 +64,11 @@ type NativeAssistant struct {
 	turns     map[string]*nativeTurn
 	locks     map[string]*sync.Mutex
 	downloads map[string]nativeDownload
+	wake      chan struct{}
 }
 
 func newNativeAssistant(a *GroupAssistant) *NativeAssistant {
-	n := &NativeAssistant{a: a, client: &http.Client{Timeout: 120 * time.Second}, turns: map[string]*nativeTurn{}, locks: map[string]*sync.Mutex{}, downloads: map[string]nativeDownload{}}
+	n := &NativeAssistant{a: a, client: &http.Client{Timeout: 120 * time.Second}, turns: map[string]*nativeTurn{}, locks: map[string]*sync.Mutex{}, downloads: map[string]nativeDownload{}, wake: make(chan struct{}, 1)}
 	a.service.wg.Add(1)
 	go func() {
 		defer a.service.wg.Done()
@@ -78,28 +80,39 @@ func newNativeAssistant(a *GroupAssistant) *NativeAssistant {
 				n.releaseTurns(true)
 				return
 			case <-ticker.C:
-				n.releaseTurns(false)
-				if a.queries == nil {
+			case <-n.wake:
+			}
+			n.releaseTurns(false)
+			if a.queries == nil {
+				continue
+			}
+			scopes, err := a.queries.PendingNativeAssistantScopes(a.ctx)
+			if err != nil {
+				a.logger.Warn("load pending native assistant events failed", zap.Error(err))
+				continue
+			}
+			for _, scope := range scopes {
+				lock := n.scopeLock(scope.ChatID, scope.ThreadID)
+				if !lock.TryLock() {
 					continue
 				}
-				scopes, err := a.queries.PendingNativeAssistantScopes(a.ctx)
-				if err != nil {
-					continue
+				err := n.flushScope(a.ctx, scope.ChatID, scope.ThreadID)
+				lock.Unlock()
+				if err != nil && a.ctx.Err() == nil {
+					a.logger.Warn("native assistant delivery deferred; moderation unaffected", zap.Error(err), zap.Int64("chat_id", scope.ChatID), zap.Int32("thread_id", scope.ThreadID))
 				}
-				for _, scope := range scopes {
-					lock := n.scopeLock(scope.ChatID, scope.ThreadID)
-					if !lock.TryLock() {
-						continue
-					}
-					_ = n.flushScope(a.ctx, scope.ChatID, scope.ThreadID)
-					lock.Unlock()
-				}
-
 			}
 		}
 	}()
 	return n
 }
+func (n *NativeAssistant) notifyDelivery() {
+	select {
+	case n.wake <- struct{}{}:
+	default:
+	}
+}
+
 func (n *NativeAssistant) releaseTurns(all bool) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -258,9 +271,14 @@ func (n *NativeAssistant) Incoming(ctx context.Context, msg *tele.Message, edite
 		if grantErr != nil {
 			return grantErr
 		}
-		raw, readErr := n.request(ctx, "/groups/read", map[string]any{"group_id": msg.Chat.ID, "background_grant": grant})
+		readCtx, readCancel := context.WithTimeout(ctx, time.Second)
+		raw, readErr := n.request(readCtx, "/groups/read", map[string]any{"group_id": msg.Chat.ID, "background_grant": grant})
+		readCancel()
 		if readErr != nil {
-			return readErr
+			// Optional style collection must not make Telegram retry an already
+			// moderated message when the conversational assistant is unavailable.
+			n.a.logger.Warn("native style lookup unavailable; sample skipped", zap.Error(readErr), zap.Int64("chat_id", msg.Chat.ID))
+			return nil
 		}
 		var current struct {
 			Settings struct {
@@ -277,12 +295,13 @@ func (n *NativeAssistant) Incoming(ctx context.Context, msg *tele.Message, edite
 	if eligibility != assistantEligibilityEligible && !edited {
 		return nil
 	}
-	lock := n.scopeLock(msg.Chat.ID, int32(msg.ThreadID))
-	lock.Lock()
-	defer lock.Unlock()
+	// EnqueueNativeAssistantEvent serializes revisions transactionally. Never
+	// wait on the delivery lock here: a slow native turn must not hold webhooks.
 	copyMsg := *msg
 	if msg.ReplyTo != nil {
-		visible, e := n.sourceVisible(ctx, msg.Chat.ID, int32(msg.ThreadID), int64(msg.ReplyTo.ID))
+		readCtx, readCancel := context.WithTimeout(ctx, time.Second)
+		visible, e := n.sourceVisible(readCtx, msg.Chat.ID, int32(msg.ThreadID), int64(msg.ReplyTo.ID))
+		readCancel()
 		if e != nil || !visible || msg.ReplyTo.ThreadID != msg.ThreadID {
 			copyMsg.ReplyTo = nil
 		}
@@ -308,7 +327,10 @@ func (n *NativeAssistant) Incoming(ctx context.Context, msg *tele.Message, edite
 	if err != nil {
 		return err
 	}
-	return n.flushScope(ctx, msg.Chat.ID, int32(msg.ThreadID))
+	// The durable outbox is the acknowledgement boundary. Native failures are
+	// retried by the worker, without replaying moderation or blocking Telegram.
+	n.notifyDelivery()
+	return nil
 }
 func (n *NativeAssistant) flushScope(ctx context.Context, groupID int64, topic int32) error {
 	events, err := n.a.queries.NativeAssistantEvents(ctx, groupID, topic)
@@ -338,9 +360,30 @@ func (n *NativeAssistant) flushScope(ctx context.Context, groupID int64, topic i
 			From struct {
 				ID int64 `json:"id"`
 			} `json:"from"`
+			ReplyTo *struct {
+				ID       int64 `json:"message_id"`
+				ThreadID int32 `json:"message_thread_id"`
+			} `json:"reply_to_message"`
 		}
 		raw, _ := json.Marshal(value["message"])
 		_ = json.Unmarshal(raw, &msg)
+		if msg.ReplyTo != nil {
+			// A referenced message may be revoked while this event waits in
+			// the outbox. Revalidate at delivery, not only at enqueue time.
+			visible := false
+			if msg.ReplyTo.ThreadID == topic {
+				var visibleErr error
+				visible, visibleErr = n.sourceVisible(ctx, groupID, topic, msg.ReplyTo.ID)
+				if visibleErr != nil {
+					return visibleErr
+				}
+			}
+			if !visible {
+				if message, ok := value["message"].(map[string]any); ok {
+					delete(message, "reply_to_message")
+				}
+			}
+		}
 		styleOnly, _ := value["style_only"].(bool)
 		grant := nativeGrant{GroupID: groupID, TopicID: topic, ActorID: msg.From.ID, StyleOnly: styleOnly, Generation: generation, EventID: event.ID, MessageID: event.MessageID, Expires: time.Now().Add(24 * time.Hour).Unix()}
 		value["group_id"], value["topic_id"], value["revision"], value["kind"] = groupID, topic, event.Revision, event.Kind

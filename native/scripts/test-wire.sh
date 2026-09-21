@@ -22,5 +22,5 @@ for i in $(seq 1 50); do
 done
 export CG_NATIVE_TEST_DATABASE_URL="postgres://cg_native_test:isolated-test-only@127.0.0.1:$port/cg_native_test?sslmode=disable"
 cd "$root/bot"
-"$GO_BINARY" test ./internal/bot -run 'TestNativeAssistant(RealGoPythonSQLAndTG|ActivationLiveGoPython|InboundMediaGoPython|PoolMaxTokensOverlayGoPython|ControlTrueReadWriteAndLegacyFreeze)$' -v -count=1
+"$GO_BINARY" test ./internal/bot -run 'TestNativeAssistant(RealGoPythonSQLAndTG|ActivationLiveGoPython|InboundMediaGoPython|PoolMaxTokensOverlayGoPython|ControlTrueReadWriteAndLegacyFreeze|OutboxIsolatesSlowAndFailedDelivery)$' -v -count=1
 "$GO_BINARY" test ./internal/api -run 'TestNativeAssistantHTTPRequiresJWTAndGlobalAdmin|TestAssistantVerificationAPINoJWT|TestAssistantGlobalVerificationAPINoJWT|TestAssistantVerificationAPIOutOfScopeAllRoutes' -count=1
