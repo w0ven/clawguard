@@ -64,7 +64,25 @@ def create_app(*, data: Path | None = None, broker=None, secret: str | None = No
 
     @app.get("/healthz")
     async def health():
-        return {"ok":not host.closing,"engine":"native","source_commit":SOURCE_COMMIT}
+        from sqlalchemy import text
+        from .database_pool import resource_snapshot
+
+        resources = resource_snapshot()
+        ok = not host.closing and resources["thread_headroom_ok"]
+        if ok and host.scopes:
+            try:
+                async with asyncio.timeout(2):
+                    scope = next(iter(host.scopes.values()))
+                    async with scope.engine.connect() as connection:
+                        await connection.execute(text("SELECT 1"))
+                resources["database_readable"] = True
+            except Exception:
+                resources["database_readable"] = False
+                ok = False
+        return JSONResponse(
+            {"ok":ok,"engine":"native","source_commit":SOURCE_COMMIT,"resources":resources},
+            status_code=200 if ok else 503,
+        )
 
     @app.post("/events")
     async def event(request: Request):

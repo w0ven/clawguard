@@ -58,6 +58,8 @@ class Scope:
 
 class NativeHost:
     def __init__(self, data: Path, broker: Broker, settings: Settings | None = None):
+        from .database_pool import install_native_pool
+        install_native_pool()
         from .migration import domain_lock
         self._domain_lock = domain_lock(data)
         self._domain_lock.__enter__()
@@ -116,41 +118,48 @@ class NativeHost:
                 raise ValueError("invalid group/topic")
             path = self.data / "scopes" / str(group_id) / f"{topic_id}.sqlite3"
             engine, sessions = await init_db(f"sqlite+aiosqlite:///{path}")
-            ctx = Execution(self.broker,group_id,topic_id,background_grant)
-            settings = self.settings.model_copy(deep=True)
-            llm = LLMService(settings.bot.main_model,settings.bot.decision_model,
-                settings.bot.compress_model,vision=settings.bot.vision_model,
-                embed=settings.bot.embed_model,max_context_tokens=settings.bot.max_context_tokens,bound=ctx)
-            vectors = SQLiteArchiveVectorRecallProvider(session_factory=sessions,llm=llm,
-                retention_days=self.settings.bot.memory_retention_days)
-            memory = MemoryService(self.settings.bot,llm,session_factory=sessions,vector_recall_provider=vectors)
-            bot = Bot("1:NATIVE_BROKER_NO_TELEGRAM_TOKEN",session=BrokerSession(ctx),
-                      default=DefaultBotProperties(parse_mode=self.settings.bot.parse_mode))
-            cleanup = TelegramCleanupScheduler(bot=bot,session_factory=sessions)
-            memory.cg_cleanup = cleanup
-            scope = Scope(group_id,topic_id,engine,sessions,memory,llm,bot,settings,cleanup,background_grant,[])
-            async with engine.begin() as conn:
-                await conn.execute(text("""CREATE TABLE IF NOT EXISTS cg_source_state (
-                    message_id INTEGER PRIMARY KEY, revision TEXT NOT NULL,
-                    valid INTEGER NOT NULL, forgotten INTEGER NOT NULL DEFAULT 0,
-                    was_archived INTEGER NOT NULL DEFAULT 0)"""))
-                columns = (await conn.execute(text("PRAGMA table_info(cg_source_state)"))).all()
-                if not any(row[1] == "was_archived" for row in columns):
-                    await conn.execute(text("ALTER TABLE cg_source_state ADD COLUMN was_archived INTEGER NOT NULL DEFAULT 0"))
-                    await conn.execute(text("UPDATE cg_source_state SET was_archived=1 WHERE EXISTS (SELECT 1 FROM group_message_archive a WHERE a.telegram_message_id=cg_source_state.message_id)"))
-                await conn.execute(text("CREATE TABLE IF NOT EXISTS cg_turns (turn TEXT PRIMARY KEY, status TEXT NOT NULL)"))
-            async with sessions() as session:
-                if await session.get(Group,group_id) is None:
-                    session.add(Group(id=group_id,settings={}))
-                await session.commit()
-            await memory.bootstrap()
+            memory = cleanup = None
             try:
+                ctx = Execution(self.broker,group_id,topic_id,background_grant)
+                settings = self.settings.model_copy(deep=True)
+                llm = LLMService(settings.bot.main_model,settings.bot.decision_model,
+                    settings.bot.compress_model,vision=settings.bot.vision_model,
+                    embed=settings.bot.embed_model,max_context_tokens=settings.bot.max_context_tokens,bound=ctx)
+                vectors = SQLiteArchiveVectorRecallProvider(session_factory=sessions,llm=llm,
+                    retention_days=self.settings.bot.memory_retention_days)
+                memory = MemoryService(self.settings.bot,llm,session_factory=sessions,vector_recall_provider=vectors)
+                bot = Bot("1:NATIVE_BROKER_NO_TELEGRAM_TOKEN",session=BrokerSession(ctx),
+                          default=DefaultBotProperties(parse_mode=self.settings.bot.parse_mode))
+                cleanup = TelegramCleanupScheduler(bot=bot,session_factory=sessions)
+                memory.cg_cleanup = cleanup
+                scope = Scope(group_id,topic_id,engine,sessions,memory,llm,bot,settings,cleanup,background_grant,[])
+                async with engine.begin() as conn:
+                    await conn.execute(text("""CREATE TABLE IF NOT EXISTS cg_source_state (
+                        message_id INTEGER PRIMARY KEY, revision TEXT NOT NULL,
+                        valid INTEGER NOT NULL, forgotten INTEGER NOT NULL DEFAULT 0,
+                        was_archived INTEGER NOT NULL DEFAULT 0)"""))
+                    columns = (await conn.execute(text("PRAGMA table_info(cg_source_state)"))).all()
+                    if not any(row[1] == "was_archived" for row in columns):
+                        await conn.execute(text("ALTER TABLE cg_source_state ADD COLUMN was_archived INTEGER NOT NULL DEFAULT 0"))
+                        await conn.execute(text("UPDATE cg_source_state SET was_archived=1 WHERE EXISTS (SELECT 1 FROM group_message_archive a WHERE a.telegram_message_id=cg_source_state.message_id)"))
+                    await conn.execute(text("CREATE TABLE IF NOT EXISTS cg_turns (turn TEXT PRIMARY KEY, status TEXT NOT NULL)"))
+                async with sessions() as session:
+                    if await session.get(Group,group_id) is None:
+                        session.add(Group(id=group_id,settings={}))
+                    await session.commit()
+                await memory.bootstrap()
                 # Source scheduler spawns its worker here. Do not inherit the
                 # previous HTTP event's actor/turn; use this Bot's bound scope.
                 await asyncio.create_task(cleanup.start(),context=Context())
             except BaseException:
-                await cleanup.stop(timeout_seconds=1)
-                await memory.shutdown()
+                # Initialization may fail before cleanup.start(), including
+                # while opening a topic under resource pressure.
+                pending_cleanup = []
+                if cleanup is not None:
+                    pending_cleanup.append(cleanup.stop(timeout_seconds=1))
+                if memory is not None:
+                    pending_cleanup.append(memory.shutdown())
+                await asyncio.gather(*pending_cleanup,return_exceptions=True)
                 await engine.dispose()
                 raise
             self.scopes[key] = scope
