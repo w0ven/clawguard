@@ -179,6 +179,11 @@ func (s *Service) handleIncomingMessageWithOptions(c tele.Context, isEdited bool
 	if msg == nil || msg.Chat == nil || (msg.Sender == nil && msg.SenderChat == nil) || msg.Private() {
 		return nil
 	}
+	// Telegram's same-group sender_chat is an anonymous administrator, not
+	// the synthetic Sender user. Never create trust/penalty state for it.
+	if isAnonymousGroupAdminMessage(msg) {
+		return nil
+	}
 	s.setAssistantEligibility(msg, assistantEligibilityUnknown)
 	defer func() {
 		status := assistantEligibilityUnknown
@@ -310,6 +315,13 @@ func (s *Service) handleIncomingMessageWithOptions(c tele.Context, isEdited bool
 		}
 	}
 	return s.handleApprovedAssistantMessage(ctx, msg, isEdited, eligibility, keywordReplied, isAdmin)
+}
+
+func isAnonymousGroupAdminMessage(msg *tele.Message) bool {
+	return msg != nil && msg.Chat != nil && msg.SenderChat != nil &&
+		msg.Chat.ID != 0 && msg.SenderChat.ID == msg.Chat.ID &&
+		(msg.Chat.Type == tele.ChatGroup || msg.Chat.Type == tele.ChatSuperGroup) &&
+		!msg.AutomaticForward
 }
 
 func (s *Service) handleSenderChatMessage(ctx context.Context, msg *tele.Message, policy config.GuardPolicy, actionsPaused bool) (bool, error) {
@@ -1268,7 +1280,18 @@ func (s *Service) ensureUserTrust(ctx context.Context, msg *tele.Message) (store
 		s.notifyOwnersOtherBot(ctx, msg.Chat, msg.Sender, "unknown_bot_message", "未知 bot 在群里发言")
 		return trust, nil
 	}
-	// 没有 trust 记录的用户说明是 bot 部署前就在群里的老成员，直接标记 trusted
+	// Missing history is not evidence of graduation. Groups may require unknown
+	// humans to pass newcomer moderation, without changing other groups' policy.
+	policy, err := s.LoadGuardPolicy(ctx, msg.Chat.ID)
+	if err != nil {
+		return store.UserTrust{}, err
+	}
+	status := "trusted"
+	var notes *string
+	if policy.AI.UnknownUsersAsNew {
+		status = "new"
+		notes = stringPtr("unknown human requires moderation")
+	}
 	return s.queries.UpsertUserTrust(ctx, store.UpsertUserTrustParams{
 		ChatID:          msg.Chat.ID,
 		UserID:          msg.Sender.ID,
@@ -1276,10 +1299,11 @@ func (s *Service) ensureUserTrust(ctx context.Context, msg *tele.Message) (store
 		FirstName:       userFieldPtr(msg.Sender.FirstName),
 		LastName:        userFieldPtr(msg.Sender.LastName),
 		JoinedAt:        time.Now(),
-		Status:          "trusted",
+		Status:          status,
 		Score:           0.5,
 		MessagesChecked: 0,
 		MessagesClean:   0,
+		Notes:           notes,
 		IsBot:           false,
 	})
 }

@@ -338,8 +338,9 @@ func (m *Moderator) checkBatch(ctx context.Context, inputs []CheckInput) ([]Chec
 			}
 			callCtx, cancel := context.WithTimeout(ctx, timeout)
 			result, err := client.Check(callCtx, CheckRequest{
-				Model:        model.ModelKey,
-				SystemPrompt: prompt,
+				DisableThinking: policy.DisableThinking,
+				Model:           model.ModelKey,
+				SystemPrompt:    prompt,
 				Messages: []Message{
 					{Role: "user", Content: "请严格返回 JSON。"},
 				},
@@ -462,8 +463,9 @@ func (m *Moderator) checkSingle(ctx context.Context, input CheckInput) (CheckOut
 
 			callCtx, cancel := context.WithTimeout(ctx, timeout)
 			result, err := client.Check(callCtx, CheckRequest{
-				Model:        model.ModelKey,
-				SystemPrompt: prompt,
+				DisableThinking: policy.DisableThinking,
+				Model:           model.ModelKey,
+				SystemPrompt:    prompt,
 				Messages: []Message{
 					{Role: "user", Content: visionRequestContent(input, model.SupportsVision)},
 				},
@@ -692,6 +694,7 @@ func (m *Moderator) policyFingerprint(scene string, policy config.AIPolicy) stri
 		rules = policy.BioRules
 	}
 	payload, err := json.Marshal(struct {
+		DisableThinking   bool                `json:"disable_thinking,omitempty"`
 		Scene             string              `json:"scene"`
 		Rules             string              `json:"rules"`
 		PrimaryProvider   string              `json:"primary_provider"`
@@ -702,6 +705,7 @@ func (m *Moderator) policyFingerprint(scene string, policy config.AIPolicy) stri
 		ActionsByCategory map[string]string   `json:"actions_by_category"`
 		Thresholds        config.AIThresholds `json:"thresholds"`
 	}{
+		DisableThinking:   policy.DisableThinking,
 		Scene:             normalizeScene(scene),
 		Rules:             strings.TrimSpace(rules),
 		PrimaryProvider:   strings.TrimSpace(policy.PrimaryProvider),

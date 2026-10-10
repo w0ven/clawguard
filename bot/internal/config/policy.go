@@ -204,6 +204,8 @@ type LoggingConfig struct {
 }
 
 type AIPolicy struct {
+	UnknownUsersAsNew      bool     `json:"unknown_users_as_new,omitempty"`
+	DisableThinking        bool     `json:"disable_thinking,omitempty"`
 	Enabled                bool     `json:"enabled"`
 	ImageModerationEnabled bool     `json:"image_moderation_enabled"`
 	PrimaryProvider        string   `json:"primary_provider"`

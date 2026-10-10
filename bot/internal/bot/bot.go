@@ -1035,11 +1035,15 @@ func (s *Service) startVerification(chat *tele.Chat, user *tele.User, joinEventM
 		Rights: tele.NoRights(),
 	}
 	restrictStartedAt := time.Now()
-	if err := s.bot.Restrict(chat, &member); err != nil {
+	if err := restrictVerificationWithRecovery(ctx,
+		func() error { return s.bot.Restrict(chat, &member) },
+		func() (*tele.ChatMember, error) { return s.bot.ChatMemberOf(chat, user) },
+		waitVerificationRetry,
+	); err != nil {
 		s.joinProtector.ReleasePending(chat.ID)
 		readable := normalizeTelegramActionError("restrict", err)
 		s.logger.Error("restrict new member", zap.Error(readable), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
-		s.sendBotPermissionWarningToChat(chat, "⚠️ 新人入群验证启动失败："+htmlEscape(redact.ErrorString(readable))+"。请检查 bot 是否拥有封禁/禁言成员权限。")
+		s.sendBotPermissionWarningToChat(chat, verificationStartFailureNotice(readable))
 		if cleanupErr := s.handleVerificationPromptFailure(ctx, chat, user, policy, readable); cleanupErr != nil {
 			s.releaseVerificationJoinLock(ctx, chat.ID, user.ID)
 			return errors.Join(readable, cleanupErr)

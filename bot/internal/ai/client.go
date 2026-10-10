@@ -90,6 +90,7 @@ func (e *ProviderError) Unwrap() error {
 }
 
 type CheckRequest struct {
+	DisableThinking  bool
 	PreserveMessages bool
 	Model            string
 	SystemPrompt     string
