@@ -52,7 +52,19 @@ func NewOpenAICompatibleClient(baseURL, apiKey string, timeout time.Duration, ex
 	}
 }
 
+type thinkingControl struct {
+	Type string `json:"type"`
+}
+
+func disabledThinking(disable bool) *thinkingControl {
+	if disable {
+		return &thinkingControl{Type: "disabled"}
+	}
+	return nil
+}
+
 type chatCompletionRequest struct {
+	Thinking    *thinkingControl `json:"thinking,omitempty"`
 	Model       string           `json:"model"`
 	Messages    []Message        `json:"messages"`
 	Temperature float64          `json:"temperature"`
@@ -82,6 +94,7 @@ func (c *OpenAICompatibleClient) Check(ctx context.Context, req CheckRequest) (*
 
 	body, err := json.Marshal(chatCompletionRequest{
 		Model:       req.Model,
+		Thinking:    disabledThinking(req.DisableThinking),
 		Messages:    append([]Message{{Role: "system", Content: req.SystemPrompt}}, req.Messages...),
 		Temperature: req.Temperature,
 		MaxTokens:   req.MaxTokens,
