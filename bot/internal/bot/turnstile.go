@@ -112,7 +112,7 @@ func (s *Service) VerifyTurnstileToken(ctx context.Context, token, cfResponse, r
 		return ErrTurnstileNotConfigured
 	}
 
-	verified, err := s.verifyTurnstileWithCloudflare(ctx, cfResponse, remoteIP)
+	verified, err := s.verifyTurnstileWithCloudflare(ctx, token, cfResponse, remoteIP)
 	if err != nil {
 		return err
 	}
@@ -161,10 +161,10 @@ func (s *Service) VerifyTurnstileToken(ctx context.Context, token, cfResponse, r
 	return nil
 }
 
-func (s *Service) verifyTurnstileWithCloudflare(ctx context.Context, cfResponse, remoteIP string) (turnstileSiteVerifyResponse, error) {
+func (s *Service) verifyTurnstileWithCloudflare(ctx context.Context, token, cfResponse, remoteIP string) (turnstileSiteVerifyResponse, error) {
 	body := &bytes.Buffer{}
 	writer := multipart.NewWriter(body)
-	idempotencyKey, err := s.turnstileIdempotencyKey(ctx, cfResponse)
+	idempotencyKey, err := s.turnstileIdempotencyKey(ctx, token, cfResponse)
 	if err != nil {
 		return turnstileSiteVerifyResponse{}, err
 	}
@@ -214,14 +214,15 @@ func (s *Service) verifyTurnstileWithCloudflare(ctx context.Context, cfResponse,
 	return payload, nil
 }
 
-func (s *Service) turnstileIdempotencyKey(ctx context.Context, cfResponse string) (string, error) {
+func (s *Service) turnstileIdempotencyKey(ctx context.Context, token, cfResponse string) (string, error) {
 	redisClient := s.Redis()
 	if redisClient == nil {
 		s.logger.Warn("turnstile idempotency redis unavailable; generating one-shot key")
 		return generateTurnstileIdempotencyKey()
 	}
 
-	cacheKey := "turnstile_idempotency:" + sha256HexString(cfResponse)
+	// Cloudflare retries may reuse a success response only for the same pending verification.
+	cacheKey := "turnstile_idempotency:" + sha256HexString(token) + ":" + sha256HexString(cfResponse)
 	if cached, err := redisClient.Get(ctx, cacheKey).Result(); err == nil && strings.TrimSpace(cached) != "" {
 		return cached, nil
 	} else if err != nil && !errors.Is(err, redis.Nil) {
