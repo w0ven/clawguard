@@ -139,6 +139,7 @@ function AIReviewPageInner() {
       const res = await apiFetch<{
         unban_performed?: boolean;
         trust_score_changed?: number;
+        side_effect_warnings?: string[];
       }>(`/api/admin/ai-decisions/${item.id}`, {
         method: "PUT",
         body: JSON.stringify({ admin_override: override }),
@@ -146,8 +147,10 @@ function AIReviewPageInner() {
       if (shouldReload) await load();
 
       // friendly toast based on real effect
-      if (!shouldToast) return;
-      if (override === "false_positive") {
+      if (!shouldToast) return res;
+      if (res.side_effect_warnings?.length) {
+        pushToast(res.side_effect_warnings.join("；"), "error");
+      } else if (override === "false_positive") {
         if (res.unban_performed) {
           pushToast("已解封用户", "success");
         } else {
@@ -158,6 +161,7 @@ function AIReviewPageInner() {
       } else if (override === "false_negative") {
         pushToast("已标记为漏判", "success");
       }
+      return res;
     } catch (e) {
       if (shouldToast) pushToast(e instanceof Error ? e.message : "操作失败", "error");
       throw e;
@@ -170,7 +174,8 @@ function AIReviewPageInner() {
     const success = results.filter((item) => item.status === "fulfilled").length;
     const failed = results.length - success;
     if (results.length > 0) await load();
-    pushToast(`批量操作完成：成功 ${success} 条，失败 ${failed} 条`, failed === 0 ? "success" : "error");
+    const warnings = results.flatMap((result) => result.status === "fulfilled" ? result.value?.side_effect_warnings ?? [] : []);
+    pushToast(`批量操作完成：成功 ${success} 条，失败 ${failed} 条${warnings.length ? `；${warnings.join("；")}` : ""}`, failed === 0 && !warnings.length ? "success" : "error");
   }
 
   return (
@@ -194,7 +199,7 @@ function AIReviewPageInner() {
         <CardHeader>
           <CardTitle>近期 AI 判定 ({items.length})</CardTitle>
           <CardDescription>
-            点击「误封」会尝试自动解封被 ban 的用户。标注「正确 / 漏判」会调整用户信任分。
+            点击「误封」仅会自动解除能确认属于该决策的本群封禁；无法确认归属时请人工核查并手动解封。标注「正确 / 漏判」会调整用户信任分。
           </CardDescription>
         </CardHeader>
         {items.length === 0 ? (

@@ -72,3 +72,36 @@ func (s *Service) ExemptionTargetIsKnownBot(ctx context.Context, chatID, userID 
 	}
 	return false, nil
 }
+
+// deferredExemption revalidates an exemption candidate whose background task
+// carries only a numeric ID. Unknown identity must pause, not imply human.
+func (s *Service) deferredExemption(ctx context.Context, chat *tele.Chat, user *tele.User) (bool, string) {
+	if chat == nil || user == nil {
+		return false, ""
+	}
+	if user.ID <= 0 || user.ID == 1087968824 || user.ID == 136817688 || user.ID == 777000 {
+		return false, ""
+	}
+	if s.queries == nil {
+		return true, "exemption lookup unavailable; retry required"
+	}
+	active, banned, err := s.queries.GroupExemptionStatus(ctx, chat.ID, user.ID)
+	if err != nil {
+		return true, "exemption lookup unavailable; retry required"
+	}
+	if !active || banned {
+		return false, ""
+	}
+	if s.bot == nil {
+		return true, "exemption candidate identity unavailable; manual review required"
+	}
+	member, err := s.bot.ChatMemberOf(chat, user)
+	if err != nil || member == nil || member.User == nil || member.User.ID != user.ID {
+		return true, "exemption candidate identity unavailable; manual review required"
+	}
+	if member.User.IsBot {
+		user.IsBot = true
+		return false, ""
+	}
+	return true, "group exemption active; restriction requires manual review"
+}

@@ -80,7 +80,7 @@ func parseExemptCommand(msg *tele.Message, remove bool) (int64, *time.Time, stri
 		args = args[1:]
 	} else {
 		for _, token := range args {
-			if token == "--" || token == "--note" || (durationLike.MatchString(token) && strings.IndexFunc(token, func(r rune) bool { return r < '0' || r > '9' }) >= 0) {
+			if token == "--" || token == "--note" || durationLike.MatchString(token) {
 				return 0, nil, "", errors.New("时长必须位于备注之前；歧义备注请用 --note")
 			}
 		}
@@ -195,5 +195,12 @@ func (s *Service) handleGroupExemptCommand(c tele.Context, command string) error
 	if err != nil {
 		return c.Send("豁免操作失败")
 	}
-	return c.Send(fmt.Sprintf("本群用户 %d 豁免已%s；已有禁言或封禁不会自动解除", id, map[bool]string{true: "撤销", false: "保存"}[command == "unexempt"]))
+	if command == "unexempt" {
+		return c.Send(fmt.Sprintf("本群用户 %d 豁免已撤销；已有禁言或封禁不会自动解除", id))
+	}
+	expiry := "永久"
+	if until != nil {
+		expiry = until.UTC().Format(time.RFC3339)
+	}
+	return c.Send(fmt.Sprintf("本群用户 %d 豁免已保存：%s；已有禁言或封禁不会自动解除", id, expiry))
 }

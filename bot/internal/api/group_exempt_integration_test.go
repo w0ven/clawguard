@@ -150,6 +150,9 @@ func TestGroupExemptAPIIntegration(t *testing.T) {
 	if err = goose.DownContext(ctx, db, h1MigrationsDir(t)); err != nil {
 		t.Fatal(err)
 	}
+	if err = goose.DownContext(ctx, db, h1MigrationsDir(t)); err != nil {
+		t.Fatal(err)
+	}
 	var version int64
 	if err = db.QueryRowContext(ctx, `SELECT max(version_id) FROM goose_db_version WHERE is_applied`).Scan(&version); err != nil || version != 37 {
 		t.Fatalf("expected upgrade from v37: %d %v", version, err)

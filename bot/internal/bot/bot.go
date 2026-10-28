@@ -614,6 +614,10 @@ func (s *Service) preprocessGroupCommand(c tele.Context) (bool, error) {
 	// Only verified chat administrators get command-content protection.
 	member, memberErr := s.bot.ChatMemberOf(chat, msg.Sender)
 	if memberErr != nil || member == nil || member.User == nil || member.User.ID != msg.Sender.ID {
+		// Match the ordinary message path, but never dispatch the command.
+		if err := s.handleIncomingMessageWithOptions(c, false); err != nil {
+			return true, err
+		}
 		return true, nil
 	}
 	if member.Role == tele.Administrator || member.Role == tele.Creator {
@@ -1350,6 +1354,7 @@ func (s *Service) handleAsyncVerificationMatch(ctx context.Context, match asyncV
 			match.decisionMode = "join_ai"
 		}
 	}
+	var profileDecisionID int64
 	return performAsyncVerificationMatch(ctx, asyncVerificationMatchOps{
 		banUser:                  s.banUser,
 		awaitPendingVerification: s.awaitPendingVerification,
@@ -1387,14 +1392,16 @@ func (s *Service) handleAsyncVerificationMatch(ctx context.Context, match asyncV
 			})
 		},
 		recordAIDecision: func(ctx context.Context, chat *tele.Chat, user *tele.User, matched string, mode string, aiOutput *ai.CheckOutput) error {
-			return s.recordProfileViolationDecision(ctx, chat, user, nil, matched, mode, aiOutput)
+			var err error
+			profileDecisionID, err = s.recordProfileViolationDecision(ctx, chat, user, nil, matched, mode, aiOutput)
+			return err
 		},
 		updateTrustBanned: func(ctx context.Context, chatID, userID int64, notes string) {
 			fakeMsg := &tele.Message{
 				Chat:   match.chat,
 				Sender: match.user,
 			}
-			s.resetTrustAfterViolation(ctx, fakeMsg, "ban", stringPtr(notes))
+			s.resetTrustAfterViolation(ctx, fakeMsg, "ban", stringPtr(notes), profileDecisionID)
 		},
 		logger: s.logger,
 	}, match)
@@ -2047,8 +2054,8 @@ func (s *Service) HandleVerificationExpiry(ctx context.Context, pending store.Pe
 		Username:  derefString(pending.Username),
 		FirstName: derefString(pending.FirstName),
 	}
-	if s.exemptUser(ctx, chat, user) {
-		return verificationExpiryRetry(time.Now().Add(time.Minute), "group exemption active; restriction requires manual review"), nil
+	if pause, reason := s.deferredExemption(ctx, chat, user); pause {
+		return verificationExpiryRetry(time.Now().Add(time.Minute), reason), nil
 	}
 	if pending.Method == "join_protection_cleanup" {
 		return s.handleJoinProtectionCleanupExpiry(ctx, pending, policy, chat, user)
@@ -2059,8 +2066,8 @@ func (s *Service) HandleVerificationExpiry(ctx context.Context, pending store.Pe
 		return verificationExpiryRetry(retryAt, "telegram cleanup cooldown"), nil
 	}
 
-	if s.exemptUser(ctx, chat, user) {
-		return verificationExpiryRetry(time.Now().Add(time.Minute), "group exemption active; restriction requires manual review"), nil
+	if pause, reason := s.deferredExemption(ctx, chat, user); pause {
+		return verificationExpiryRetry(time.Now().Add(time.Minute), reason), nil
 	}
 	failAction := verificationFailActionSnapshot(pending.Payload, policy.Verify.FailAction)
 	action, err := s.applyVerificationFailAction(chat, user, failAction)

@@ -934,7 +934,8 @@ func (s *Service) ProcessJoinProtectionCleanupFallbacks(ctx context.Context, lim
 			chat.Title = group.Title
 		}
 		user := &tele.User{ID: task.UserID, Username: task.Username, FirstName: task.FirstName}
-		if s.exemptUser(ctx, chat, user) {
+		if pause, reason := s.deferredExemption(ctx, chat, user); pause {
+			s.logger.Info("deferred cleanup paused", zap.String("reason", reason), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
 			if err := rescheduleJoinProtectionCleanupRedis(ctx, s.redis, task.Member, time.Now().Add(time.Minute)); err != nil {
 				return err
 			}

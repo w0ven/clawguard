@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/openclaw/clawguard/internal/ai"
 	"github.com/openclaw/clawguard/internal/store"
 	"go.uber.org/zap"
 	tele "gopkg.in/telebot.v3"
@@ -278,5 +279,72 @@ func TestGroupExemptionBotPathsIntegration(t *testing.T) {
 	result, err = s.HandleVerificationExpiry(ctx, pending)
 	if err != nil || !result.RetryAt.IsZero() {
 		t.Fatalf("expired exemption did not resume pending: %+v %v", result, err)
+	}
+}
+
+func TestAIBanOwnershipFromDecisionIntegration(t *testing.T) {
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, os.Getenv("TEST_DATABASE_URL"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	const chatID int64 = -100881111
+	const userID int64 = 881111
+	_, _ = pool.Exec(ctx, `DELETE FROM user_trust WHERE chat_id=$1 AND user_id=$2`, chatID, userID)
+	defer func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM user_trust WHERE chat_id=$1 AND user_id=$2`, chatID, userID)
+		_, _ = pool.Exec(context.Background(), `DELETE FROM ai_decisions WHERE chat_id=$1 AND user_id=$2`, chatID, userID)
+	}()
+	_, err = pool.Exec(ctx, `INSERT INTO groups(chat_id,title,type) VALUES($1,'fixture','supergroup')`, chatID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _, _ = pool.Exec(context.Background(), `DELETE FROM groups WHERE chat_id=$1`, chatID) }()
+	_, err = pool.Exec(ctx, `INSERT INTO user_trust(chat_id,user_id,status,score) VALUES($1,$2,'new',0.5)`, chatID, userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := store.New(pool)
+	b, _ := newMockTelegramBot(t, "")
+	s := &Service{logger: zap.NewNop(), queries: q, bot: b, sender: b, sendLimiter: NewSendLimiter()}
+	s.cacheSystemState(ctx, store.SystemState{})
+	s.cacheAuthorizedGroup(ctx, chatID, true)
+	msg := &tele.Message{ID: 901, Text: "bad", Chat: &tele.Chat{ID: chatID, Type: tele.ChatSuperGroup}, Sender: &tele.User{ID: userID, FirstName: "fixture"}}
+	out := ai.CheckOutput{Verdict: ai.Verdict{Verdict: "spam", Category: "spam", Reason: "fixture", Confidence: 0.99}, Model: "fixture"}
+	id, err := s.recordAIDecision(ctx, msg, msg.Text, out, "ban", "message", nil)
+	if err != nil || id == 0 {
+		t.Fatalf("decision: %d %v", id, err)
+	}
+	trust, err := q.GetUserTrust(ctx, chatID, userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := keywordReplyPolicy("none", 0)
+	if err = s.applyAIAction(ctx, msg, p, trust, out, "ban", false, id); err != nil {
+		t.Fatal(err)
+	}
+	var source string
+	var got int64
+	err = pool.QueryRow(ctx, `SELECT banned_reason->>'source',(banned_reason->>'decision_id')::bigint FROM user_trust WHERE chat_id=$1 AND user_id=$2 AND status='banned'`, chatID, userID).Scan(&source, &got)
+	if err != nil || source != "ai" || got != id {
+		t.Fatalf("AI ownership source=%s id=%d want=%d err=%v", source, got, id, err)
+	}
+	profileID := userID + 1
+	defer func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM user_trust WHERE chat_id=$1 AND user_id=$2`, chatID, profileID)
+		_, _ = pool.Exec(context.Background(), `DELETE FROM ai_decisions WHERE chat_id=$1 AND user_id=$2`, chatID, profileID)
+	}()
+	if _, err = pool.Exec(ctx, `INSERT INTO user_trust(chat_id,user_id,status,score) VALUES($1,$2,'new',0.5) ON CONFLICT (chat_id,user_id) DO UPDATE SET status='new',score=0.5,banned_reason=null`, chatID, profileID); err != nil {
+		t.Fatal(err)
+	}
+	msg.Sender = &tele.User{ID: profileID, FirstName: "profile"}
+	msg.ID = 902
+	if err = s.handleProfileOnMessageViolation(ctx, msg, p, "fixture bio", &out); err != nil {
+		t.Fatal(err)
+	}
+	err = pool.QueryRow(ctx, `SELECT (u.banned_reason->>'decision_id')::bigint FROM user_trust u JOIN ai_decisions d ON d.id=(u.banned_reason->>'decision_id')::bigint AND d.chat_id=u.chat_id AND d.user_id=u.user_id WHERE u.chat_id=$1 AND u.user_id=$2 AND u.status='banned' AND d.scene='bio'`, chatID, profileID).Scan(&got)
+	if err != nil || got == 0 {
+		t.Fatalf("profile ownership not bound: %d %v", got, err)
 	}
 }

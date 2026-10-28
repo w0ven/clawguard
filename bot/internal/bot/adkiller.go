@@ -200,10 +200,11 @@ func (s *Service) applyAdKillerPrefilter(
 		"action":           eval.Action,
 		"score_bands":      cfg.ScoreBands,
 	})
-	if err := s.recordAIDecision(ctx, msg, content.Text, *eval.Output, eval.Action, "message", metadata); err != nil {
-		s.logger.Warn("record adkiller decision failed", zap.Error(err))
+	decisionID, recordErr := s.recordAIDecision(ctx, msg, content.Text, *eval.Output, eval.Action, "message", metadata)
+	if recordErr != nil {
+		s.logger.Warn("record adkiller decision failed", zap.Error(recordErr))
 	}
-	if err := s.applyAIAction(ctx, msg, policy, trust, *eval.Output, eval.Action, isEdited); err != nil {
+	if err := s.applyAIAction(ctx, msg, policy, trust, *eval.Output, eval.Action, isEdited, decisionID); err != nil {
 		return true, err
 	}
 	return true, nil

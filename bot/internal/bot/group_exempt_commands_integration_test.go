@@ -38,10 +38,11 @@ func (groupCommandTransport) RoundTrip(r *http.Request) (*http.Response, error) 
 		if id == "101" && chat == "-100777001" {
 			status = "administrator"
 		}
-		if id == "103" {
+		if id == "103" || id == "801" {
 			return nil, fmt.Errorf("fixture lookup failure")
 		}
-		body = fmt.Sprintf(`{"ok":true,"result":{"user":{"id":%s,"is_bot":false,"first_name":"fixture"},"status":%q}}`, id, status)
+		isBot := id == "800"
+		body = fmt.Sprintf(`{"ok":true,"result":{"user":{"id":%s,"is_bot":%t,"first_name":"fixture"},"status":%q}}`, id, isBot, status)
 	case "sendMessage":
 		body = `{"ok":true,"result":{"message_id":999,"chat":{"id":-100777001,"type":"supergroup"}}}`
 	}
@@ -136,10 +137,16 @@ func TestGroupExemptCommandsIntegration(t *testing.T) {
 type reviewCommandTransport struct {
 	groupCommandTransport
 	methods []string
+	bodies  []string
 }
 
 func (r *reviewCommandTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	r.methods = append(r.methods, path.Base(req.URL.Path))
+	if req.Body != nil {
+		raw, _ := io.ReadAll(req.Body)
+		r.bodies = append(r.bodies, string(raw))
+		req.Body = io.NopCloser(strings.NewReader(string(raw)))
+	}
 	return r.groupCommandTransport.RoundTrip(req)
 }
 func TestReviewCommandDispatchIntegration(t *testing.T) {
@@ -200,5 +207,85 @@ func TestReviewCommandDispatchIntegration(t *testing.T) {
 	if countString(tr.methods, "deleteMessage") != before {
 		t.Fatal("admin command target/remark filtered")
 	}
+	m.ID = 508
+	m.Text = "/exempt 125 1"
+	if err = s.ProcessUpdate(tele.Update{ID: 508, Message: m}); err != nil {
+		t.Fatal(err)
+	}
+	var invalidCount int
+	if err = pool.QueryRow(ctx, `SELECT count(*) FROM group_exempt_users WHERE chat_id=$1 AND user_id=125`, chatID).Scan(&invalidCount); err != nil || invalidCount != 0 {
+		t.Fatalf("ambiguous duration wrote exemption: %d %v", invalidCount, err)
+	}
+	if !strings.Contains(strings.Join(tr.bodies, "\n"), "永久") {
+		t.Fatal("permanent confirmation missing")
+	}
+	m.ID = 506
+	m.Text = "/exempt 124 1d 备注"
+	if err = s.ProcessUpdate(tele.Update{ID: 506, Message: m}); err != nil {
+		t.Fatal(err)
+	}
+	var expires *time.Time
+	if err = pool.QueryRow(ctx, `SELECT expires_at FROM group_exempt_users WHERE chat_id=$1 AND user_id=124`, chatID).Scan(&expires); err != nil || expires == nil || !strings.Contains(strings.Join(tr.bodies, "\n"), expires.UTC().Format(time.RFC3339)) {
+		t.Fatalf("expiry confirmation missing: %v %v %v", expires, err, tr.bodies)
+	}
+	s.chatAdmins.Store(fmt.Sprintf("chat_admin:%d:%d", chatID, 103), chatAdminCacheEntry{IsAdmin: false, ExpireAt: time.Now().Add(time.Hour)})
+	before = countString(tr.methods, "deleteMessage")
+	bad := &tele.Message{ID: 507, Text: "/exempt blocked", Chat: m.Chat, Sender: &tele.User{ID: 103, FirstName: "unknown"}}
+	if err = s.ProcessUpdate(tele.Update{ID: 507, Message: bad}); err != nil {
+		t.Fatal(err)
+	}
+	if countString(tr.methods, "deleteMessage") != before+1 {
+		t.Fatalf("admin lookup failure bypassed ordinary filter: %v", tr.methods)
+	}
 	_, _ = pool.Exec(ctx, `DELETE FROM group_exempt_users WHERE chat_id=$1`, chatID)
+}
+
+func TestDeferredCandidateIdentityIntegration(t *testing.T) {
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, os.Getenv("TEST_DATABASE_URL"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	q := store.New(pool)
+	const chatID int64 = -100777001
+	_, err = pool.Exec(ctx, `INSERT INTO groups(chat_id,title,type) VALUES($1,'fixture','supergroup') ON CONFLICT DO NOTHING`, chatID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM group_exempt_users WHERE chat_id=$1`, chatID)
+		_, _ = pool.Exec(context.Background(), `DELETE FROM groups WHERE chat_id=$1`, chatID)
+	}()
+	tr := &reviewCommandTransport{}
+	client, err := tele.NewBot(tele.Settings{Token: "123:TEST", URL: "http://telegram.test", Synchronous: true, Client: &http.Client{Transport: tr}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &Service{logger: zap.NewNop(), queries: q, bot: client, sender: client, sendLimiter: NewSendLimiter(), joinProtector: newJoinProtector(), cleanupBreaker: newTelegramCleanupBreaker()}
+	s.cacheAuthorizedGroup(ctx, chatID, true)
+	s.cacheSystemState(ctx, store.SystemState{})
+	s.policySnapshots.Store(chatID, keywordReplyPolicy("none", 0))
+	s.policySnapshotAt.Store(chatID, time.Now())
+	for _, id := range []int64{800, 801, 802} {
+		if _, err = q.UpsertGroupExemptUser(ctx, chatID, id, "fixture", nil); err != nil {
+			t.Fatal(err)
+		}
+		pending, e := q.UpsertPendingVerification(ctx, store.UpsertPendingVerificationParams{ChatID: chatID, UserID: id, Method: "button", Payload: []byte(`{}`), ExpiresAt: time.Now().Add(-time.Minute)})
+		if e != nil {
+			t.Fatal(e)
+		}
+		before := countString(tr.methods, "kickChatMember")
+		result, e := s.HandleVerificationExpiry(ctx, pending)
+		if e != nil {
+			t.Fatal(e)
+		}
+		if id == 800 {
+			if !result.RetryAt.IsZero() || countString(tr.methods, "kickChatMember") != before+1 {
+				t.Fatalf("bot was exempt: %+v %v", result, tr.methods)
+			}
+		} else if result.RetryAt.IsZero() || countString(tr.methods, "kickChatMember") != before {
+			t.Fatalf("human or unknown punished: id=%d %+v %v", id, result, tr.methods)
+		}
+	}
 }

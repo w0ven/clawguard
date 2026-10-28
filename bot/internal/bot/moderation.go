@@ -422,7 +422,7 @@ func (s *Service) enforceExistingBannedMessage(ctx context.Context, msg *tele.Me
 		s.logger.Info("skip duplicate banned user action", zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID), zap.Int("message_id", msg.ID))
 		return nil
 	}
-	if err := s.banUser(msg.Chat, msg.Sender); err != nil {
+	if err := s.banExistingUser(msg.Chat, msg.Sender); err != nil {
 		actionRollback()
 		return err
 	}
@@ -580,10 +580,11 @@ func (s *Service) applyAIModeration(ctx context.Context, msg *tele.Message, poli
 			aiDecisionMetadata = raw
 		}
 	}
-	if err := s.recordAIDecision(ctx, msg, content.Text, output, action, scene, aiDecisionMetadata); err != nil {
-		s.logger.Warn("record ai decision failed", zap.Error(err))
+	decisionID, recordErr := s.recordAIDecision(ctx, msg, content.Text, output, action, scene, aiDecisionMetadata)
+	if recordErr != nil {
+		s.logger.Warn("record ai decision failed", zap.Error(recordErr))
 	}
-	if err := s.applyAIAction(ctx, msg, policy, trust, output, action, isEdited); err != nil {
+	if err := s.applyAIAction(ctx, msg, policy, trust, output, action, isEdited, decisionID); err != nil {
 		return err
 	}
 	return nil
@@ -1436,11 +1437,11 @@ func normalizeAIAction(action string) string {
 	}
 }
 
-func (s *Service) recordAIDecision(ctx context.Context, msg *tele.Message, messageText string, output ai.CheckOutput, action string, scene string, metadata []byte) error {
+func (s *Service) recordAIDecision(ctx context.Context, msg *tele.Message, messageText string, output ai.CheckOutput, action string, scene string, metadata []byte) (int64, error) {
 	if strings.TrimSpace(scene) == "" {
 		scene = "message"
 	}
-	_, err := s.queries.InsertAIDecision(ctx, store.InsertAIDecisionParams{
+	decision, err := s.queries.InsertAIDecision(ctx, store.InsertAIDecisionParams{
 		ChatID:        msg.Chat.ID,
 		UserID:        msg.Sender.ID,
 		MessageID:     int64(msg.ID),
@@ -1458,7 +1459,7 @@ func (s *Service) recordAIDecision(ctx context.Context, msg *tele.Message, messa
 		Scene:         scene,
 		Metadata:      metadata,
 	})
-	return err
+	return decision.ID, err
 }
 
 func (s *Service) recordProfileViolationDecision(
@@ -1469,9 +1470,9 @@ func (s *Service) recordProfileViolationDecision(
 	matched string,
 	mode string,
 	aiOutput *ai.CheckOutput,
-) error {
+) (int64, error) {
 	if chat == nil || user == nil {
-		return nil
+		return 0, nil
 	}
 
 	verdict := "normal"
@@ -1515,7 +1516,7 @@ func (s *Service) recordProfileViolationDecision(
 		}
 	}
 
-	_, err := s.queries.InsertAIDecision(ctx, store.InsertAIDecisionParams{
+	decision, err := s.queries.InsertAIDecision(ctx, store.InsertAIDecisionParams{
 		ChatID:        chat.ID,
 		UserID:        user.ID,
 		MessageID:     messageID,
@@ -1532,7 +1533,7 @@ func (s *Service) recordProfileViolationDecision(
 		LatencyMs:     latencyMs,
 		Scene:         "bio",
 	})
-	return err
+	return decision.ID, err
 }
 
 func (s *Service) recordAIDecisionError(ctx context.Context, msg *tele.Message, messageText string, callErr error) error {
@@ -2489,7 +2490,7 @@ func quotedMessageSource(msg *tele.Message) string {
 	return strconv.FormatInt(msg.Sender.ID, 10)
 }
 
-func (s *Service) applyAIAction(ctx context.Context, msg *tele.Message, policy config.GuardPolicy, trust store.UserTrust, output ai.CheckOutput, action string, isEdited bool) error {
+func (s *Service) applyAIAction(ctx context.Context, msg *tele.Message, policy config.GuardPolicy, trust store.UserTrust, output ai.CheckOutput, action string, isEdited bool, decisionIDs ...int64) error {
 	if s.exemptMessage(ctx, msg) {
 		return nil
 	}
@@ -2685,6 +2686,9 @@ func (s *Service) applyAIAction(ctx context.Context, msg *tele.Message, policy c
 		if nextStatus == "banned" {
 			bannedAt = &now
 			bannedReason = buildUserTrustBanReason(output.Verdict.Verdict, output.Verdict.Reason, "ai")
+			if len(decisionIDs) > 0 && decisionIDs[0] > 0 {
+				bannedReason = mustJSONBytes(map[string]any{"source": "ai", "rule": output.Verdict.Verdict, "matched": output.Verdict.Reason, "decision_id": decisionIDs[0]})
+			}
 		}
 		updated, err = s.queries.UpdateUserTrustStatus(ctx, store.UpdateUserTrustStatusParams{
 			ChatID:       msg.Chat.ID,
@@ -2949,7 +2953,7 @@ func (s *Service) dispatchAIActionFeedback(
 	}
 }
 
-func (s *Service) resetTrustAfterViolation(ctx context.Context, msg *tele.Message, action string, notes *string) {
+func (s *Service) resetTrustAfterViolation(ctx context.Context, msg *tele.Message, action string, notes *string, decisionIDs ...int64) {
 	if msg == nil || msg.Chat == nil || msg.Sender == nil {
 		return
 	}
@@ -3026,6 +3030,9 @@ func (s *Service) resetTrustAfterViolation(ctx context.Context, msg *tele.Messag
 			bannedAt = &now
 			rule, matched, source := parseUserTrustBanMeta(notes, "ai")
 			bannedReason = buildUserTrustBanReason(rule, matched, source)
+			if len(decisionIDs) > 0 && decisionIDs[0] > 0 {
+				bannedReason = mustJSONBytes(map[string]any{"source": "ai", "rule": rule, "matched": matched, "decision_id": decisionIDs[0]})
+			}
 		}
 		if _, err := s.queries.UpdateUserTrustStatus(ctx, store.UpdateUserTrustStatusParams{
 			ChatID:       msg.Chat.ID,
@@ -3464,6 +3471,12 @@ func (s *Service) kickUser(chat *tele.Chat, user *tele.User) error {
 }
 
 func (s *Service) banUser(chat *tele.Chat, user *tele.User) error {
+	return s.banUserWithOwnership(chat, user, false)
+}
+func (s *Service) banExistingUser(chat *tele.Chat, user *tele.User) error {
+	return s.banUserWithOwnership(chat, user, true)
+}
+func (s *Service) banUserWithOwnership(chat *tele.Chat, user *tele.User, preserve bool) error {
 	if chat == nil || user == nil {
 		return nil
 	}
@@ -3472,6 +3485,11 @@ func (s *Service) banUser(chat *tele.Chat, user *tele.User) error {
 		return errActionsPaused
 	} else if err != nil {
 		return fmt.Errorf("load system state before ban: %w", err)
+	}
+	if !preserve && s.queries != nil {
+		if err := s.queries.ClearAIBanOwnership(context.Background(), chat.ID, user.ID); err != nil {
+			return fmt.Errorf("clear prior AI ban ownership: %w", err)
+		}
 	}
 	// Telegram Bot API does not expose an official "report spam" method to bots.
 	// We can only ban and ask Telegram to revoke the user's recent chat messages.
@@ -4127,8 +4145,9 @@ func (s *Service) handleProfileOnMessageViolation(
 	if aiOutput != nil && strings.EqualFold(aiOutput.Model, "adkiller") {
 		decisionMode = "on_message_adkiller"
 	}
-	if err := s.recordProfileViolationDecision(ctx, msg.Chat, msg.Sender, msg, matched, decisionMode, aiOutput); err != nil {
-		s.logger.Warn("record profile violation ai_decision failed", zap.Error(err))
+	decisionID, recordErr := s.recordProfileViolationDecision(ctx, msg.Chat, msg.Sender, msg, matched, decisionMode, aiOutput)
+	if recordErr != nil {
+		s.logger.Warn("record profile violation ai_decision failed", zap.Error(recordErr))
 	}
 
 	deleteRelease, deleteOK := s.acquireMessageDeleteLock(msg.Chat.ID, msg.ID)
@@ -4162,7 +4181,7 @@ func (s *Service) handleProfileOnMessageViolation(
 		return nil
 	}
 
-	s.resetTrustAfterViolation(ctx, msg, "ban", stringPtr("profile_match_on_message: "+matched))
+	s.resetTrustAfterViolation(ctx, msg, "ban", stringPtr("profile_match_on_message: "+matched), decisionID)
 	s.sendActionFeedback(msg.Chat, nil, policy.Feedback.Ban, map[string]string{
 		"user":         feedbackUserLabel(msg.Sender, policy.Feedback.Ban.ParseMode),
 		"user_mention": feedbackUserMention(msg.Sender, policy.Feedback.Ban.ParseMode),

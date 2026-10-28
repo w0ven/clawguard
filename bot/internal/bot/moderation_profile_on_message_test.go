@@ -540,6 +540,9 @@ func (db *moderationProfileMatchMockDB) recordTrustSideEffectLocked() pgx.Row {
 }
 
 func (db *moderationProfileMatchMockDB) Exec(_ context.Context, query string, args ...any) (pgconn.CommandTag, error) {
+	if strings.Contains(query, "banned_reason=banned_reason - 'decision_id'") {
+		return pgconn.NewCommandTag("UPDATE 0"), nil
+	}
 	if strings.Contains(query, "UPDATE warnings") {
 		db.mu.Lock()
 		defer db.mu.Unlock()

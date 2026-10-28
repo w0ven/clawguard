@@ -1338,6 +1338,9 @@ func (s *Server) handleUpdateAIDecision(c echo.Context) error {
 	}
 
 	nextOverride := trimStringPtr(payload.AdminOverride)
+	if nextOverride != nil && *nextOverride == "false_positive" && strings.Contains(strings.ToLower(previous.ActionTaken), "ban") {
+		return s.reviewAIBanFalsePositive(c, id)
+	}
 	updated, err := s.botService.Queries().UpdateAIDecisionOverride(ctx, id, nextOverride)
 	if err != nil {
 		if err == pgx.ErrNoRows {
