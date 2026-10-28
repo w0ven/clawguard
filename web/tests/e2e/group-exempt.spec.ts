@@ -16,7 +16,7 @@ test('group exemptions add, revoke, validation and server error', async ({page})
   await login(page);
   await page.context().addCookies([{name:'cg_csrf',value:'fixture-csrf',domain:'127.0.0.1',path:'/'}]);
   await page.goto('/groups/-1001');
-  await expect(page.getByText('群信息',{exact:true})).toBeVisible();
+  await expect(page.getByText('入群验证',{exact:true})).toBeVisible();
   await expect(page.getByRole('heading',{name:'本群用户豁免'})).toHaveCount(0);
   await page.getByRole('button',{name:'用户豁免',exact:true}).click();
   await expect(page.getByRole('heading',{name:'本群用户豁免'})).toBeVisible();
@@ -52,7 +52,8 @@ test('exemption tab preserves policy draft and is absent from global settings', 
   });
   await login(page);
   await page.goto('/groups/-1001');
-  await expect(page.getByText('群信息', { exact: true })).toBeVisible();
+  await expect(page.getByText('入群验证', { exact: true })).toBeVisible();
+  await expect(page.getByRole('heading', { name: '本群用户豁免' })).toHaveCount(0);
   expect(listRequests).toBe(0);
   await draftGroup(page);
   await page.getByRole('button', { name: '用户豁免', exact: true }).click();

@@ -993,8 +993,8 @@ function truncateText(value: string, maxLength: number) {
 export function GroupConfigEditor({ group, mergedPolicy }: Props) {
   const { pushToast } = useToast();
   const { confirmNavigation } = useDirtyNavigation();
-  const [activeScene, setActiveScene] = useState("overview");
-  const [activeTab, setActiveTab] = useState("basic");
+  const [activeScene, setActiveScene] = useState("membership");
+  const [activeTab, setActiveTab] = useState("verify");
   const [initialConfig, setInitialConfig] = useState<Record<string, unknown>>(
     group.config ?? {},
   );
