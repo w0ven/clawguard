@@ -97,9 +97,12 @@ HTTPS 入口（Cloudflare Tunnel 或自有反代）
   ├─ 硬过滤（关键词 / 正则 / 用户名 / 链接）
   ├─ 未毕业限制（链接 / 转发 / 媒体 / 速率）
   ├─ 关键词自动回复（不短路后续审核）
-  ├─ AdKiller 广告预筛
-  └─ AI（文本 / 图片 / 视频抽帧）
+  ├─ 图片：AdKiller OCR 优先，未命中或失败继续视觉模型
+  ├─ 文字：AI 模型链优先，仅全部失败后由 AdKiller 兜底
+  └─ 视频：原有 AI 抽帧审核
 ```
+
+AdKiller 不使用 Prompt 编辑器；模型链继续使用自定义规则。启用范围和分段动作保持群配置，详见 [AdKiller 审核顺序](docs/adkiller-routing.md)。
 
 > [!NOTE]
 > 当前按 **单 bot 实例** 设计。入群防护状态在 Redis 里，但定时消息和日报还没有分布式选主，不要把 bot 扩成多副本。
@@ -276,7 +279,7 @@ Fork 或离线构建见 [本地开发](./docs/development.md)。
 | Emoji 四选一 | 选对指定表情 |
 | Turnstile | Cloudflare 人机验证 |
 
-可选：入群前跑 CAS、Bio 关键词 / AI。AdKiller 开启时，简介先广告预筛，命中再按分段动作处理。
+可选：入群前跑 CAS、Bio 关键词 / AI。AI 简介审核先走模型链，仅全部失败时由已启用的 AdKiller 兜底；关键词模式不调用 AdKiller。
 
 ---
 

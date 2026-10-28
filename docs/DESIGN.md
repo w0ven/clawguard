@@ -25,7 +25,7 @@ Telegram 群组管理系统：入群验证、规则过滤、CAS 联动、AI 内�
 | 入群洪泛防护 | Redis Lua 原子状态机；短窗口集中涌入时临时处理新账号 |
 | 规则过滤 | 关键词、正则、用户名黑名单、链接白名单、未毕业加严、速率限制 |
 | CAS | 同步黑名单，入群命中直接封禁 |
-| AdKiller | 广告预筛，命中后再按分段动作处理 |
+| AdKiller | 图片 OCR 优先、文字模型失败后兜底；命中按分段动作处理，详见 [审核顺序](adkiller-routing.md) |
 | AI 审核 | 文本 / 图片 / 视频抽帧；多 Provider 与 fallback |
 | 信任状态机 | `new` → `trusted` / `suspicious` / `banned` |
 | 人审 | 面板可标注正确、误封、漏判 |
@@ -125,7 +125,7 @@ clawguard/
 入群 + 验证通过
         │
         ▼
-     ┌─────┐  未毕业消息走硬规则 → AdKiller → AI
+     ┌─────┐  未毕业消息走硬规则 → 按内容类型执行 AI / AdKiller
      │ new │
      └──┬──┘
         │ messages_clean ≥ GraduateAfterMessages
@@ -165,9 +165,10 @@ clawguard/
   │
   ├─ 非文本策略（off / delete / ai_review）按配置执行，不被 ContinueReview 绕过
   │
-  ├─ AdKiller 预筛
+  ├─ 图片先 AdKiller OCR，未命中或失败继续视觉模型
   │
-  └─ AI
+  └─ AI（使用 Prompt 编辑器规则）
+        ├─ 文字与 AI 简介仅在模型链全部失败时由 AdKiller 兜底
         ├─ 视频按当前消息的 Video / Animation / VideoNote 抽帧，caption 不改变是否抽帧
         ├─ 引用消息的视频不会被误抽
         └─ 判决写入 ai_decisions，动作按置信度阈值与类别覆盖
