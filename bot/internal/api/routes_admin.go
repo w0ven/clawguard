@@ -848,21 +848,11 @@ func (s *Server) handleListAudit(c echo.Context) error {
 func (s *Server) handleStats(c echo.Context) error {
 	admin, _ := currentAdmin(c)
 	if !adminHasGlobalAccess(admin) {
-		groups, err := s.botService.Queries().ListGroups(c.Request().Context())
+		stats, err := s.botService.Queries().GetScopedAdminStats(c.Request().Context(), decodeGroupScope(admin.GroupScope))
 		if err != nil {
 			return c.JSON(http.StatusInternalServerError, map[string]string{"error": "load stats failed"})
 		}
-		count := int64(0)
-		for _, group := range groups {
-			if adminCanAccessChat(admin, group.ChatID) {
-				count++
-			}
-		}
-		return c.JSON(http.StatusOK, map[string]any{
-			"groups_count":         count,
-			"active_verifications": 0,
-			"today_violations":     0,
-		})
+		return c.JSON(http.StatusOK, serializeStats(stats))
 	}
 	stats, err := s.botService.Queries().GetAdminStats(c.Request().Context())
 	if err != nil {

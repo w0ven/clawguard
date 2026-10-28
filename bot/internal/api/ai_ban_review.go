@@ -1,65 +1,232 @@
 package api
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
+	"net/http"
+
 	"github.com/jackc/pgx/v5"
 	"github.com/labstack/echo/v4"
 	"github.com/openclaw/clawguard/internal/store"
 	"go.uber.org/zap"
-	"net/http"
 )
 
+var errReviewBusy = errors.New("review already in progress")
+
 func (s *Server) reviewAIBanFalsePositive(c echo.Context, id int64) error {
+	return s.reviewAIBanFalsePositiveAttempt(c, id, 0)
+}
+func (s *Server) reviewAIBanFalsePositiveAttempt(c echo.Context, id int64, retries int) error {
 	ctx := c.Request().Context()
 	var decision store.AIDecision
 	warnings := []string{}
-	unbanned := false
-	changed := 0.0
-	err := s.botService.Queries().Transact(ctx, func(q *store.Queries) error {
-		if err := q.LockAIDecisionReview(ctx, id); err != nil {
-			return err
+	var token string
+	var needsTelegram, needsSettle, unbanned bool
+	var changed float64
+	random := make([]byte, 16)
+	if _, err := rand.Read(random); err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "无法创建复核操作，请重试"})
+	}
+	candidate := hex.EncodeToString(random)
+	q := s.botService.Queries()
+	err := q.Transact(ctx, func(tx *store.Queries) error {
+		if e := tx.LockAIDecisionReview(ctx, id); e != nil {
+			return e
 		}
-		previous, err := q.GetAIDecisionByID(ctx, id)
-		if err != nil {
-			return err
+		var e error
+		decision, e = tx.GetAIDecisionByID(ctx, id)
+		if e != nil {
+			return e
 		}
-		owned, status, err := q.LockAIBanOwnership(ctx, previous.ChatID, previous.UserID, id)
-		if err != nil {
-			return err
+		owned, status, e := tx.LockAIBanOwnership(ctx, decision.ChatID, decision.UserID, id)
+		if e != nil {
+			return e
 		}
-		if owned {
-			if err = s.botService.UnbanChatUser(ctx, previous.ChatID, previous.UserID); err != nil {
-				return err
+		claim, e := tx.GetAIReviewClaim(ctx, id)
+		if e != nil && !errors.Is(e, pgx.ErrNoRows) {
+			return e
+		}
+		hasClaim := e == nil
+		if hasClaim {
+			switch claim.State {
+			case "completed":
+				return nil
+			case "conflict":
+				if _, e = tx.InsertFalsePositiveReview(ctx, id); e != nil {
+					return e
+				}
+				value := "false_positive"
+				decision, e = tx.UpdateAIDecisionOverride(ctx, id, &value)
+				if e != nil {
+					return e
+				}
+				warnings = append(warnings, "复核与后续封禁发生冲突，请核查 Telegram 并手动处理")
+				return nil
+			case "telegram_done":
+				token = claim.Token
+				needsSettle = true
+				return nil
+			case "claimed":
+				if claim.LeaseActive {
+					return errReviewBusy
+				}
 			}
-			if _, err = q.UnbanUserTrust(ctx, store.UnbanUserTrustParams{ChatID: previous.ChatID, UserID: previous.UserID, Score: 0.5}); err != nil {
-				return err
+		}
+		previouslyReviewed, e := tx.HasFalsePositiveReview(ctx, id)
+		if e != nil {
+			return e
+		}
+		if !owned || previouslyReviewed {
+			if !owned && (!previouslyReviewed || status == "banned") || owned && previouslyReviewed {
+				warnings = append(warnings, "无法确认当前封禁归属，请使用手动解封")
 			}
-			unbanned = true
-		}
-		first, err := q.InsertFalsePositiveReview(ctx, id)
-		if err != nil {
-			return err
-		}
-		if !owned && (first || status == "banned") {
-			warnings = append(warnings, "无法确认当前封禁归属，请使用手动解封")
-		}
-		if first && owned && (previous.AdminOverride == nil || *previous.AdminOverride != "false_positive") {
-			trust, err := q.AdjustUserTrustScore(ctx, store.AdjustUserTrustScoreParams{ChatID: previous.ChatID, UserID: previous.UserID, Delta: 0.1})
-			if err != nil {
-				return err
+			if _, e = tx.InsertFalsePositiveReview(ctx, id); e != nil {
+				return e
 			}
-			changed = trust.Score - 0.5
+			value := "false_positive"
+			decision, e = tx.UpdateAIDecisionOverride(ctx, id, &value)
+			return e
 		}
-		value := "false_positive"
-		decision, err = q.UpdateAIDecisionOverride(ctx, id, &value)
-		return err
+		token = candidate
+		if e = tx.ClaimAIReview(ctx, id, token); e != nil {
+			return e
+		}
+		needsTelegram = true
+		return nil
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return c.JSON(http.StatusNotFound, map[string]string{"error": "decision not found"})
 	}
+	if errors.Is(err, errReviewBusy) {
+		return c.JSON(http.StatusConflict, map[string]string{"error": "复核正在执行，请稍后重试"})
+	}
 	if err != nil {
-		s.logger.Warn("AI false positive review failed; retry required", zap.Error(err))
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "复核或解封失败，请重试"})
+		return s.aiReviewFailure(c, err)
+	}
+	if needsTelegram {
+		// A short, separate recheck reduces the window between claiming and dispatch.
+		valid := false
+		err = q.Transact(ctx, func(tx *store.Queries) error {
+			if e := tx.LockAIDecisionReview(ctx, id); e != nil {
+				return e
+			}
+			owned, _, e := tx.LockAIBanOwnership(ctx, decision.ChatID, decision.UserID, id)
+			if e != nil {
+				return e
+			}
+			claim, e := tx.GetAIReviewClaim(ctx, id)
+			if e != nil {
+				return e
+			}
+			if claim.Token != token || claim.State != "claimed" {
+				return nil
+			}
+			valid = owned
+			if !owned {
+				_, e = tx.SetAIReviewClaimState(ctx, id, token, "conflict")
+			}
+			return e
+		})
+		if err != nil {
+			return s.aiReviewFailure(c, err)
+		}
+		if !valid {
+			if retries > 0 {
+				return c.JSON(http.StatusConflict, map[string]string{"error": "复核状态已变化，请核查后重试"})
+			}
+			return s.reviewAIBanFalsePositiveAttempt(c, id, retries+1)
+		}
+		if err = s.botService.UnbanChatUser(ctx, decision.ChatID, decision.UserID); err != nil {
+			// A failed Telegram request is not assumed successful; release if possible.
+			if e := q.DeleteAIReviewClaim(ctx, id, token); e != nil {
+				s.logger.Warn("release AI review claim failed", zap.Error(e))
+			}
+			return s.aiReviewFailure(c, err)
+		}
+		ok, e := q.SetAIReviewClaimState(ctx, id, token, "telegram_done")
+		if e != nil {
+			return s.aiReviewFailure(c, e)
+		}
+		if !ok {
+			if retries > 0 {
+				return c.JSON(http.StatusConflict, map[string]string{"error": "复核状态已变化，请核查后重试"})
+			}
+			return s.reviewAIBanFalsePositiveAttempt(c, id, retries+1)
+		}
+		needsSettle = true
+	}
+	if needsSettle {
+		err = q.Transact(ctx, func(tx *store.Queries) error {
+			if e := tx.LockAIDecisionReview(ctx, id); e != nil {
+				return e
+			}
+			var e error
+			decision, e = tx.GetAIDecisionByID(ctx, id)
+			if e != nil {
+				return e
+			}
+			owned, _, e := tx.LockAIBanOwnership(ctx, decision.ChatID, decision.UserID, id)
+			if e != nil {
+				return e
+			}
+			claim, e := tx.GetAIReviewClaim(ctx, id)
+			if e != nil {
+				return e
+			}
+			if claim.State == "completed" {
+				return nil
+			}
+			if claim.Token != token || claim.State == "conflict" {
+				warnings = append(warnings, "Telegram 解封与后续封禁发生冲突，请核查 Telegram 并手动恢复")
+				return nil
+			}
+			if claim.State != "telegram_done" {
+				return errReviewBusy
+			}
+			if !owned {
+				if _, e = tx.SetAIReviewClaimState(ctx, id, token, "conflict"); e != nil {
+					return e
+				}
+				warnings = append(warnings, "Telegram 解封与后续封禁发生冲突，请核查 Telegram 并手动恢复")
+			} else {
+				if _, e = tx.UnbanUserTrust(ctx, store.UnbanUserTrustParams{ChatID: decision.ChatID, UserID: decision.UserID, Score: 0.5}); e != nil {
+					return e
+				}
+				unbanned = true
+			}
+			first, e := tx.InsertFalsePositiveReview(ctx, id)
+			if e != nil {
+				return e
+			}
+			if first && owned && (decision.AdminOverride == nil || *decision.AdminOverride != "false_positive") {
+				trust, e := tx.AdjustUserTrustScore(ctx, store.AdjustUserTrustScoreParams{ChatID: decision.ChatID, UserID: decision.UserID, Delta: 0.1})
+				if e != nil {
+					return e
+				}
+				changed = trust.Score - 0.5
+			}
+			value := "false_positive"
+			decision, e = tx.UpdateAIDecisionOverride(ctx, id, &value)
+			if e != nil {
+				return e
+			}
+			if owned {
+				_, e = tx.SetAIReviewClaimState(ctx, id, token, "completed")
+			}
+			return e
+		})
+		if errors.Is(err, errReviewBusy) {
+			return c.JSON(http.StatusConflict, map[string]string{"error": "复核正在执行，请稍后重试"})
+		}
+		if err != nil {
+			return s.aiReviewFailure(c, err)
+		}
 	}
 	return c.JSON(http.StatusOK, map[string]any{"decision": serializeAIDecision(decision), "unban_performed": unbanned, "unmute_performed": false, "trust_score_changed": changed, "side_effect_warnings": warnings})
+}
+
+func (s *Server) aiReviewFailure(c echo.Context, err error) error {
+	s.logger.Warn("AI false positive review failed; retry required", zap.Error(err))
+	return c.JSON(http.StatusInternalServerError, map[string]string{"error": "复核或解封失败，请重试"})
 }

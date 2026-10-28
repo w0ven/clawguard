@@ -8,6 +8,10 @@ import (
 	tele "gopkg.in/telebot.v3"
 )
 
+const commandNonExemptKey = "clawguard_command_nonexempt_once"
+
+type commandNonExempt struct{ chatID, userID int64 }
+
 // Group exemption applies only to a real Telegram user, never a sender_chat
 // persona. A lookup failure is not an exemption. Existing per-group bans win.
 func (s *Service) groupExemption(ctx context.Context, chatID, userID int64) (exempt, listedBanned bool) {

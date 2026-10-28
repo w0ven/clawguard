@@ -29,11 +29,35 @@ func (s *Server) listGroupExemptUsers(c echo.Context) error {
 	if !adminCanAccessChat(admin, chatID) {
 		return c.JSON(http.StatusForbidden, map[string]string{"error": "group out of scope"})
 	}
-	items, err := s.botService.Queries().ListGroupExemptUsers(c.Request().Context(), chatID)
+	limit, offset := 50, 0
+	if raw := c.QueryParam("limit"); raw != "" {
+		limit, err = strconv.Atoi(raw)
+		if err != nil || limit < 1 || limit > 100 {
+			return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid limit"})
+		}
+	}
+	if raw := c.QueryParam("offset"); raw != "" {
+		offset, err = strconv.Atoi(raw)
+		if err != nil || offset < 0 || offset > 2000000 {
+			return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid offset"})
+		}
+	}
+	status := c.QueryParam("status")
+	if status == "" {
+		status = "all"
+	}
+	if status != "all" && status != "active" && status != "expired" {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid status"})
+	}
+	search := strings.TrimSpace(c.QueryParam("search"))
+	if len(search) > 500 {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "search too long"})
+	}
+	items, total, err := s.botService.Queries().ListGroupExemptUsersPage(c.Request().Context(), chatID, search, status, limit, offset)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "无法加载本群豁免名单"})
 	}
-	return c.JSON(http.StatusOK, map[string]any{"users": items})
+	return c.JSON(http.StatusOK, map[string]any{"users": items, "total": total, "limit": limit, "offset": offset, "has_more": int64(offset+len(items)) < total})
 }
 
 func parseExemptUserID(c echo.Context) (int64, error) {
@@ -90,10 +114,11 @@ func (s *Server) putGroupExemptUser(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "请求格式无效"})
 	}
 	input.Note = strings.TrimSpace(input.Note)
-	if len(input.Note) > 500 || (input.ExpiresAt != nil && !input.ExpiresAt.After(time.Now())) {
+	if len(input.Note) > 500 {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "备注过长或到期时间不是未来时间"})
 	}
 	ctx := c.Request().Context()
+	errExpired := errors.New("expiry not in future")
 	var result store.GroupExemptUser
 	err = s.botService.Queries().Transact(ctx, func(q *store.Queries) error {
 		if e := q.LockGroupExemptUser(ctx, chatID, id); e != nil {
@@ -102,6 +127,9 @@ func (s *Server) putGroupExemptUser(c echo.Context) error {
 		before, e := q.GetGroupExemptUser(ctx, chatID, id)
 		if e != nil && !errors.Is(e, pgx.ErrNoRows) {
 			return e
+		}
+		if input.ExpiresAt != nil && !input.ExpiresAt.After(time.Now()) && (before.ExpiresAt == nil || !before.ExpiresAt.Equal(*input.ExpiresAt)) {
+			return errExpired
 		}
 		result, e = q.UpsertGroupExemptUser(ctx, chatID, id, input.Note, input.ExpiresAt)
 		if e != nil {
@@ -113,6 +141,9 @@ func (s *Server) putGroupExemptUser(c echo.Context) error {
 		}
 		return writeAuditWithQueries(ctx, q, admin, "group", &chatID, "upsert_group_exempt_user", previous, mustRawJSON(result))
 	})
+	if errors.Is(err, errExpired) {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "到期时间不是未来时间"})
+	}
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "保存豁免失败"})
 	}

@@ -604,8 +604,19 @@ func (s *Service) preprocessGroupCommand(c tele.Context) (bool, error) {
 		s.logger.Warn("load guard policy failed for command", zap.Error(err), zap.Int64("chat_id", chat.ID))
 		return true, nil
 	}
-	if s.exemptMessage(ctx, msg) {
-		return false, nil
+	if msg.SenderChat == nil && realExemptUser(msg.Sender) {
+		active, banned, lookupErr := s.queries.GroupExemptionStatus(ctx, chat.ID, msg.Sender.ID)
+		if lookupErr != nil && s.logger != nil {
+			s.logger.Warn("group exemption lookup failed; do not exempt", zap.Error(lookupErr), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", msg.Sender.ID))
+		}
+		if lookupErr == nil {
+			if active && !banned {
+				return false, nil
+			}
+			if !active && !banned {
+				c.Set(commandNonExemptKey, commandNonExempt{chatID: chat.ID, userID: msg.Sender.ID})
+			}
+		}
 	}
 	handled, err := s.applyDeletedAccountMessageFilter(ctx, msg, policy, state.ActionsPaused)
 	if err != nil || handled {
