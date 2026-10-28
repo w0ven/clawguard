@@ -64,6 +64,11 @@ func (s *Service) restrictUngraduatedPermissions(chat *tele.Chat, user *tele.Use
 	if s == nil || s.bot == nil || chat == nil || user == nil {
 		return nil
 	}
+	if s.queries != nil {
+		if err := s.queries.InvalidateAIMute(context.Background(), chat.ID, user.ID); err != nil {
+			return err
+		}
+	}
 	member := tele.ChatMember{
 		User:   user,
 		Rights: ungraduatedRestrictedRights(policy),
@@ -116,6 +121,11 @@ func (s *Service) RestoreTrustedChatPermissions(_ context.Context, trust store.U
 func (s *Service) restoreUserMessagePermissions(chat *tele.Chat, user *tele.User, reason string) error {
 	if s == nil || s.bot == nil || chat == nil || user == nil {
 		return nil
+	}
+	if s.queries != nil {
+		if err := s.queries.InvalidateAIMute(context.Background(), chat.ID, user.ID); err != nil {
+			return err
+		}
 	}
 	member := tele.ChatMember{
 		User:   user,

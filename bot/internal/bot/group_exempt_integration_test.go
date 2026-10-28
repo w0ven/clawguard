@@ -348,3 +348,54 @@ func TestAIBanOwnershipFromDecisionIntegration(t *testing.T) {
 		t.Fatalf("profile ownership not bound: %d %v", got, err)
 	}
 }
+
+func TestAIMuteOwnershipFromActualActionIntegration(t *testing.T) {
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, os.Getenv("TEST_DATABASE_URL"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	const chatID int64 = -100881112
+	const userID int64 = 881112
+	if _, err = pool.Exec(ctx, `INSERT INTO groups(chat_id,title,type) VALUES($1,'mute fixture','supergroup')`, chatID); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		for _, table := range []string{"ai_mute_ownership", "ai_decisions", "user_trust", "groups"} {
+			_, _ = pool.Exec(context.Background(), "DELETE FROM "+table+" WHERE chat_id=$1", chatID)
+		}
+	}()
+	if _, err = pool.Exec(ctx, `INSERT INTO user_trust(chat_id,user_id,status,score) VALUES($1,$2,'new',0.5)`, chatID, userID); err != nil {
+		t.Fatal(err)
+	}
+	q := store.New(pool)
+	b, _ := newMockTelegramBot(t, "")
+	s := &Service{logger: zap.NewNop(), queries: q, bot: b, sender: b, sendLimiter: NewSendLimiter()}
+	s.cacheSystemState(ctx, store.SystemState{})
+	s.cacheAuthorizedGroup(ctx, chatID, true)
+	msg := &tele.Message{ID: 901, Text: "bad", Chat: &tele.Chat{ID: chatID, Type: tele.ChatSuperGroup}, Sender: &tele.User{ID: userID, FirstName: "fixture"}}
+	out := ai.CheckOutput{Verdict: ai.Verdict{Verdict: "spam", Category: "spam", Reason: "fixture", Confidence: 0.99}, Model: "fixture"}
+	id, err := s.recordAIDecision(ctx, msg, msg.Text, out, "mute", "message", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	trust, err := q.GetUserTrust(ctx, chatID, userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.applyAIAction(ctx, msg, keywordReplyPolicy("none", 0), trust, out, "mute", false, id); err != nil {
+		t.Fatal(err)
+	}
+	var got, until int64
+	var state string
+	if err = pool.QueryRow(ctx, `SELECT decision_id,until_date,state FROM ai_mute_ownership WHERE chat_id=$1 AND user_id=$2`, chatID, userID).Scan(&got, &until, &state); err != nil || got != id || state != "active" || until <= time.Now().Unix() {
+		t.Fatalf("mute ownership %d %d %s %v", got, until, state, err)
+	}
+	if err = s.muteUser(msg.Chat, msg.Sender, 300); err != nil {
+		t.Fatal(err)
+	}
+	if err = pool.QueryRow(ctx, `SELECT state FROM ai_mute_ownership WHERE chat_id=$1 AND user_id=$2`, chatID, userID).Scan(&state); err != nil || state != "conflict" {
+		t.Fatalf("manual mute did not invalidate: %s %v", state, err)
+	}
+}

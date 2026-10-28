@@ -540,6 +540,12 @@ func (db *moderationProfileMatchMockDB) recordTrustSideEffectLocked() pgx.Row {
 }
 
 func (db *moderationProfileMatchMockDB) Exec(_ context.Context, query string, args ...any) (pgconn.CommandTag, error) {
+	if strings.Contains(query, "INSERT INTO group_ban_records") {
+		return pgconn.NewCommandTag("INSERT 0 1"), nil
+	}
+	if strings.Contains(query, "UPDATE ai_mute_ownership SET state='conflict'") {
+		return pgconn.NewCommandTag("UPDATE 0"), nil
+	}
 	if strings.Contains(query, "banned_reason=banned_reason - 'decision_id'") {
 		return pgconn.NewCommandTag("UPDATE 0"), nil
 	}

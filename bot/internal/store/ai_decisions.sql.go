@@ -41,6 +41,7 @@ WHERE ($1::BIGINT IS NULL OR chat_id = $1)
   AND ($7::TEXT = '' OR scene = $7)
   AND ($8::TIMESTAMPTZ IS NULL OR created_at >= $8)
   AND ($9::TIMESTAMPTZ IS NULL OR created_at <= $9)
+  AND ($11::BOOLEAN OR chat_id = ANY($12::BIGINT[]))
 ORDER BY created_at DESC
 LIMIT $10
 `
@@ -89,6 +90,8 @@ type ListAIDecisionsParams struct {
 	Since         *string
 	Until         *string
 	Limit         int32
+	ScopeGlobal   bool
+	ScopeChatIDs  []int64
 }
 
 func scanAIDecision(row interface{ Scan(...any) error }, i *AIDecision) error {
@@ -103,7 +106,7 @@ func (q *Queries) InsertAIDecision(ctx context.Context, arg InsertAIDecisionPara
 }
 
 func (q *Queries) ListAIDecisions(ctx context.Context, arg ListAIDecisionsParams) ([]AIDecision, error) {
-	rows, err := q.db.Query(ctx, listAIDecisions, arg.ChatID, arg.UserID, arg.Verdict, arg.AdminOverride, arg.Category, arg.ActionTaken, arg.Scene, arg.Since, arg.Until, arg.Limit)
+	rows, err := q.db.Query(ctx, listAIDecisions, arg.ChatID, arg.UserID, arg.Verdict, arg.AdminOverride, arg.Category, arg.ActionTaken, arg.Scene, arg.Since, arg.Until, arg.Limit, arg.ScopeGlobal, arg.ScopeChatIDs)
 	if err != nil {
 		return nil, err
 	}

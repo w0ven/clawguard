@@ -2648,7 +2648,7 @@ func (s *Service) handleUnbanCommand(c tele.Context) error {
 	} else if strings.TrimSpace(warning) != "" {
 		warnings = append(warnings, warning)
 	}
-	if err := s.queries.DeleteBannedUser(context.Background(), target.UserID); err != nil {
+	if err := s.queries.DeleteGroupBan(context.Background(), chat.ID, target.UserID); err != nil {
 		return c.Send("清理封禁记录失败: "+htmlEscape(redact.ErrorString(err)), &tele.SendOptions{ParseMode: tele.ModeHTML})
 	}
 	if _, err := s.queries.UnbanUserTrust(context.Background(), store.UnbanUserTrustParams{
@@ -2732,12 +2732,9 @@ func (s *Service) handleSpamCommand(c tele.Context) error {
 	// 4. Upsert banned_user record
 	reason := "spam"
 	bannedBy := c.Sender().ID
-	_, _ = s.queries.UpsertBannedUser(ctx, store.UpsertBannedUserParams{
-		UserID:   target.UserID,
-		BannedBy: &bannedBy,
-		Reason:   &reason,
-		Source:   "manual",
-	})
+	if err := s.queries.UpsertGroupBan(ctx, chat.ID, target.UserID, &reason, "manual", &bannedBy); err != nil {
+		return c.Send("封禁已执行，但保存本群记录失败，请重试")
+	}
 
 	// 3. Update trust status to banned
 	now := time.Now()

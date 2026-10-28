@@ -136,6 +136,34 @@ func TestReviewUnbanAndScopedAudit(t *testing.T) {
 		}
 		t.Logf("unban HTTP=%d, trust=%s, next message calls=%v", rec.Code, trust.Status, methods)
 	})
+	t.Run("group_bans_preserve_legacy_and_other_group", func(t *testing.T) {
+		_, e := fx.pool.Exec(ctx, `INSERT INTO banned_users(user_id,source,reason) VALUES(600,'manual','legacy global'); INSERT INTO group_ban_records(chat_id,user_id,source,reason) VALUES(-300,600,'manual','group B')`)
+		if e != nil {
+			t.Fatal(e)
+		}
+		rec := request("POST", "/api/admin/ban?chat_id=-100&user_id=600", "", scoped)
+		if rec.Code != 204 {
+			t.Fatalf("group ban %d %s", rec.Code, rec.Body)
+		}
+		var legacy string
+		var count int
+		if e = fx.pool.QueryRow(ctx, `SELECT reason FROM banned_users WHERE user_id=600`).Scan(&legacy); e != nil || legacy != "legacy global" {
+			t.Fatalf("legacy overwritten: %q %v", legacy, e)
+		}
+		if e = fx.pool.QueryRow(ctx, `SELECT count(*) FROM group_ban_records WHERE user_id=600`).Scan(&count); e != nil || count != 2 {
+			t.Fatalf("group bans count %d %v", count, e)
+		}
+		rec = request("POST", "/api/admin/unban?chat_id=-100&user_id=600", "", scoped)
+		if rec.Code != 204 {
+			t.Fatalf("group unban %d %s", rec.Code, rec.Body)
+		}
+		if e = fx.pool.QueryRow(ctx, `SELECT count(*) FROM group_ban_records WHERE user_id=600 AND chat_id=-300`).Scan(&count); e != nil || count != 1 {
+			t.Fatalf("other group lost %d %v", count, e)
+		}
+		if e = fx.pool.QueryRow(ctx, `SELECT reason FROM banned_users WHERE user_id=600`).Scan(&legacy); e != nil || legacy != "legacy global" {
+			t.Fatalf("legacy deleted: %q %v", legacy, e)
+		}
+	})
 	t.Run("ai_review_ownership_retry_and_isolation", func(t *testing.T) {
 		makeDecision := func(user int64, owned bool) int64 {
 			t.Helper()
@@ -268,7 +296,7 @@ func TestReviewUnbanAndScopedAudit(t *testing.T) {
 			t.Fatalf("manual ban review changed score: %v -> %v %v", priorTrust.Score, afterTrust.Score, err)
 		}
 		var manualBanCount int
-		if err = fx.pool.QueryRow(ctx, `SELECT count(*) FROM banned_users WHERE user_id=777 AND source='manual'`).Scan(&manualBanCount); err != nil || manualBanCount != 1 {
+		if err = fx.pool.QueryRow(ctx, `SELECT count(*) FROM group_ban_records WHERE chat_id=-100 AND user_id=777 AND source='manual'`).Scan(&manualBanCount); err != nil || manualBanCount != 1 {
 			t.Fatalf("manual ban record changed: %d %v", manualBanCount, err)
 		}
 		stale := makeDecision(784, true)

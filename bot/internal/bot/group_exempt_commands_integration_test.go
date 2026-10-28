@@ -298,6 +298,61 @@ func TestReviewCommandDispatchIntegration(t *testing.T) {
 	if !strings.Contains(pageBody, "9020") || strings.Contains(pageBody, "9000") {
 		t.Fatalf("command page wrong: %s", pageBody)
 	}
+	_, err = pool.Exec(ctx, `INSERT INTO banned_users(user_id,source,reason) VALUES(600,'manual','legacy global'); INSERT INTO group_ban_records(chat_id,user_id,source,reason) VALUES(-999,600,'manual','other group')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM group_ban_records WHERE user_id=600`)
+		_, _ = pool.Exec(context.Background(), `DELETE FROM banned_users WHERE user_id=600`)
+		_, _ = pool.Exec(context.Background(), `DELETE FROM user_trust WHERE chat_id=$1 AND user_id=600`, chatID)
+	}()
+	// Telegram identity lookup failure must not dispatch either management command.
+	blockedBefore := countString(tr.methods, "kickChatMember") + countString(tr.methods, "banChatMember")
+	bad.ID = 511
+	bad.Text = "/spam 600"
+	if err = s.ProcessUpdate(tele.Update{ID: 511, Message: bad}); err != nil {
+		t.Fatal(err)
+	}
+	if countString(tr.methods, "kickChatMember")+countString(tr.methods, "banChatMember") != blockedBefore {
+		t.Fatal("unknown admin executed spam")
+	}
+	m.ID = 512
+	m.Text = "/spam 600"
+	if err = s.ProcessUpdate(tele.Update{ID: 512, Message: m}); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	var reason string
+	if err = pool.QueryRow(ctx, `SELECT count(*) FROM group_ban_records WHERE chat_id=$1 AND user_id=600`, chatID).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("spam record %d %v bodies=%v", n, err, tr.bodies)
+	}
+	if err = pool.QueryRow(ctx, `SELECT reason FROM banned_users WHERE user_id=600`).Scan(&reason); err != nil || reason != "legacy global" {
+		t.Fatalf("legacy overwritten %q %v", reason, err)
+	}
+	bad.ID = 513
+	bad.Text = "/unban 600"
+	unbanBefore := countString(tr.methods, "unbanChatMember")
+	if err = s.ProcessUpdate(tele.Update{ID: 513, Message: bad}); err != nil {
+		t.Fatal(err)
+	}
+	if countString(tr.methods, "unbanChatMember") != unbanBefore {
+		t.Fatal("unknown admin executed unban")
+	}
+	m.ID = 514
+	m.Text = "/unban 600"
+	if err = s.ProcessUpdate(tele.Update{ID: 514, Message: m}); err != nil {
+		t.Fatal(err)
+	}
+	if err = pool.QueryRow(ctx, `SELECT count(*) FROM group_ban_records WHERE chat_id=$1 AND user_id=600`, chatID).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("unban record %d %v", n, err)
+	}
+	if err = pool.QueryRow(ctx, `SELECT count(*) FROM group_ban_records WHERE chat_id=-999 AND user_id=600`).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("other group record %d %v", n, err)
+	}
+	if err = pool.QueryRow(ctx, `SELECT reason FROM banned_users WHERE user_id=600`).Scan(&reason); err != nil || reason != "legacy global" {
+		t.Fatalf("legacy lost %q %v", reason, err)
+	}
 	_, _ = pool.Exec(ctx, `DELETE FROM group_exempt_users WHERE chat_id=$1`, chatID)
 }
 
