@@ -107,7 +107,7 @@ func TestReviewUnbanAndScopedAudit(t *testing.T) {
 			t.Fatalf("empty scope %+v %v", stats, e)
 		}
 	})
-	t.Run("web_unban_keeps_banned_and_next_message_rebans", func(t *testing.T) {
+	t.Run("web_unban_clears_group_ban_and_does_not_reban", func(t *testing.T) {
 		rec := request("POST", "/api/admin/unban?chat_id=-100&user_id=555", "", owner)
 		if rec.Code != 204 {
 			t.Fatalf("unban=%d %s", rec.Code, rec.Body.String())
@@ -208,6 +208,68 @@ func TestReviewUnbanAndScopedAudit(t *testing.T) {
 		trust, e = fx.queries.GetUserTrust(ctx, -100, 777)
 		if e != nil || trust.Score != score {
 			t.Fatalf("duplicate changed score: %v %v", trust.Score, e)
+		}
+		for _, priorOverride := range []string{`"confirm"`, `null`} {
+			setRec := request("PUT", fmt.Sprintf("/api/admin/ai-decisions/%d", id), `{"admin_override":`+priorOverride+`}`, owner)
+			if setRec.Code != 200 {
+				t.Fatalf("set override %s: %d %s", priorOverride, setRec.Code, setRec.Body)
+			}
+			setDecision, setErr := fx.queries.GetAIDecisionByID(ctx, id)
+			if setErr != nil || (priorOverride == `null` && setDecision.AdminOverride != nil) || (priorOverride == `"confirm"` && (setDecision.AdminOverride == nil || *setDecision.AdminOverride != "confirm")) {
+				t.Fatalf("initial override %s not persisted: %v %v", priorOverride, setDecision.AdminOverride, setErr)
+			}
+			priorTrust, err := fx.queries.GetUserTrust(ctx, -100, 777)
+			if err != nil {
+				t.Fatal(err)
+			}
+			callsBefore := len(transport.calls())
+			rec = call(id)
+			if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"admin_override":"false_positive"`) || !strings.Contains(rec.Body.String(), `"unban_performed":false`) || !strings.Contains(rec.Body.String(), "后续封禁不会自动解除") {
+				t.Fatalf("completed %s -> false_positive: %d %s", priorOverride, rec.Code, rec.Body)
+			}
+			current, err := fx.queries.GetAIDecisionByID(ctx, id)
+			if err != nil || current.AdminOverride == nil || *current.AdminOverride != "false_positive" {
+				t.Fatalf("override not saved: %+v %v", current.AdminOverride, err)
+			}
+			afterTrust, err := fx.queries.GetUserTrust(ctx, -100, 777)
+			if err != nil || priorTrust.Score != afterTrust.Score {
+				t.Fatalf("repeat review changed score: %v -> %v %v", priorTrust.Score, afterTrust.Score, err)
+			}
+			for _, method := range transport.calls()[callsBefore:] {
+				if strings.HasSuffix(method, "/unbanChatMember") {
+					t.Fatal("completed review resent unban")
+				}
+			}
+		}
+		manualResult := request("POST", "/api/admin/ban?chat_id=-100&user_id=777", "", owner)
+		if manualResult.Code != 204 {
+			t.Fatalf("later manual ban=%d %s", manualResult.Code, manualResult.Body)
+		}
+		setRec := request("PUT", fmt.Sprintf("/api/admin/ai-decisions/%d", id), `{"admin_override":"confirm"}`, owner)
+		if setRec.Code != 200 {
+			t.Fatalf("confirm after manual ban: %d %s", setRec.Code, setRec.Body)
+		}
+		priorTrust, err := fx.queries.GetUserTrust(ctx, -100, 777)
+		if err != nil {
+			t.Fatal(err)
+		}
+		callsBefore := len(transport.calls())
+		rec = call(id)
+		if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"admin_override":"false_positive"`) || !strings.Contains(rec.Body.String(), `"unban_performed":false`) || !strings.Contains(rec.Body.String(), "后续封禁不会自动解除") {
+			t.Fatalf("manual ban then completed review: %d %s", rec.Code, rec.Body)
+		}
+		for _, method := range transport.calls()[callsBefore:] {
+			if strings.HasSuffix(method, "/unbanChatMember") {
+				t.Fatal("completed review removed later manual ban")
+			}
+		}
+		afterTrust, err := fx.queries.GetUserTrust(ctx, -100, 777)
+		if err != nil || priorTrust.Score != afterTrust.Score {
+			t.Fatalf("manual ban review changed score: %v -> %v %v", priorTrust.Score, afterTrust.Score, err)
+		}
+		var manualBanCount int
+		if err = fx.pool.QueryRow(ctx, `SELECT count(*) FROM banned_users WHERE user_id=777 AND source='manual'`).Scan(&manualBanCount); err != nil || manualBanCount != 1 {
+			t.Fatalf("manual ban record changed: %d %v", manualBanCount, err)
 		}
 		stale := makeDecision(784, true)
 		if _, e = fx.pool.Exec(ctx, `INSERT INTO ai_unban_review_claims(decision_id,token,state,lease_until) VALUES($1,'interrupted','claimed',now()-interval '1 second')`, stale); e != nil {
@@ -338,7 +400,7 @@ func TestReviewUnbanAndScopedAudit(t *testing.T) {
 		}
 		assertStatus(-100, 780, "banned")
 	})
-	t.Run("scoped_audit_limit_precedes_scope", func(t *testing.T) {
+	t.Run("scoped_audit_filters_before_limit", func(t *testing.T) {
 		_, e := fx.pool.Exec(ctx, `INSERT INTO config_audit(scope,chat_id,admin_id,action,diff,created_at) VALUES('group',-100,$1,'visible-target','{}',now()-interval '1 minute'),('group',-200,$1,'other-group','{}',now())`, owner.ID)
 		if e != nil {
 			t.Fatal(e)

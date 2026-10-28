@@ -30,6 +30,15 @@ func (s *Server) reviewAIBanFalsePositiveAttempt(c echo.Context, id int64, retri
 	}
 	candidate := hex.EncodeToString(random)
 	q := s.botService.Queries()
+	saveCompleted := func(tx *store.Queries) error {
+		value := "false_positive"
+		var e error
+		decision, e = tx.UpdateAIDecisionOverride(ctx, id, &value)
+		if e == nil {
+			warnings = append(warnings, "此复核的解封已完成，本次仅保存结论；后续封禁不会自动解除，如存在请人工核查处理")
+		}
+		return e
+	}
 	err := q.Transact(ctx, func(tx *store.Queries) error {
 		if e := tx.LockAIDecisionReview(ctx, id); e != nil {
 			return e
@@ -51,7 +60,7 @@ func (s *Server) reviewAIBanFalsePositiveAttempt(c echo.Context, id int64, retri
 		if hasClaim {
 			switch claim.State {
 			case "completed":
-				return nil
+				return saveCompleted(tx)
 			case "conflict":
 				if _, e = tx.InsertFalsePositiveReview(ctx, id); e != nil {
 					return e
@@ -175,7 +184,7 @@ func (s *Server) reviewAIBanFalsePositiveAttempt(c echo.Context, id int64, retri
 				return e
 			}
 			if claim.State == "completed" {
-				return nil
+				return saveCompleted(tx)
 			}
 			if claim.Token != token || claim.State == "conflict" {
 				warnings = append(warnings, "Telegram 解封与后续封禁发生冲突，请核查 Telegram 并手动恢复")

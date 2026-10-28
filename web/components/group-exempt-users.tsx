@@ -134,43 +134,153 @@ export function GroupExemptUsers({ chatId }: { chatId: string }) {
     <section aria-label="本群用户豁免" className="grid gap-4">
       <h2 className="text-xl font-semibold">本群用户豁免</h2>
       <Card>
-        <CardHeader><CardTitle>添加或更新豁免</CardTitle></CardHeader>
+        <CardHeader>
+          <CardTitle>添加或更新豁免</CardTitle>
+        </CardHeader>
         <CardBody className="grid gap-3">
-          <p className="text-sm text-[var(--text-muted)]">跳过自动审核和入群验证，不影响关键词自动回复、手动处罚或已有封禁。不会自动解除已有禁言或封禁。已有待验证任务在豁免期间暂停处罚，限制仍可能存在，需管理员人工检查；撤销或到期后待处理任务可能继续执行。</p>
-          <label className="grid gap-1 text-sm">Telegram 用户 ID<Input aria-label="Telegram 用户 ID" inputMode="numeric" value={id} disabled={editing} onChange={(e) => setId(e.target.value)} placeholder="正整数 ID" /></label>
-          <p className="text-sm text-[var(--text-muted)]">仅限真人成员；已知机器人请使用独立机器人白名单。尚未识别的 ID 可预先添加，但识别为机器人后不会生效。</p>
-          <label className="grid gap-1 text-sm">备注（可选）<Input aria-label="备注" value={note} maxLength={500} onChange={(e) => setNote(e.target.value)} /></label>
-          <label className="grid gap-1 text-sm">到期时间（留空永久）<Input aria-label="到期时间" type="datetime-local" step="1" value={expires} onChange={(e) => { setExpires(e.target.value); setExpiryChanged(true); }} /></label>
-          <Button type="button" disabled={busy} onClick={save}>保存豁免</Button>
-          {editing && <Button type="button" variant="secondary" disabled={busy} onClick={clearEdit}>取消编辑</Button>}
+          <p className="text-sm text-[var(--text-muted)]">
+            跳过自动审核和入群验证，不影响关键词自动回复、手动处罚或已有封禁。不会自动解除已有禁言或封禁。已有待验证任务在豁免期间暂停处罚，限制仍可能存在，需管理员人工检查；撤销或到期后待处理任务可能继续执行。
+          </p>
+          <label className="grid gap-1 text-sm">
+            Telegram 用户 ID
+            <Input
+              aria-label="Telegram 用户 ID"
+              inputMode="numeric"
+              value={id}
+              disabled={editing}
+              onChange={(e) => setId(e.target.value)}
+              placeholder="正整数 ID"
+            />
+          </label>
+          <p className="text-sm text-[var(--text-muted)]">
+            仅限真人成员；已知机器人请使用独立机器人白名单。尚未识别的 ID 可预先添加，但识别为机器人后不会生效。
+          </p>
+          <label className="grid gap-1 text-sm">
+            备注（可选）
+            <Input
+              aria-label="备注"
+              value={note}
+              maxLength={500}
+              onChange={(e) => setNote(e.target.value)}
+            />
+          </label>
+          <label className="grid gap-1 text-sm">
+            到期时间（留空永久）
+            <Input
+              aria-label="到期时间"
+              type="datetime-local"
+              step="1"
+              value={expires}
+              onChange={(e) => {
+                setExpires(e.target.value);
+                setExpiryChanged(true);
+              }}
+            />
+          </label>
+          <Button type="button" disabled={busy} onClick={save}>
+            保存豁免
+          </Button>
+          {editing && (
+            <Button type="button" variant="secondary" disabled={busy} onClick={clearEdit}>
+              取消编辑
+            </Button>
+          )}
         </CardBody>
       </Card>
       {error && <p role="alert" className="text-sm text-[var(--danger)]">{error}</p>}
       <Card>
-        <CardHeader><CardTitle>豁免名单</CardTitle></CardHeader>
+        <CardHeader>
+          <CardTitle>豁免名单</CardTitle>
+        </CardHeader>
         <CardBody className="grid gap-3">
-          <label>搜索用户 ID 或备注<Input aria-label="搜索豁免" value={search} onChange={(e) => { generation.current++; setPage(0); setSearch(e.target.value); }} /></label>
+          <label>
+            搜索用户 ID 或备注
+            <Input
+              aria-label="搜索豁免"
+              value={search}
+              onChange={(e) => {
+                generation.current++;
+                setPage(0);
+                setSearch(e.target.value);
+              }}
+            />
+          </label>
           <label>
             状态
-            <select aria-label="豁免状态" value={status} onChange={(e) => { generation.current++; setPage(0); setStatus(e.target.value); }}>
+            <select
+              aria-label="豁免状态"
+              value={status}
+              onChange={(e) => {
+                generation.current++;
+                setPage(0);
+                setStatus(e.target.value);
+              }}
+            >
               <option value="all">全部</option>
               <option value="active">有效</option>
               <option value="expired">已过期</option>
             </select>
           </label>
           <p>共 {total} 条 · 第 {page + 1} 页</p>
-          {loading ? <p>加载中…</p> : users.length === 0 ? <p>暂无豁免用户</p> : users.map((user) => (
+          {loading ? (
+            <p>加载中…</p>
+          ) : users.length === 0 ? (
+            <p>暂无豁免用户</p>
+          ) : users.map((user) => (
             <div key={user.user_id} className="flex flex-wrap items-center justify-between gap-3 border-b py-2">
-              <div><strong>{user.user_id}</strong><p className="text-sm text-[var(--text-muted)]">{user.note || "无备注"} · {user.expires_at ? `${new Date(user.expires_at).toLocaleString()} ${new Date(user.expires_at).getTime() <= Date.now() ? "（已过期）" : "到期"}` : "永久"}</p></div>
+              <div>
+                <strong>{user.user_id}</strong>
+                <p className="text-sm text-[var(--text-muted)]">
+                  {user.note || "无备注"} · {user.expires_at
+                    ? `${new Date(user.expires_at).toLocaleString()} ${new Date(user.expires_at).getTime() <= Date.now() ? "（已过期）" : "到期"}`
+                    : "永久"}
+                </p>
+              </div>
               <div className="flex gap-2">
-                <Button type="button" variant="secondary" disabled={busy} onClick={() => edit(user)} aria-label={`编辑 ${user.user_id}`}>编辑</Button>
-                <Button type="button" variant="secondary" disabled={busy} onClick={() => revoke(user)} aria-label={`撤销 ${user.user_id}`}>撤销</Button>
+                <Button
+                  type="button"
+                  variant="secondary"
+                  disabled={busy}
+                  onClick={() => edit(user)}
+                  aria-label={`编辑 ${user.user_id}`}
+                >
+                  编辑
+                </Button>
+                <Button
+                  type="button"
+                  variant="secondary"
+                  disabled={busy}
+                  onClick={() => revoke(user)}
+                  aria-label={`撤销 ${user.user_id}`}
+                >
+                  撤销
+                </Button>
               </div>
             </div>
           ))}
           <div className="flex gap-2">
-            <Button type="button" variant="secondary" disabled={loading || page === 0} onClick={() => { generation.current++; setPage(page - 1); }}>上一页</Button>
-            <Button type="button" variant="secondary" disabled={loading || !hasMore} onClick={() => { generation.current++; setPage(page + 1); }}>下一页</Button>
+            <Button
+              type="button"
+              variant="secondary"
+              disabled={loading || page === 0}
+              onClick={() => {
+                generation.current++;
+                setPage(page - 1);
+              }}
+            >
+              上一页
+            </Button>
+            <Button
+              type="button"
+              variant="secondary"
+              disabled={loading || !hasMore}
+              onClick={() => {
+                generation.current++;
+                setPage(page + 1);
+              }}
+            >
+              下一页
+            </Button>
           </div>
         </CardBody>
       </Card>
