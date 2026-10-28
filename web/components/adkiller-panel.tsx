@@ -36,7 +36,7 @@ type AdKillerConfig = {
 };
 
 const ACTION_OPTIONS = [
-  { value: "none", label: "不处罚，交给后续模型" },
+  { value: "none", label: "不处罚（图片继续视觉模型）" },
   { value: "warn", label: "警告" },
   { value: "mute", label: "禁言" },
   { value: "kick", label: "踢出" },
@@ -338,11 +338,11 @@ export function AdKillerPanel({ pushToast }: { pushToast?: ToastFn }) {
       >
       <Card>
         <CardHeader>
-          <CardTitle>AdKiller 前置广告检测</CardTitle>
+          <CardTitle>AdKiller 前置广告检测（仅图片）与文字兜底</CardTitle>
         </CardHeader>
         <CardBody className="space-y-4">
           <p className="text-xs text-[var(--text-muted)]">
-            独立广告评分，不读原来的提示词。命中分段动作后直接处理；判断不了或接口故障再交给后续模型。只对勾选的群生效。
+            文字和简介先走完整模型链（含自定义提示词），仅模型全部失败时使用 AdKiller 文字兜底；模型成功结果不会被复审。图片先用 AdKiller 检测图片中的文字及说明，未命中或失败继续视觉模型。AdKiller 不接收提示词，图片 OCR 不能代替画面审核；只对勾选的群生效。
           </p>
           <label className="flex items-center gap-2 text-sm">
             <Switch
@@ -356,7 +356,7 @@ export function AdKillerPanel({ pushToast }: { pushToast?: ToastFn }) {
           </label>
           <div className="grid gap-3 md:grid-cols-2">
             <label className="flex flex-col gap-1 text-sm">
-              <span>超时（ms）</span>
+              <span>文字超时（ms）；图片独立使用最多 12 秒</span>
               <Input
                 type="number"
                 min={100}
@@ -371,23 +371,7 @@ export function AdKillerPanel({ pushToast }: { pushToast?: ToastFn }) {
                 }
               />
             </label>
-            <label className="flex flex-col gap-1 text-sm">
-              <span>失败策略</span>
-              <Select
-                aria-disabled={saving}
-                value={config.on_failure}
-                onChange={(event) =>
-                  setConfig((current) => ({
-                    ...current,
-                    on_failure: event.target.value,
-                  }))
-                }
-                options={[
-                  { label: "交给后续模型（推荐）", value: "fallback" },
-                  { label: "跳过后续模型", value: "skip" },
-                ]}
-              />
-            </label>
+            <p className="text-sm text-[var(--text-muted)]">接口失败不会跳过视觉模型；旧版“跳过后续模型”设置保留但不再生效。</p>
           </div>
         </CardBody>
       </Card>
@@ -398,7 +382,7 @@ export function AdKillerPanel({ pushToast }: { pushToast?: ToastFn }) {
         </CardHeader>
         <CardBody className="space-y-3">
           <p className="text-xs text-[var(--text-muted)]">
-            不跟原来的广告动作绑死。默认 0-80 交给后续模型，81-90 警告，91-100 踢出。
+            不跟原来的广告动作绑死。低分不处罚：图片继续视觉模型；文字兜底结束。现有分段以实际配置为准。
           </p>
           {config.score_bands.map((band, index) => (
             <div

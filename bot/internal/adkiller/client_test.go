@@ -4,10 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -36,7 +40,7 @@ func TestScoreSuccess(t *testing.T) {
 			"score":            82,
 			"level":            "ad",
 			"primary_category": "goods_sale",
-			"dimensions":       map[string]int{"goods_sale": 92},
+			"dimensions":       testDimensions(),
 		})
 	}))
 	defer server.Close()
@@ -136,5 +140,138 @@ func TestScoreHonorsContextTimeout(t *testing.T) {
 	_, err := client.Score(ctx, "hello")
 	if err == nil {
 		t.Fatal("expected timeout error")
+	}
+}
+
+func TestScoreImageMultipart(t *testing.T) {
+	image := []byte("\x89PNG\r\n\x1a\nsynthetic")
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if err := r.ParseMultipartForm(6 << 20); err != nil {
+			t.Errorf("multipart: %v", err)
+			return
+		}
+		f, _, err := r.FormFile("image")
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		defer f.Close()
+		got, _ := io.ReadAll(f)
+		if string(got) != string(image) {
+			t.Error("image differs")
+		}
+		if r.FormValue("caption") != "test caption" {
+			t.Error("caption differs")
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"score": 0, "level": "normal", "primary_category": "normal_chat", "dimensions": testDimensions(), "ocr_text": "synthetic"})
+	}))
+	defer server.Close()
+	client := NewClient(server.URL, nil)
+	client.SetAPIKey("test")
+	result, err := client.ScoreImage(context.Background(), image, "test caption")
+	if err != nil || result.OCRText != "synthetic" || calls != 1 {
+		t.Fatalf("result=%+v err=%v calls=%d", result, err, calls)
+	}
+	if _, err = client.ScoreImage(context.Background(), []byte("not image"), ""); err == nil {
+		t.Fatal("invalid image accepted")
+	}
+	if _, err = client.ScoreImage(context.Background(), make([]byte, MaxImageBytes+1), ""); err == nil {
+		t.Fatal("oversize image accepted")
+	}
+	if calls != 1 {
+		t.Fatalf("invalid image sent: %d", calls)
+	}
+}
+
+func TestScoreRejectsInvalidResponse(t *testing.T) {
+	for _, body := range []string{`{}`, `{"score":101,"level":"ad","primary_category":"goods_sale","dimensions":{}}`, `{"score":-1,"level":"normal","primary_category":"normal_chat","dimensions":{}}`} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(body)) }))
+		client := NewClient(server.URL, nil)
+		client.SetAPIKey("test")
+		if _, err := client.Score(context.Background(), "test"); err == nil {
+			t.Errorf("accepted %s", body)
+		}
+		server.Close()
+	}
+}
+
+func testDimensions() map[string]int {
+	m := map[string]int{}
+	for _, k := range scoreDimensions {
+		m[k] = 0
+	}
+	return m
+}
+
+func TestScoreImageCaptionAndRedirectSafety(t *testing.T) {
+	var redirected atomic.Int32
+	dst := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { redirected.Add(1) }))
+	defer dst.Close()
+	src := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseMultipartForm(6 << 20); err != nil {
+			t.Error(err)
+			return
+		}
+		if got := len([]rune(r.FormValue("caption"))); got != MaxTextRunes {
+			t.Errorf("caption runes=%d", got)
+		}
+		http.Redirect(w, r, dst.URL, http.StatusTemporaryRedirect)
+	}))
+	defer src.Close()
+	c := NewClient(src.URL, nil)
+	c.SetAPIKey("fixture")
+	_, err := c.ScoreImage(context.Background(), []byte("\x89PNG\r\n\x1a\nfixture"), strings.Repeat("测", MaxTextRunes+1))
+	if err == nil {
+		t.Fatal("redirect accepted")
+	}
+	if redirected.Load() != 0 {
+		t.Fatal("redirect followed")
+	}
+	if _, err = c.ScoreImage(context.Background(), []byte("\x89PNG\r\n\x1a\nfixture"), string([]byte{0xff})); err == nil {
+		t.Fatal("invalid UTF-8 caption accepted")
+	}
+}
+
+func TestScoreRejectsIncompleteDimensionsAndMissingOCR(t *testing.T) {
+	for _, body := range []string{`{"score":0,"level":"normal","primary_category":"normal_chat","dimensions":{}}`, `{"score":99,"level":"normal","primary_category":"normal_chat","dimensions":{}}`} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, body) }))
+		c := NewClient(srv.URL, nil)
+		c.SetAPIKey("fixture")
+		if _, err := c.Score(context.Background(), "fixture"); err == nil {
+			t.Error("invalid response accepted")
+		}
+		srv.Close()
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"score": 0, "level": "normal", "primary_category": "normal_chat", "dimensions": testDimensions()})
+	}))
+	defer srv.Close()
+	c := NewClient(srv.URL, nil)
+	c.SetAPIKey("fixture")
+	if _, err := c.ScoreImage(context.Background(), []byte("\x89PNG\r\n\x1a\nfixture"), ""); err == nil {
+		t.Error("missing OCR field accepted")
+	}
+}
+
+func TestAdKillerErrorsAndLogsDoNotEchoUpstreamContent(t *testing.T) {
+	core, logs := observer.New(zap.DebugLevel)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(500)
+		_, _ = io.WriteString(w, `{"error":{"code":"private-caption","message":"private-ocr private-caption private-key"}}`)
+	}))
+	defer srv.Close()
+	c := NewClient(srv.URL, zap.New(core))
+	c.SetAPIKey("private-key")
+	_, err := c.ScoreImage(context.Background(), []byte("\x89PNG\r\n\x1a\nprivate-image"), "private-caption")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	text := err.Error() + fmt.Sprint(logs.All())
+	for _, secret := range []string{"private-key", "private-caption", "private-ocr", "private-image"} {
+		if strings.Contains(text, secret) {
+			t.Fatalf("error or logs contained %s", secret)
+		}
 	}
 }

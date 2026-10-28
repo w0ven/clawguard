@@ -2,7 +2,6 @@ package bot
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -16,7 +15,6 @@ import (
 	"github.com/openclaw/clawguard/internal/ai"
 	"github.com/openclaw/clawguard/internal/config"
 	"github.com/openclaw/clawguard/internal/redact"
-	"github.com/openclaw/clawguard/internal/store"
 )
 
 func (s *Service) ReloadAdKillerSecret(ctx context.Context) error {
@@ -49,8 +47,47 @@ func (s *Service) ReloadAdKillerSecret(ctx context.Context) error {
 	return nil
 }
 
+const adKillerImageTimeout = 12 * time.Second
+
+type adKillerParentContextKey struct{}
+
+// Continue only from a live caller, never from a cancelled parent. This gives
+// a completed model chain its own bounded scoring/action budget after a local
+// review deadline, without extending user cancellation or service shutdown.
+func adKillerFallbackContext(ctx context.Context, cfg config.AdKillerPolicy) (context.Context, context.CancelFunc) {
+	parent := ctx
+	if ctx.Err() != nil {
+		if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return ctx, func() {}
+		}
+		p, ok := ctx.Value(adKillerParentContextKey{}).(context.Context)
+		if !ok || p.Err() != nil {
+			return ctx, func() {}
+		}
+		parent = p
+	}
+	timeout := time.Duration(cfg.TimeoutMs) * time.Millisecond
+	if timeout <= 0 {
+		timeout = adkiller.DefaultTimeout
+	}
+	return context.WithTimeout(parent, timeout+3*time.Second)
+}
+
+// Recheck global AI pause in addition to the regular action freeze gates.
+func (s *Service) adKillerAllowed(ctx context.Context, chatID int64) bool {
+	if ctx.Err() != nil || !s.automaticActionAllowed(ctx, chatID) {
+		return false
+	}
+	state, err := s.GetSystemState(ctx)
+	return err == nil && !state.AIPaused
+}
+
 func (s *Service) AdKillerConfigured() bool {
 	return s != nil && s.adkiller != nil && s.adkiller.HasAPIKey()
+}
+
+func isAdKillerTextModel(model string) bool {
+	return strings.EqualFold(model, "adkiller") || strings.EqualFold(model, "adkiller-text-fallback")
 }
 
 func adKillerBands(cfg config.AdKillerPolicy) []adkiller.ScoreBand {
@@ -73,18 +110,18 @@ func adKillerCheckOutput(result adkiller.Result, action string) ai.CheckOutput {
 			Category:   adkiller.MapCategory(result.PrimaryCategory),
 			Reason:     fmt.Sprintf("AdKiller 判定广告（score=%d, category=%s, action=%s）", result.Score, result.PrimaryCategory, adkiller.ActionLabel(action)),
 		},
-		Model:         "adkiller",
-		PromptVersion: "adkiller-v1",
+		Model:         "adkiller-text-fallback",
+		PromptVersion: "",
 		LatencyMs:     int(result.Latency.Milliseconds()),
 		Action:        action,
 	}
 }
 
 type adKillerEval struct {
-	Action  string
-	Output  *ai.CheckOutput
-	Result  adkiller.Result
-	SkipLLM bool
+	Succeeded bool
+	Action    string
+	Output    *ai.CheckOutput
+	Result    adkiller.Result
 }
 
 func (s *Service) evaluateAdKiller(
@@ -102,12 +139,11 @@ func (s *Service) evaluateAdKiller(
 		return adKillerEval{}, nil
 	}
 	if s.adkiller == nil || !s.adkiller.HasAPIKey() {
-		s.logger.Warn("adkiller enabled but api key is not configured, falling back to llm",
+		s.logger.Warn("adkiller enabled but api key is not configured",
 			zap.Int64("chat_id", chatID),
 			zap.Int("message_id", messageID),
 		)
-		skip, err := s.finishAdKillerFailure(cfg, "api_key_missing")
-		return adKillerEval{SkipLLM: skip}, err
+		return adKillerEval{}, nil
 	}
 
 	timeout := time.Duration(cfg.TimeoutMs) * time.Millisecond
@@ -122,12 +158,11 @@ func (s *Service) evaluateAdKiller(
 		var ok bool
 		release, ok = s.aiModerator.TryAcquireInflight(chatID)
 		if !ok {
-			s.logger.Warn("adkiller skipped because ai inflight limit reached, falling back to llm",
+			s.logger.Warn("adkiller skipped because ai inflight limit reached",
 				zap.Int64("chat_id", chatID),
 				zap.Int("message_id", messageID),
 			)
-			skip, err := s.finishAdKillerFailure(cfg, "inflight_limit")
-			return adKillerEval{SkipLLM: skip}, err
+			return adKillerEval{}, nil
 		}
 	}
 	if release != nil {
@@ -143,79 +178,53 @@ func (s *Service) evaluateAdKiller(
 			zap.Int("message_id", messageID),
 			zap.Int("retry_after", result.RetryAfter),
 		)
-		skip, ferr := s.finishAdKillerFailure(cfg, "request_failed")
-		return adKillerEval{SkipLLM: skip}, ferr
+		return adKillerEval{}, nil
 	}
 	action := adkiller.ResolveAction(result.Score, adKillerBands(cfg))
 	if action == adkiller.ActionNone {
-		s.logger.Info("adkiller did not confirm ad, continuing to llm",
+		s.logger.Info("adkiller text fallback did not confirm ad",
 			zap.Int64("chat_id", chatID),
 			zap.Int("message_id", messageID),
 			zap.Int("score", result.Score),
 			zap.String("level", result.Level),
 			zap.String("action", action),
 		)
-		return adKillerEval{Action: action, Result: result}, nil
+		return adKillerEval{Action: action, Result: result, Succeeded: true}, nil
 	}
 	output := adKillerCheckOutput(result, action)
-	return adKillerEval{Action: action, Output: &output, Result: result, SkipLLM: true}, nil
+	return adKillerEval{Action: action, Output: &output, Result: result, Succeeded: true}, nil
 }
 
-func (s *Service) applyAdKillerPrefilter(
-	ctx context.Context,
-	msg *tele.Message,
-	policy config.GuardPolicy,
-	trust store.UserTrust,
-	content reviewableContent,
-	isEdited bool,
-) (bool, error) {
-	if s == nil || msg == nil || msg.Chat == nil || msg.Sender == nil {
-		return false, nil
+// Image scoring is OCR over the downloaded bytes, not visual classification.
+func (s *Service) evaluateAdKillerImage(ctx context.Context, chatID, userID int64, messageID int, image []byte, caption string, cfg config.AdKillerPolicy) adKillerEval {
+	if s == nil || !cfg.Enabled || !adkiller.ChatEnabled(cfg.EnabledChatIDs, chatID) || s.adkiller == nil || !s.adkiller.HasAPIKey() {
+		return adKillerEval{}
 	}
-	cfg := policy.AI.AdKiller
-	eval, err := s.evaluateAdKiller(ctx, msg.Chat.ID, msg.Sender.ID, msg.ID, content.Text, cfg)
+	callCtx, cancel := context.WithTimeout(ctx, adKillerImageTimeout)
+	defer cancel()
+	if s.aiModerator != nil {
+		release, ok := s.aiModerator.TryAcquireInflight(chatID)
+		if !ok {
+			return adKillerEval{}
+		}
+		defer release()
+	}
+	result, err := s.adkiller.ScoreImage(callCtx, image, caption)
 	if err != nil {
-		return false, err
+		s.logger.Warn("adkiller image scoring failed; continuing to vision", zap.Int64("chat_id", chatID), zap.Int("message_id", messageID), zap.Error(redact.Error(err)))
+		return adKillerEval{}
 	}
-	if s.exemptMessage(ctx, msg) {
-		return true, nil
+	if strings.TrimSpace(result.OCRText) == "" && strings.TrimSpace(caption) == "" {
+		return adKillerEval{Result: result, Action: adkiller.ActionNone}
 	}
-	if eval.Output == nil || eval.Action == "" || eval.Action == adkiller.ActionNone {
-		return eval.SkipLLM, nil
+	action := adkiller.ResolveAction(result.Score, adKillerBands(cfg))
+	if action == adkiller.ActionNone {
+		return adKillerEval{Result: result, Action: action}
 	}
-	if !s.automaticActionAllowed(ctx, msg.Chat.ID) {
-		return true, nil
-	}
-
-	metadata, _ := json.Marshal(map[string]any{
-		"source":           "adkiller",
-		"score":            eval.Result.Score,
-		"level":            eval.Result.Level,
-		"primary_category": eval.Result.PrimaryCategory,
-		"dimensions":       eval.Result.Dimensions,
-		"truncated":        eval.Result.Truncated,
-		"min_score":        cfg.MinScore,
-		"timeout_ms":       cfg.TimeoutMs,
-		"rate_remaining":   eval.Result.RateRemaining,
-		"action":           eval.Action,
-		"score_bands":      cfg.ScoreBands,
-	})
-	decisionID, recordErr := s.recordAIDecision(ctx, msg, content.Text, *eval.Output, eval.Action, "message", metadata)
-	if recordErr != nil {
-		s.logger.Warn("record adkiller decision failed", zap.Error(recordErr))
-	}
-	if err := s.applyAIAction(ctx, msg, policy, trust, *eval.Output, eval.Action, isEdited, decisionID); err != nil {
-		return true, err
-	}
-	return true, nil
-}
-
-func (s *Service) finishAdKillerFailure(cfg config.AdKillerPolicy, reason string) (bool, error) {
-	if strings.EqualFold(strings.TrimSpace(cfg.OnFailure), adkiller.OnFailureSkip) {
-		s.logger.Info("adkiller on_failure=skip, not calling llm", zap.String("reason", reason))
-		return true, nil
-	}
-	return false, nil
+	output := adKillerCheckOutput(result, action)
+	output.Model = "adkiller-image-ocr"
+	output.Verdict.Reason = fmt.Sprintf("AdKiller 图片文字 OCR 判定广告（score=%d, action=%s）", result.Score, adkiller.ActionLabel(action))
+	return adKillerEval{Action: action, Output: &output, Result: result}
 }
 
 func (s *Service) checkBioAdKiller(
@@ -235,7 +244,10 @@ func (s *Service) checkBioAdKiller(
 		return "", nil, false, err
 	}
 	if eval.Output == nil || eval.Action == "" || eval.Action == adkiller.ActionNone {
-		return "", nil, eval.SkipLLM, nil
+		if eval.Succeeded {
+			s.enqueueProfileCheckLog(chatID, user, bio, logMode, "pass", nil, nil, nil)
+		}
+		return "", nil, eval.Succeeded, nil
 	}
 	matched := "adkiller:" + eval.Output.Verdict.Category
 	conf := float32(eval.Output.Verdict.Confidence)

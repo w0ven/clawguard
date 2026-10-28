@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"strconv"
 	"strings"
@@ -18,10 +19,12 @@ import (
 )
 
 const (
-	DefaultBaseURL   = "https://api.direct-service.net"
-	DefaultTimeout   = 1500 * time.Millisecond
-	MaxTextRunes     = 4096
-	maxResponseBytes = 1 << 20
+	DefaultBaseURL    = "https://api.direct-service.net"
+	DefaultTimeout    = 1500 * time.Millisecond
+	MaxTextRunes      = 4096
+	MaxImageBytes     = 5 << 20
+	maxMultipartBytes = MaxImageBytes + (64 << 10)
+	maxResponseBytes  = 1 << 20
 )
 
 var (
@@ -41,6 +44,7 @@ type Client struct {
 }
 
 type Result struct {
+	OCRText         string         `json:"ocr_text,omitempty"`
 	Score           int            `json:"score"`
 	Level           string         `json:"level"`
 	PrimaryCategory string         `json:"primary_category"`
@@ -62,14 +66,14 @@ func (e *APIError) Error() string {
 	if e == nil {
 		return "adkiller api error"
 	}
-	msg := strings.TrimSpace(e.Message)
-	if msg == "" {
-		msg = "request failed"
-	}
-	if strings.TrimSpace(e.Code) != "" {
-		return fmt.Sprintf("adkiller api %d %s: %s", e.Status, e.Code, msg)
-	}
-	return fmt.Sprintf("adkiller api %d: %s", e.Status, msg)
+	return fmt.Sprintf("adkiller api status %d", e.Status)
+}
+
+var scoreDimensions = []string{
+	"normal_chat", "account_identity_sim", "sexual_service", "counterfeit_smuggling_prohibited",
+	"crypto_exchange_cashout", "gambling_betting", "group_channel_promotion", "followers_traffic_operations",
+	"investment_finance_loan", "other_promotion", "money_mule_payment_channel", "personal_data_tracking",
+	"private_contact_diversion", "goods_sale", "recruitment_tasks", "service_promotion",
 }
 
 type scoreRequest struct {
@@ -77,7 +81,8 @@ type scoreRequest struct {
 }
 
 type scoreResponse struct {
-	Score           int            `json:"score"`
+	OCRText         *string        `json:"ocr_text"`
+	Score           *int           `json:"score"`
 	Level           string         `json:"level"`
 	PrimaryCategory string         `json:"primary_category"`
 	Dimensions      map[string]int `json:"dimensions"`
@@ -147,16 +152,57 @@ func (c *Client) Score(ctx context.Context, text string) (Result, error) {
 		return Result{}, fmt.Errorf("marshal adkiller request: %w", err)
 	}
 
+	return c.doScore(ctx, payload, "application/json", truncated, false)
+}
+
+// ScoreImage uploads image bytes, not a Telegram URL. Callers bound OCR time separately.
+func (c *Client) ScoreImage(ctx context.Context, image []byte, caption string) (Result, error) {
+	if c == nil || !c.HasAPIKey() {
+		return Result{}, ErrNotConfigured
+	}
+	if len(image) == 0 || len(image) > MaxImageBytes {
+		return Result{}, errors.New("invalid adkiller image size")
+	}
+	switch http.DetectContentType(image) {
+	case "image/jpeg", "image/png", "image/webp":
+	default:
+		return Result{}, errors.New("unsupported adkiller image format")
+	}
+	if !utf8.ValidString(caption) {
+		return Result{}, errors.New("invalid adkiller caption encoding")
+	}
+	caption, truncated := TruncateText(caption, MaxTextRunes)
+	var payload bytes.Buffer
+	writer := multipart.NewWriter(&payload)
+	part, err := writer.CreateFormFile("image", "image")
+	if err != nil {
+		return Result{}, errors.New("build adkiller image form failed")
+	}
+	if _, err = part.Write(image); err != nil {
+		return Result{}, errors.New("build adkiller image form failed")
+	}
+	if caption != "" {
+		if err = writer.WriteField("caption", caption); err != nil {
+			return Result{}, errors.New("build adkiller image form failed")
+		}
+	}
+	if err = writer.Close(); err != nil || payload.Len() > maxMultipartBytes {
+		return Result{}, errors.New("invalid adkiller image form size")
+	}
+	return c.doScore(ctx, payload.Bytes(), writer.FormDataContentType(), truncated, true)
+}
+
+func (c *Client) doScore(ctx context.Context, payload []byte, contentType string, truncated bool, image bool) (Result, error) {
+	apiKey, _ := c.apiKey.Load().(string)
 	endpoint := c.baseURL + "/api/v1/score"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
 	if err != nil {
-		return Result{}, fmt.Errorf("build adkiller request: %w", err)
+		return Result{}, errors.New("build adkiller request failed")
 	}
 	req.Header.Set("Authorization", "Bearer "+apiKey)
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Type", contentType)
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", "clawguard-adkiller/1")
-
 	started := time.Now()
 	resp, err := c.httpClient.Do(req)
 	latency := time.Since(started)
@@ -164,47 +210,54 @@ func (c *Client) Score(ctx context.Context, text string) (Result, error) {
 		return Result{Latency: latency, Truncated: truncated}, fmt.Errorf("adkiller request failed: %w", err)
 	}
 	defer resp.Body.Close()
-
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
-	if err != nil {
-		return Result{Latency: latency, Truncated: truncated}, fmt.Errorf("read adkiller response: %w", err)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
+	if err != nil || len(body) > maxResponseBytes {
+		return Result{Latency: latency, Truncated: truncated}, errors.New("invalid adkiller response size")
 	}
-
 	retryAfter := parseRetryAfter(resp.Header.Get("Retry-After"))
-	result := Result{
-		Truncated:     truncated,
-		Latency:       latency,
-		RetryAfter:    retryAfter,
-		RateRemaining: strings.TrimSpace(resp.Header.Get("X-RateLimit-Remaining")),
-	}
-
+	result := Result{Truncated: truncated, Latency: latency, RetryAfter: retryAfter, RateRemaining: strings.TrimSpace(resp.Header.Get("X-RateLimit-Remaining"))}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		apiErr := parseAPIError(resp.StatusCode, body, retryAfter)
-		c.logger.Warn("adkiller score failed",
-			zap.Int("status", resp.StatusCode),
-			zap.String("code", apiErr.Code),
-			zap.Int("retry_after", retryAfter),
-			zap.Int("latency_ms", int(latency.Milliseconds())),
-		)
+		c.logger.Warn("adkiller score failed", zap.Int("status", resp.StatusCode), zap.Int("retry_after", retryAfter), zap.Int("latency_ms", int(latency.Milliseconds())))
 		return result, apiErr
 	}
-
 	var decoded scoreResponse
-	if err := json.Unmarshal(body, &decoded); err != nil {
-		return result, fmt.Errorf("decode adkiller response: %w", err)
+	if err := json.Unmarshal(body, &decoded); err != nil || decoded.Score == nil || *decoded.Score < 0 || *decoded.Score > 100 || (image && decoded.OCRText == nil) {
+		return result, errors.New("invalid adkiller response")
 	}
-	result.Score = decoded.Score
+	level := "normal"
+	switch {
+	case *decoded.Score > 80:
+		level = "ad"
+	case *decoded.Score > 50:
+		level = "suspected"
+	case *decoded.Score > 20:
+		level = "promotion"
+	}
+	if decoded.Level != level || len(decoded.Dimensions) != len(scoreDimensions) {
+		return result, errors.New("invalid adkiller response")
+	}
+	primaryValid := false
+	for _, name := range scoreDimensions {
+		value, ok := decoded.Dimensions[name]
+		if !ok || value < 0 || value > 100 {
+			return result, errors.New("invalid adkiller dimensions")
+		}
+		if decoded.PrimaryCategory == name {
+			primaryValid = true
+		}
+	}
+	if !primaryValid {
+		return result, errors.New("invalid adkiller category")
+	}
+
+	result.Score = *decoded.Score
 	result.Level = strings.TrimSpace(decoded.Level)
 	result.PrimaryCategory = strings.TrimSpace(decoded.PrimaryCategory)
 	result.Dimensions = decoded.Dimensions
-	c.logger.Info("adkiller scored message",
-		zap.Int("score", result.Score),
-		zap.String("level", result.Level),
-		zap.String("primary_category", result.PrimaryCategory),
-		zap.Bool("truncated", truncated),
-		zap.Int("latency_ms", int(latency.Milliseconds())),
-		zap.String("rate_remaining", result.RateRemaining),
-	)
+	if decoded.OCRText != nil {
+		result.OCRText = *decoded.OCRText
+	}
 	return result, nil
 }
 
