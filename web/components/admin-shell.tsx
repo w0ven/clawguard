@@ -50,6 +50,7 @@ const navSections: readonly NavSection[] = [
     items: [
       { href: "/groups", label: "群管理", icon: Users },
       { href: "/authorized-groups", label: "群授权", icon: Waypoints },
+      { href: "/global-exempt-users", label: "全局用户豁免", icon: UserRoundCheck },
     ],
   },
   {

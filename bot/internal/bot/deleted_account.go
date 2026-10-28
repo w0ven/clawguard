@@ -126,6 +126,9 @@ func (s *Service) handleDeletedAccountJoin(
 	if chat == nil || user == nil {
 		return false, nil
 	}
+	if s.exemptUser(ctx, chat, user) {
+		return false, nil
+	}
 	result, matched := deletedAccountFilterResult(user, policy.Filter.DeletedAccount)
 	if !matched {
 		return false, nil

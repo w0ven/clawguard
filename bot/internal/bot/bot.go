@@ -583,6 +583,9 @@ func (s *Service) preprocessGroupCommand(c tele.Context) (bool, error) {
 		s.logger.Warn("load guard policy failed for command", zap.Error(err), zap.Int64("chat_id", chat.ID))
 		return true, nil
 	}
+	if s.exemptMessage(ctx, msg) {
+		return false, nil
+	}
 	return s.applyDeletedAccountMessageFilter(ctx, msg, policy, state.ActionsPaused)
 }
 
@@ -618,6 +621,9 @@ func (s *Service) handleUserJoined(c tele.Context) error {
 	policy, err := s.LoadGuardPolicy(ctx, chat.ID)
 	if err != nil {
 		return fmt.Errorf("load guard policy for join service message: %w", err)
+	}
+	if state.Frozen || s.exemptUser(ctx, chat, user) {
+		return nil
 	}
 	if !state.ActionsPaused && policy.Verify.DeleteJoinMessage {
 		go s.deleteJoinEventMessageAsync(chat, user, msg)
@@ -671,6 +677,15 @@ func (s *Service) handleChatMemberUpdate(c tele.Context) error {
 	if err != nil {
 		s.logger.Warn("load system state for chat-member join failed", zap.Error(err), zap.Int64("chat_id", update.Chat.ID), zap.Int64("user_id", member.User.ID))
 		return err
+	}
+	if state.Frozen {
+		return nil
+	}
+	if s.exemptUser(ctx, update.Chat, member.User) {
+		if policy.Verify.Enabled && !state.ActionsPaused && s.acquireVerificationJoinLock(update.Chat.ID, member.User.ID) {
+			s.sendWelcomeMessage(ctx, update.Chat, member.User, nil)
+		}
+		return nil
 	}
 	actionsPaused := state.ActionsPaused
 	if handled, err := s.handleDeletedAccountJoin(ctx, update.Chat, member.User, policy, actionsPaused); err != nil {
@@ -918,6 +933,9 @@ func (s *Service) startVerification(chat *tele.Chat, user *tele.User, joinEventM
 		s.logger.Warn("load system state failed for verification, skip flow", zap.Error(err), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
 		return fmt.Errorf("load system state for verification: %w", err)
 	}
+	if state.Frozen || s.exemptUser(ctx, chat, user) {
+		return nil
+	}
 	actionsPaused := state.ActionsPaused
 
 	policyStartedAt := time.Now()
@@ -1020,6 +1038,9 @@ func (s *Service) startVerification(chat *tele.Chat, user *tele.User, joinEventM
 
 	s.upsertJoinSideEffects(ctx, chat, user)
 
+	if s.exemptUser(ctx, chat, user) {
+		return nil
+	}
 	member := tele.ChatMember{
 		User:   user,
 		Rights: tele.NoRights(),
@@ -1109,6 +1130,9 @@ func (s *Service) startAsyncVerificationChecks(chat *tele.Chat, user *tele.User,
 		defer cancel()
 
 		totalStartedAt := time.Now()
+		if s.exemptUser(ctx, chat, user) {
+			return
+		}
 
 		if policy.AntiSpam.CASEnabled && s.casClient != nil {
 			casStartedAt := time.Now()
@@ -1281,6 +1305,9 @@ type asyncVerificationMatchOps struct {
 }
 
 func (s *Service) handleAsyncVerificationMatch(ctx context.Context, match asyncVerificationMatch) error {
+	if match.chat == nil || match.user == nil || !s.automaticActionAllowed(ctx, match.chat.ID) || s.exemptUser(ctx, match.chat, match.user) {
+		return nil
+	}
 	if match.feedbackKind == "profile" && match.decisionMode == "" {
 		match.decisionMode = "join_keyword"
 		if strings.EqualFold(strings.TrimSpace(match.policy.Verify.ProfileCheckMode), "ai") {
@@ -1900,6 +1927,10 @@ func (s *Service) handleVerifyRandom(c tele.Context) error {
 }
 
 func (s *Service) completeVerification(ctx context.Context, chat *tele.Chat, user *tele.User, pending store.PendingVerification, resultKind ...string) error {
+	manual := len(resultKind) > 0 && resultKind[0] == "admin_pass"
+	if !manual && s.exemptUser(ctx, chat, user) {
+		return errExemptPending
+	}
 	deleted, err := s.queries.DeletePendingVerification(ctx, store.DeletePendingVerificationParams{
 		ChatID: chat.ID,
 		UserID: user.ID,
@@ -1915,7 +1946,7 @@ func (s *Service) completeVerification(ctx context.Context, chat *tele.Chat, use
 		s.logger.Warn("load guard policy before verification permission sync failed, using defaults", zap.Error(polErr), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
 		policy = config.DefaultPolicy
 	}
-	if err := s.applyVerificationPassPermissions(ctx, chat, user, policy); err != nil {
+	if err := s.applyVerificationPassPermissions(ctx, chat, user, policy, manual); err != nil {
 		if restoreErr := s.restorePendingVerification(ctx, pending); restoreErr != nil {
 			s.logger.Error("restore pending verification after restrict failure", zap.Error(restoreErr), zap.Int64("chat_id", pending.ChatID), zap.Int64("user_id", pending.UserID))
 		}
@@ -1958,6 +1989,10 @@ func (s *Service) HandleVerificationExpiry(ctx context.Context, pending store.Pe
 		return VerificationExpiryResult{}, nil
 	}
 
+	authorized, authErr := s.IsAuthorizedGroup(ctx, pending.ChatID)
+	if authErr != nil || !authorized {
+		return verificationExpiryRetry(time.Now().Add(time.Minute), "group authorization unavailable or disabled"), nil
+	}
 	policy, err := s.LoadGuardPolicy(ctx, pending.ChatID)
 	if err != nil {
 		return verificationExpiryRetry(time.Now().Add(30*time.Second), "guard policy unavailable"), nil
@@ -1966,8 +2001,8 @@ func (s *Service) HandleVerificationExpiry(ctx context.Context, pending store.Pe
 	if stateErr != nil {
 		return verificationExpiryRetry(time.Now().Add(30*time.Second), "system state unavailable"), nil
 	}
-	if state.ActionsPaused {
-		return verificationExpiryRetry(time.Now().Add(30*time.Second), "telegram actions paused"), nil
+	if state.Frozen || state.ActionsPaused {
+		return verificationExpiryRetry(time.Now().Add(30*time.Second), "system frozen or telegram actions paused"), nil
 	}
 
 	chat := &tele.Chat{ID: pending.ChatID}
@@ -1975,6 +2010,9 @@ func (s *Service) HandleVerificationExpiry(ctx context.Context, pending store.Pe
 		ID:        pending.UserID,
 		Username:  derefString(pending.Username),
 		FirstName: derefString(pending.FirstName),
+	}
+	if s.exemptUser(ctx, chat, user) {
+		return verificationExpiryRetry(time.Now().Add(time.Minute), "global exemption active; restriction requires manual review"), nil
 	}
 	if pending.Method == "join_protection_cleanup" {
 		return s.handleJoinProtectionCleanupExpiry(ctx, pending, policy, chat, user)
@@ -1985,6 +2023,9 @@ func (s *Service) HandleVerificationExpiry(ctx context.Context, pending store.Pe
 		return verificationExpiryRetry(retryAt, "telegram cleanup cooldown"), nil
 	}
 
+	if s.exemptUser(ctx, chat, user) {
+		return verificationExpiryRetry(time.Now().Add(time.Minute), "global exemption active; restriction requires manual review"), nil
+	}
 	failAction := verificationFailActionSnapshot(pending.Payload, policy.Verify.FailAction)
 	action, err := s.applyVerificationFailAction(chat, user, failAction)
 	if err != nil {
@@ -2074,6 +2115,9 @@ func (s *Service) deleteProcessedPendingVerification(ctx context.Context, pendin
 }
 
 func (s *Service) failVerificationImmediately(ctx context.Context, chat *tele.Chat, user *tele.User, pending store.PendingVerification, failAction, rule string) error {
+	if rule != "verify_admin_reject" && s.exemptUser(ctx, chat, user) {
+		return errExemptPending
+	}
 	action, err := s.applyVerificationFailAction(chat, user, failAction)
 	if err != nil {
 		return err

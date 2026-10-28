@@ -49,6 +49,9 @@ func ungraduatedRestrictedRights(policy config.GuardPolicy) tele.Rights {
 }
 
 func (s *Service) applyUngraduatedPermissionRestriction(chat *tele.Chat, user *tele.User, policy config.GuardPolicy, trust store.UserTrust, reason string) {
+	if s.exemptUser(context.Background(), chat, user) {
+		return
+	}
 	if !ungraduatedPermissionRestrictionEnabled(policy) || !isUngraduatedTrustStatus(trust.Status) {
 		return
 	}
@@ -72,7 +75,10 @@ func (s *Service) restrictUngraduatedPermissions(chat *tele.Chat, user *tele.Use
 	return nil
 }
 
-func (s *Service) applyVerificationPassPermissions(ctx context.Context, chat *tele.Chat, user *tele.User, policy config.GuardPolicy) error {
+func (s *Service) applyVerificationPassPermissions(ctx context.Context, chat *tele.Chat, user *tele.User, policy config.GuardPolicy, manual ...bool) error {
+	if (len(manual) == 0 || !manual[0]) && s.exemptUser(ctx, chat, user) {
+		return errExemptPending
+	}
 	if s == nil || chat == nil || user == nil {
 		return nil
 	}

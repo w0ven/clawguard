@@ -222,6 +222,17 @@ func (s *Service) handleIncomingMessageWithOptions(c tele.Context, isEdited bool
 		return nil
 	}
 
+	if msg.SenderChat == nil {
+		exempt, listedBanned := s.globalExemption(ctx, msg.Chat.ID, msg.Sender.ID)
+		if listedBanned {
+			return s.enforceExistingBannedMessage(ctx, msg, policy)
+		}
+		if exempt {
+			s.maybeKeywordReply(ctx, msg, policy)
+			return nil
+		}
+	}
+
 	if handled, err := s.applyDeletedAccountMessageFilter(ctx, msg, policy, state.ActionsPaused); err != nil {
 		return err
 	} else if handled {
@@ -387,6 +398,42 @@ func messageSenderID(msg *tele.Message) int64 {
 	return 0
 }
 
+func (s *Service) enforceExistingBannedMessage(ctx context.Context, msg *tele.Message, policy config.GuardPolicy) error {
+	paused, stateErr := s.actionsPaused(ctx)
+	if stateErr != nil {
+		s.logger.Warn("system state unavailable for banned-user enforcement, skip moderation", zap.Error(stateErr), zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID))
+		return nil
+	}
+	if paused {
+		s.logger.Info("skip banned-user enforcement because actions are paused", zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID))
+		return nil
+	}
+	deleteRelease, deleteOK := s.acquireMessageDeleteLock(msg.Chat.ID, msg.ID)
+	if deleteOK {
+		defer deleteRelease()
+		if err := s.deleteMessage(msg); err != nil {
+			s.logger.Warn("delete banned user message failed", zap.Error(err))
+		}
+	} else {
+		s.logger.Info("skip duplicate banned user message delete", zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID), zap.Int("message_id", msg.ID))
+	}
+	actionRollback, actionOK := s.acquireUserActionLock(msg.Chat.ID, msg.Sender.ID)
+	if !actionOK {
+		s.logger.Info("skip duplicate banned user action", zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID), zap.Int("message_id", msg.ID))
+		return nil
+	}
+	if err := s.banUser(msg.Chat, msg.Sender); err != nil {
+		actionRollback()
+		return err
+	}
+	s.sendActionFeedback(msg.Chat, nil, policy.Feedback.Ban, map[string]string{
+		"user":         feedbackUserLabel(msg.Sender, policy.Feedback.Ban.ParseMode),
+		"user_mention": feedbackUserMention(msg.Sender, policy.Feedback.Ban.ParseMode),
+		"reason":       "已在封禁名单内",
+	})
+	return nil
+}
+
 func (s *Service) applyAIModeration(ctx context.Context, msg *tele.Message, policy config.GuardPolicy, isAdmin bool, content reviewableContent, isEdited bool) error {
 	if msg == nil || msg.Chat == nil || msg.Sender == nil {
 		return nil
@@ -414,39 +461,7 @@ func (s *Service) applyAIModeration(ctx context.Context, msg *tele.Message, poli
 			return nil
 		}
 	case "banned":
-		paused, stateErr := s.actionsPaused(ctx)
-		if stateErr != nil {
-			s.logger.Warn("system state unavailable for banned-user enforcement, skip moderation", zap.Error(stateErr), zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID))
-			return nil
-		}
-		if paused {
-			s.logger.Info("skip banned-user enforcement because actions are paused", zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID))
-			return nil
-		}
-		deleteRelease, deleteOK := s.acquireMessageDeleteLock(msg.Chat.ID, msg.ID)
-		if deleteOK {
-			defer deleteRelease()
-			if err := s.deleteMessage(msg); err != nil {
-				s.logger.Warn("delete banned user message failed", zap.Error(err))
-			}
-		} else {
-			s.logger.Info("skip duplicate banned user message delete", zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID), zap.Int("message_id", msg.ID))
-		}
-		actionRollback, actionOK := s.acquireUserActionLock(msg.Chat.ID, msg.Sender.ID)
-		if !actionOK {
-			s.logger.Info("skip duplicate banned user action", zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID), zap.Int("message_id", msg.ID))
-			return nil
-		}
-		if err := s.banUser(msg.Chat, msg.Sender); err != nil {
-			actionRollback()
-			return err
-		}
-		s.sendActionFeedback(msg.Chat, nil, policy.Feedback.Ban, map[string]string{
-			"user":         feedbackUserLabel(msg.Sender, policy.Feedback.Ban.ParseMode),
-			"user_mention": feedbackUserMention(msg.Sender, policy.Feedback.Ban.ParseMode),
-			"reason":       "已在封禁名单内",
-		})
-		return nil
+		return s.enforceExistingBannedMessage(ctx, msg, policy)
 	}
 
 	if msg.Sticker != nil {
@@ -535,6 +550,9 @@ func (s *Service) applyAIModeration(ctx context.Context, msg *tele.Message, poli
 		defer fallbackCancel()
 		return s.applyAIModerationErrorFallback(fallbackCtx, msg, policy, trust, err)
 	}
+	if !s.automaticActionAllowed(ctx, msg.Chat.ID) || s.exemptMessage(ctx, msg) {
+		return nil
+	}
 	if output.Skipped {
 		return s.maybeGraduateUser(ctx, trust, policy.AI)
 	}
@@ -582,6 +600,9 @@ func isUngraduatedTrustStatus(status string) bool {
 
 func (s *Service) applyAIModerationErrorFallback(ctx context.Context, msg *tele.Message, policy config.GuardPolicy, trust store.UserTrust, callErr error) error {
 	if msg == nil || msg.Chat == nil || msg.Sender == nil {
+		return nil
+	}
+	if !s.automaticActionAllowed(ctx, msg.Chat.ID) || s.exemptMessage(ctx, msg) {
 		return nil
 	}
 	if !isUngraduatedTrustStatus(trust.Status) {
@@ -663,6 +684,9 @@ func (s *Service) applyFilterChecks(ctx context.Context, msg *tele.Message, poli
 }
 
 func (s *Service) applyFilterResult(ctx context.Context, msg *tele.Message, policy config.GuardPolicy, result FilterResult, actionsPaused bool) error {
+	if s.exemptMessage(ctx, msg) {
+		return nil
+	}
 	if actionsPaused {
 		action := result.Action
 		if strings.TrimSpace(action) == "" {
@@ -2466,6 +2490,9 @@ func quotedMessageSource(msg *tele.Message) string {
 }
 
 func (s *Service) applyAIAction(ctx context.Context, msg *tele.Message, policy config.GuardPolicy, trust store.UserTrust, output ai.CheckOutput, action string, isEdited bool) error {
+	if s.exemptMessage(ctx, msg) {
+		return nil
+	}
 	auditOutcome := "success"
 	auditError := ""
 	defer func() {
@@ -3810,6 +3837,9 @@ func (s *Service) asyncProfileCheck(msg *tele.Message, policy config.GuardPolicy
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
+		if s.exemptMessage(ctx, msg) {
+			return
+		}
 		matched, output, err := s.checkProfileOnMessage(ctx, msg.Chat, msg.Sender, policy)
 		if err != nil {
 			s.holdProfileReviewAfterError(msg.Chat, msg.Sender, policy, err, "on_message")
@@ -3836,6 +3866,9 @@ func (s *Service) holdProfileReviewAfterError(chat *tele.Chat, user *tele.User, 
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	if !s.automaticActionAllowed(ctx, chat.ID) || s.exemptUser(ctx, chat, user) {
+		return
+	}
 
 	trust, err := s.queries.GetUserTrust(ctx, chat.ID, user.ID)
 	if err != nil {
@@ -4041,6 +4074,9 @@ func (s *Service) handleProfileOnMessageViolation(
 	aiOutput *ai.CheckOutput,
 ) error {
 	if msg == nil || msg.Chat == nil || msg.Sender == nil {
+		return nil
+	}
+	if !s.automaticActionAllowed(ctx, msg.Chat.ID) || s.exemptMessage(ctx, msg) {
 		return nil
 	}
 	paused, stateErr := s.actionsPaused(ctx)

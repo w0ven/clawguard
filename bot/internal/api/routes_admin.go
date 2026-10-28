@@ -82,6 +82,7 @@ func (s *Server) registerAdminRoutes() {
 	admin.PUT("/user-trust/:chat_id/:user_id", s.handleUpdateUserTrust)
 	admin.GET("/ai-calls", s.handleListAICalls)
 
+	s.registerGlobalExemptRoutes(admin)
 	s.registerAdminLLMRoutes(admin)
 	s.registerAdminAdKillerRoutes(admin)
 	s.registerScheduledMessageRoutes(admin)

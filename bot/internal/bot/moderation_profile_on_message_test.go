@@ -576,6 +576,10 @@ func (db *moderationProfileMatchMockDB) Query(_ context.Context, query string, a
 
 func (db *moderationProfileMatchMockDB) QueryRow(_ context.Context, query string, args ...any) pgx.Row {
 	switch {
+	case strings.Contains(query, "FROM global_exempt_users"):
+		return mockScanRow(false, false)
+	case strings.Contains(query, "FROM authorized_groups"):
+		return mockScanRow(args[0].(int64), "fixture", db.now, (*int64)(nil), true, "")
 	case strings.Contains(query, "FROM system_state"):
 		db.mu.Lock()
 		state := db.systemState

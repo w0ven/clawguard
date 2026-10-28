@@ -177,8 +177,14 @@ func (s *Service) applyAdKillerPrefilter(
 	if err != nil {
 		return false, err
 	}
+	if s.exemptMessage(ctx, msg) {
+		return true, nil
+	}
 	if eval.Output == nil || eval.Action == "" || eval.Action == adkiller.ActionNone {
 		return eval.SkipLLM, nil
+	}
+	if !s.automaticActionAllowed(ctx, msg.Chat.ID) {
+		return true, nil
 	}
 
 	metadata, _ := json.Marshal(map[string]any{
