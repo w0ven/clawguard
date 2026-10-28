@@ -29,6 +29,7 @@ export const test = base.extend<{mock:Mock}>({mock:[async({page},use,testInfo)=>
   } else if(p==='/api/auth/me') data={admin:{id:1,telegram_id:1,role:'super_admin',display_name:'Fixture Admin'}};
   else if(p==='/api/admin/groups')data={groups:[group,{...group,chat_id:-1002,title:'Fixture 第二群'}]};
   else if(/^\/api\/admin\/groups\/-\d+$/.test(p))data={group:p.endsWith('-1002')?{...group,chat_id:-1002,title:'Fixture 第二群'}:group,merged_policy:policy};
+  else if(p.endsWith('/exempt-users'))data={users:[]};
   else if(p.endsWith('/scheduled-messages'))data={scheduled_messages:[],limit:20};
   else if(p.endsWith('/join-protection'))data={join_protection:join,defaults:join,status};
   else if(p==='/api/admin/global-config')data={config:policy,version:7};

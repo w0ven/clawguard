@@ -223,7 +223,7 @@ func (s *Service) handleIncomingMessageWithOptions(c tele.Context, isEdited bool
 	}
 
 	if msg.SenderChat == nil {
-		exempt, listedBanned := s.globalExemption(ctx, msg.Chat.ID, msg.Sender.ID)
+		exempt, listedBanned := s.groupExemption(ctx, msg.Chat.ID, msg.Sender.ID)
 		if listedBanned {
 			return s.enforceExistingBannedMessage(ctx, msg, policy)
 		}

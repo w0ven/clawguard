@@ -14,20 +14,24 @@ import (
 	"github.com/openclaw/clawguard/internal/store"
 )
 
-func (s *Server) registerGlobalExemptRoutes(admin *echo.Group) {
-	admin.GET("/global-exempt-users", s.listGlobalExemptUsers)
-	admin.PUT("/global-exempt-users/:user_id", s.putGlobalExemptUser)
-	admin.DELETE("/global-exempt-users/:user_id", s.deleteGlobalExemptUser)
+func (s *Server) registerGroupExemptRoutes(admin *echo.Group) {
+	admin.GET("/groups/:chat_id/exempt-users", s.listGroupExemptUsers)
+	admin.PUT("/groups/:chat_id/exempt-users/:user_id", s.putGroupExemptUser)
+	admin.DELETE("/groups/:chat_id/exempt-users/:user_id", s.deleteGroupExemptUser)
 }
 
-func (s *Server) listGlobalExemptUsers(c echo.Context) error {
+func (s *Server) listGroupExemptUsers(c echo.Context) error {
 	admin, _ := currentAdmin(c)
-	if !adminHasGlobalAccess(admin) {
-		return c.JSON(http.StatusForbidden, map[string]string{"error": "global exemptions out of scope"})
+	chatID, err := strconv.ParseInt(c.Param("chat_id"), 10, 64)
+	if err != nil || chatID >= 0 {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid chat_id"})
 	}
-	items, err := s.botService.Queries().ListGlobalExemptUsers(c.Request().Context())
+	if !adminCanAccessChat(admin, chatID) {
+		return c.JSON(http.StatusForbidden, map[string]string{"error": "group out of scope"})
+	}
+	items, err := s.botService.Queries().ListGroupExemptUsers(c.Request().Context(), chatID)
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "无法加载全局豁免名单"})
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "无法加载本群豁免名单"})
 	}
 	return c.JSON(http.StatusOK, map[string]any{"users": items})
 }
@@ -49,10 +53,14 @@ func parseExemptUserID(c echo.Context) (int64, error) {
 	return id, nil
 }
 
-func (s *Server) putGlobalExemptUser(c echo.Context) error {
+func (s *Server) putGroupExemptUser(c echo.Context) error {
 	admin, _ := currentAdmin(c)
-	if !adminHasGlobalAccess(admin) {
-		return c.JSON(http.StatusForbidden, map[string]string{"error": "global exemptions out of scope"})
+	chatID, err := strconv.ParseInt(c.Param("chat_id"), 10, 64)
+	if err != nil || chatID >= 0 {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid chat_id"})
+	}
+	if !adminCanAccessChat(admin, chatID) {
+		return c.JSON(http.StatusForbidden, map[string]string{"error": "group out of scope"})
 	}
 	id, err := parseExemptUserID(c)
 	if err != nil {
@@ -76,16 +84,16 @@ func (s *Server) putGlobalExemptUser(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "备注过长或到期时间不是未来时间"})
 	}
 	ctx := c.Request().Context()
-	var result store.GlobalExemptUser
+	var result store.GroupExemptUser
 	err = s.botService.Queries().Transact(ctx, func(q *store.Queries) error {
-		if e := q.LockGlobalExemptUser(ctx, id); e != nil {
+		if e := q.LockGroupExemptUser(ctx, chatID, id); e != nil {
 			return e
 		}
-		before, e := q.GetGlobalExemptUser(ctx, id)
+		before, e := q.GetGroupExemptUser(ctx, chatID, id)
 		if e != nil && !errors.Is(e, pgx.ErrNoRows) {
 			return e
 		}
-		result, e = q.UpsertGlobalExemptUser(ctx, id, input.Note, input.ExpiresAt)
+		result, e = q.UpsertGroupExemptUser(ctx, chatID, id, input.Note, input.ExpiresAt)
 		if e != nil {
 			return e
 		}
@@ -93,7 +101,7 @@ func (s *Server) putGlobalExemptUser(c echo.Context) error {
 		if e == nil && before.UserID != 0 {
 			previous = mustRawJSON(before)
 		}
-		return writeAuditWithQueries(ctx, q, admin, "global", nil, "upsert_global_exempt_user", previous, mustRawJSON(result))
+		return writeAuditWithQueries(ctx, q, admin, "group", &chatID, "upsert_group_exempt_user", previous, mustRawJSON(result))
 	})
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "保存豁免失败"})
@@ -101,10 +109,14 @@ func (s *Server) putGlobalExemptUser(c echo.Context) error {
 	return c.JSON(http.StatusOK, result)
 }
 
-func (s *Server) deleteGlobalExemptUser(c echo.Context) error {
+func (s *Server) deleteGroupExemptUser(c echo.Context) error {
 	admin, _ := currentAdmin(c)
-	if !adminHasGlobalAccess(admin) {
-		return c.JSON(http.StatusForbidden, map[string]string{"error": "global exemptions out of scope"})
+	chatID, err := strconv.ParseInt(c.Param("chat_id"), 10, 64)
+	if err != nil || chatID >= 0 {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid chat_id"})
+	}
+	if !adminCanAccessChat(admin, chatID) {
+		return c.JSON(http.StatusForbidden, map[string]string{"error": "group out of scope"})
 	}
 	id, err := parseExemptUserID(c)
 	if err != nil {
@@ -112,17 +124,17 @@ func (s *Server) deleteGlobalExemptUser(c echo.Context) error {
 	}
 	ctx := c.Request().Context()
 	err = s.botService.Queries().Transact(ctx, func(q *store.Queries) error {
-		if e := q.LockGlobalExemptUser(ctx, id); e != nil {
+		if e := q.LockGroupExemptUser(ctx, chatID, id); e != nil {
 			return e
 		}
-		before, e := q.GetGlobalExemptUser(ctx, id)
+		before, e := q.GetGroupExemptUser(ctx, chatID, id)
 		if e != nil {
 			return e
 		}
-		if _, e = q.DeleteGlobalExemptUser(ctx, id); e != nil {
+		if _, e = q.DeleteGroupExemptUser(ctx, chatID, id); e != nil {
 			return e
 		}
-		return writeAuditWithQueries(ctx, q, admin, "global", nil, "delete_global_exempt_user", mustRawJSON(before), []byte("null"))
+		return writeAuditWithQueries(ctx, q, admin, "group", &chatID, "delete_group_exempt_user", mustRawJSON(before), []byte("null"))
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return c.JSON(http.StatusNotFound, map[string]string{"error": "豁免不存在"})

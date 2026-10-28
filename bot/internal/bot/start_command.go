@@ -74,6 +74,9 @@ func helpText() string {
 /warn — 警告用户 <code>/warn @user 原因</code>
 /unban — 解封用户 <code>/unban @user</code>
 /spam — 快捷封禁（回复消息 / @用户 / user_id）
+/exempt — 本群豁免：回复消息或 <code>/exempt 用户ID [1d] [备注]</code>
+/unexempt — 撤销本群豁免：回复消息或 <code>/unexempt 用户ID</code>
+/exemptlist — 查看本群豁免（可指定页码）
 /cas — 查询用户 CAS 黑名单状态
 /warn_status — 查看警告记录
 /config — 获取管理面板一次性登录链接

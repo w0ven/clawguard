@@ -8,16 +8,16 @@ import (
 	tele "gopkg.in/telebot.v3"
 )
 
-// Global exemption applies only to a real Telegram user, never a sender_chat
+// Group exemption applies only to a real Telegram user, never a sender_chat
 // persona. A lookup failure is not an exemption. Existing per-group bans win.
-func (s *Service) globalExemption(ctx context.Context, chatID, userID int64) (exempt, listedBanned bool) {
+func (s *Service) groupExemption(ctx context.Context, chatID, userID int64) (exempt, listedBanned bool) {
 	if s == nil || s.queries == nil || chatID == 0 || userID <= 0 {
 		return false, false
 	}
-	active, banned, err := s.queries.GlobalExemptionStatus(ctx, chatID, userID)
+	active, banned, err := s.queries.GroupExemptionStatus(ctx, chatID, userID)
 	if err != nil {
 		if s.logger != nil {
-			s.logger.Warn("global exemption lookup failed; do not exempt", zap.Error(err), zap.Int64("chat_id", chatID), zap.Int64("user_id", userID))
+			s.logger.Warn("group exemption lookup failed; do not exempt", zap.Error(err), zap.Int64("chat_id", chatID), zap.Int64("user_id", userID))
 		}
 		return false, false
 	}
@@ -27,7 +27,7 @@ func (s *Service) exemptUser(ctx context.Context, chat *tele.Chat, user *tele.Us
 	if chat == nil || user == nil {
 		return false
 	}
-	yes, _ := s.globalExemption(ctx, chat.ID, user.ID)
+	yes, _ := s.groupExemption(ctx, chat.ID, user.ID)
 	return yes
 }
 func (s *Service) exemptMessage(ctx context.Context, msg *tele.Message) bool {
@@ -53,4 +53,4 @@ func (s *Service) automaticActionAllowed(ctx context.Context, chatID int64) bool
 
 // Returning an error preserves the pending record and avoids reporting a kick
 // or verification pass which did not happen; an administrator can decide.
-var errExemptPending = errors.New("global exemption active; verification requires administrator review")
+var errExemptPending = errors.New("group exemption active; verification requires administrator review")

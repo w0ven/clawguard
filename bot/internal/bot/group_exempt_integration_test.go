@@ -16,7 +16,7 @@ import (
 	tele "gopkg.in/telebot.v3"
 )
 
-func TestGlobalExemptionBotPathsIntegration(t *testing.T) {
+func TestGroupExemptionBotPathsIntegration(t *testing.T) {
 	ctx := context.Background()
 	url := os.Getenv("TEST_DATABASE_URL")
 	if url == "" {
@@ -35,9 +35,15 @@ func TestGlobalExemptionBotPathsIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() {
-		_, _ = pool.Exec(ctx, `DELETE FROM global_exempt_users WHERE user_id=$1`, userID)
+		_, _ = pool.Exec(ctx, `DELETE FROM group_exempt_users WHERE user_id=$1`, userID)
 		_, _ = pool.Exec(ctx, `DELETE FROM banned_users WHERE user_id=$1`, userID)
 		_, _ = pool.Exec(ctx, `DELETE FROM groups WHERE chat_id=$1`, chatID)
+	}()
+	if _, err = pool.Exec(ctx, `INSERT INTO authorized_groups(chat_id) VALUES($1),($2) ON CONFLICT(chat_id) DO UPDATE SET enabled=true`, chatID, chatID-1); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_, _ = pool.Exec(ctx, `DELETE FROM authorized_groups WHERE chat_id IN ($1,$2)`, chatID, chatID-1)
 	}()
 	b, transport := newMockTelegramBot(t, "")
 	s := &Service{logger: zap.NewNop(), queries: q, bot: b, sender: b, sendLimiter: NewSendLimiter(), joinProtector: newJoinProtector(), cleanupBreaker: newTelegramCleanupBreaker()}
@@ -51,7 +57,7 @@ func TestGlobalExemptionBotPathsIntegration(t *testing.T) {
 	policy.AI.Enabled = false
 	s.policySnapshots.Store(chatID, policy)
 	s.policySnapshotAt.Store(chatID, time.Now())
-	if _, err = q.UpsertGlobalExemptUser(ctx, userID, "fixture", nil); err != nil {
+	if _, err = q.UpsertGroupExemptUser(ctx, chatID, userID, "fixture", nil); err != nil {
 		t.Fatal(err)
 	}
 	msg := &tele.Message{ID: 111, Text: "blocked", Chat: &tele.Chat{ID: chatID, Type: tele.ChatSuperGroup}, Sender: &tele.User{ID: userID, FirstName: "Fixture"}}
@@ -132,11 +138,20 @@ func TestGlobalExemptionBotPathsIntegration(t *testing.T) {
 	if _, err = q.UpsertBannedUser(ctx, store.UpsertBannedUserParams{UserID: userID, Source: "manual"}); err != nil {
 		t.Fatal(err)
 	}
-	if exempt, banned := s.globalExemption(ctx, chatID, userID); exempt || !banned {
+	if exempt, banned := s.groupExemption(ctx, chatID, userID); exempt || !banned {
 		t.Fatal("group A banned trust must take precedence")
 	}
-	if exempt, banned := s.globalExemption(ctx, chatID-1, userID); !exempt || banned {
-		t.Fatal("group A ban record must not negate group B exemption")
+	if exempt, _ := s.groupExemption(ctx, chatID-1, userID); exempt {
+		t.Fatal("group A exemption leaked to group B")
+	}
+	if _, err = q.UpsertGroupExemptUser(ctx, chatID-1, userID, "B", nil); err != nil {
+		t.Fatal(err)
+	}
+	if exempt, banned := s.groupExemption(ctx, chatID-1, userID); !exempt || banned {
+		t.Fatal("group A ban negated group B exemption")
+	}
+	if _, err = q.DeleteGroupExemptUser(ctx, chatID-1, userID); err != nil {
+		t.Fatal(err)
 	}
 	msg.ID = 112
 	if err = s.handleIncomingMessageWithOptions(b.NewContext(tele.Update{Message: msg}), false); err != nil {
@@ -149,7 +164,7 @@ func TestGlobalExemptionBotPathsIntegration(t *testing.T) {
 	if _, err = pool.Exec(ctx, `DELETE FROM user_trust WHERE chat_id=$1 AND user_id=$2`, chatID, userID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = q.DeleteGlobalExemptUser(ctx, userID); err != nil {
+	if _, err = q.DeleteGroupExemptUser(ctx, chatID, userID); err != nil {
 		t.Fatal(err)
 	}
 	result, err = s.HandleVerificationExpiry(ctx, pending)
@@ -158,5 +173,86 @@ func TestGlobalExemptionBotPathsIntegration(t *testing.T) {
 	}
 	if countString(transport.Methods(), "kickChatMember") < beforeManual+2 {
 		t.Fatalf("pending action not resumed: %v", transport.Methods())
+	}
+
+	// Same user in another group follows that group's message, join and
+	// queued-verification policies; exemption in A never leaks into B.
+	groupB := chatID - 1
+	if _, err = pool.Exec(ctx, `INSERT INTO groups(chat_id,title,type) VALUES($1,'fixture B','supergroup')`, groupB); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _, _ = pool.Exec(ctx, `DELETE FROM groups WHERE chat_id=$1`, groupB) }()
+	s.cacheAuthorizedGroup(ctx, groupB, true)
+	s.policySnapshots.Store(groupB, policy)
+	s.policySnapshotAt.Store(groupB, time.Now())
+	s.chatAdmins.Store(fmt.Sprintf("chat_admin:%d:%d", groupB, userID), chatAdminCacheEntry{IsAdmin: false, ExpireAt: time.Now().Add(time.Hour)})
+	if _, err = q.UpsertGroupExemptUser(ctx, chatID, userID, "A", nil); err != nil {
+		t.Fatal(err)
+	}
+	beforeDelete := countString(transport.Methods(), "deleteMessage")
+	msgB := *msg
+	msgB.ID = 113
+	msgB.Chat = &tele.Chat{ID: groupB, Type: tele.ChatSuperGroup}
+	if err = s.handleIncomingMessageWithOptions(b.NewContext(tele.Update{Message: &msgB}), false); err != nil {
+		t.Fatal(err)
+	}
+	if countString(transport.Methods(), "deleteMessage") <= beforeDelete {
+		t.Fatal("group B message was exempted by group A")
+	}
+	beforeKick := countString(transport.Methods(), "kickChatMember")
+	updateB := &tele.ChatMemberUpdate{Chat: msgB.Chat, OldChatMember: &tele.ChatMember{User: member, Role: tele.Left}, NewChatMember: &tele.ChatMember{User: member, Role: tele.Member}}
+	if err = s.handleChatMemberUpdate(b.NewContext(tele.Update{ID: 552, ChatMember: updateB})); err != nil {
+		t.Fatal(err)
+	}
+	if countString(transport.Methods(), "kickChatMember") <= beforeKick {
+		t.Fatal("group B join was exempted by group A")
+	}
+	// Remove only the test's join-ban status to exercise the independent job.
+	if _, err = pool.Exec(ctx, `DELETE FROM user_trust WHERE chat_id=$1 AND user_id=$2`, groupB, userID); err != nil {
+		t.Fatal(err)
+	}
+	pendingB, err := q.UpsertPendingVerification(ctx, store.UpsertPendingVerificationParams{ChatID: groupB, UserID: userID, Method: "button", Payload: []byte(`{}`), ExpiresAt: time.Now().Add(-time.Minute)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err = s.HandleVerificationExpiry(ctx, pendingB)
+	if err != nil || !result.RetryAt.IsZero() {
+		t.Fatalf("group B pending incorrectly paused: %+v %v", result, err)
+	}
+	if exempt, _ := s.groupExemption(ctx, chatID, userID); !exempt {
+		t.Fatal("group B action changed group A exemption")
+	}
+	// Redis fallback jobs also use the task's own group, not a global ID.
+	_, redisClient := newJoinProtectionTestRedis(t)
+	s.redis = redisClient
+	for _, id := range []int64{chatID, groupB} {
+		task := joinProtectionDeferredCleanup{ChatID: id, UserID: userID, FirstName: "fixture", Action: joinProtectionActionTemporaryBan, ActionUntil: time.Now().Add(time.Hour), TemporaryBanSeconds: 3600}
+		if err = enqueueJoinProtectionCleanupRedis(ctx, redisClient, task, time.Now().Add(-time.Second)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	beforeKick = countString(transport.Methods(), "kickChatMember")
+	if err = s.ProcessJoinProtectionCleanupFallbacks(ctx, 2); err != nil {
+		t.Fatal(err)
+	}
+	if got := countString(transport.Methods(), "kickChatMember") - beforeKick; got != 1 {
+		t.Fatalf("redis cleanup: expected only group B action; got %d", got)
+	}
+	if task, ok, err := claimDueJoinProtectionCleanupRedis(ctx, redisClient, time.Now().Add(2*time.Minute), time.Minute); err != nil || !ok || task.ChatID != chatID {
+		t.Fatalf("exempt group A task not deferred: %+v %v %v", task, ok, err)
+	}
+	if _, err = pool.Exec(ctx, `UPDATE group_exempt_users SET expires_at=now()-interval '1 second' WHERE chat_id=$1 AND user_id=$2`, chatID, userID); err != nil {
+		t.Fatal(err)
+	}
+	if exempt, _ := s.groupExemption(ctx, chatID, userID); exempt {
+		t.Fatal("expired A exemption still active")
+	}
+	pending, err = q.UpsertPendingVerification(ctx, store.UpsertPendingVerificationParams{ChatID: chatID, UserID: userID, Method: "button", Payload: []byte(`{}`), ExpiresAt: time.Now().Add(-time.Minute)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err = s.HandleVerificationExpiry(ctx, pending)
+	if err != nil || !result.RetryAt.IsZero() {
+		t.Fatalf("expired exemption did not resume pending: %+v %v", result, err)
 	}
 }

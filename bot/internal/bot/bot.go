@@ -282,6 +282,9 @@ func (s *Service) setupCommandMenu(ctx context.Context) error {
 		{Text: "spam", Description: "封禁用户 /spam @user"},
 		{Text: "cas", Description: "查询 CAS 黑名单状态"},
 		{Text: "warn_status", Description: "查看警告记录"},
+		{Text: "exempt", Description: "豁免本群用户"},
+		{Text: "unexempt", Description: "撤销本群用户豁免"},
+		{Text: "exemptlist", Description: "查看本群豁免名单"},
 	}
 	// 群内管理员菜单
 	if _, err := s.bot.Raw("setMyCommands", map[string]any{
@@ -518,6 +521,12 @@ func (s *Service) registerHandlers() {
 	s.bot.Handle("/spam", func(c tele.Context) error {
 		return s.runCommandHandler("spam", c, s.handleSpamCommand)
 	})
+	for _, name := range []string{"exempt", "unexempt", "exemptlist"} {
+		name := name
+		s.bot.Handle("/"+name, func(c tele.Context) error {
+			return s.runCommandHandler(name, c, func(c tele.Context) error { return s.handleGroupExemptCommand(c, name) })
+		})
+	}
 }
 
 func (s *Service) runHandler(name string, c tele.Context, handler func(tele.Context) error) (err error) {
@@ -2012,7 +2021,7 @@ func (s *Service) HandleVerificationExpiry(ctx context.Context, pending store.Pe
 		FirstName: derefString(pending.FirstName),
 	}
 	if s.exemptUser(ctx, chat, user) {
-		return verificationExpiryRetry(time.Now().Add(time.Minute), "global exemption active; restriction requires manual review"), nil
+		return verificationExpiryRetry(time.Now().Add(time.Minute), "group exemption active; restriction requires manual review"), nil
 	}
 	if pending.Method == "join_protection_cleanup" {
 		return s.handleJoinProtectionCleanupExpiry(ctx, pending, policy, chat, user)
@@ -2024,7 +2033,7 @@ func (s *Service) HandleVerificationExpiry(ctx context.Context, pending store.Pe
 	}
 
 	if s.exemptUser(ctx, chat, user) {
-		return verificationExpiryRetry(time.Now().Add(time.Minute), "global exemption active; restriction requires manual review"), nil
+		return verificationExpiryRetry(time.Now().Add(time.Minute), "group exemption active; restriction requires manual review"), nil
 	}
 	failAction := verificationFailActionSnapshot(pending.Payload, policy.Verify.FailAction)
 	action, err := s.applyVerificationFailAction(chat, user, failAction)

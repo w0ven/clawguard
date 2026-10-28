@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { useParams } from "next/navigation";
 import { AdminShell } from "@/components/admin-shell";
+import { GroupExemptUsers } from "@/components/group-exempt-users";
 import { GroupConfigEditor } from "@/components/group-config-editor";
 import { Card, CardBody } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -57,7 +58,7 @@ export default function GroupDetailPage() {
       {loadError && !loading && (
         <Card><CardBody className="flex flex-col gap-2 py-10 text-sm text-[var(--danger)]"><Badge tone="danger">加载失败</Badge><span>{loadError}</span></CardBody></Card>
       )}
-      {group && mergedPolicy && !loadError ? <GroupConfigEditor key={group.chat_id} group={group} mergedPolicy={mergedPolicy} /> : null}
+      {group && mergedPolicy && !loadError ? <><GroupExemptUsers key={`exempt-${params.chatId}`} chatId={params.chatId} /><GroupConfigEditor key={group.chat_id} group={group} mergedPolicy={mergedPolicy} /></> : null}
     </AdminShell>
   );
 }

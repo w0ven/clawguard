@@ -1,10 +1,10 @@
 import { test, expect, login } from './ui-fixtures';
 
-test('global exemptions add, revoke, validation and server error', async ({page}) => {
+test('group exemptions add, revoke, validation and server error', async ({page}) => {
   let entries: Array<{user_id:string;note:string;expires_at:string|null;created_at:string}> = [];
   const writes: Array<{method:string; id:string; csrf:string|undefined; body?:any}> = [];
   let fail = false;
-  await page.route('**/api/admin/global-exempt-users**', async route => {
+  await page.route('**/api/admin/groups/-1001/exempt-users**', async route => {
     const req = route.request(); const id = new URL(req.url()).pathname.split('/').at(-1)!;
     if (req.method() === 'GET') return route.fulfill({json:{users:entries}});
     writes.push({method:req.method(),id,csrf:req.headers()['x-csrf-token'],body:req.method()==='PUT'?req.postDataJSON():undefined});
@@ -15,8 +15,8 @@ test('global exemptions add, revoke, validation and server error', async ({page}
   });
   await login(page);
   await page.context().addCookies([{name:'cg_csrf',value:'fixture-csrf',domain:'127.0.0.1',path:'/'}]);
-  await page.goto('/global-exempt-users');
-  await expect(page.getByRole('heading',{name:'全局用户豁免'})).toBeVisible();
+  await page.goto('/groups/-1001');
+  await expect(page.getByRole('heading',{name:'本群用户豁免'})).toBeVisible();
   await page.getByLabel('Telegram 用户 ID').fill('not-a-number');
   await page.getByRole('button',{name:'保存豁免'}).click();
   await expect(page.locator('p[role=alert]')).toContainText('正整数');

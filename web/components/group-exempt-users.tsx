@@ -1,7 +1,6 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { AdminShell } from "@/components/admin-shell";
 import { Card, CardBody, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -14,9 +13,9 @@ type Entry = {
   created_at: string;
 };
 
-const endpoint = "/api/admin/global-exempt-users";
 
-export default function GlobalExemptUsersPage() {
+export function GroupExemptUsers({ chatId }: { chatId: string }) {
+  const endpoint = `/api/admin/groups/${chatId}/exempt-users`;
   const [users, setUsers] = useState<Entry[]>([]);
   const [id, setId] = useState("");
   const [note, setNote] = useState("");
@@ -36,7 +35,7 @@ export default function GlobalExemptUsersPage() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [endpoint]);
 
   useEffect(() => {
     void load();
@@ -74,7 +73,7 @@ export default function GlobalExemptUsersPage() {
   }
 
   async function revoke(user: Entry) {
-    if (!confirm(`确认撤销用户 ${user.user_id} 的全局豁免？`)) return;
+    if (!confirm(`确认撤销用户 ${user.user_id} 的本群豁免？`)) return;
     setBusy(true);
     setError("");
     try {
@@ -88,10 +87,8 @@ export default function GlobalExemptUsersPage() {
   }
 
   return (
-    <AdminShell
-      title="全局用户豁免"
-      subtitle="仅全局权限管理员可管理；按 Telegram 数字用户 ID 在所有授权群生效。"
-    >
+    <section aria-label="本群用户豁免" className="grid gap-4">
+      <h2 className="text-xl font-semibold">本群用户豁免</h2>
       <Card>
         <CardHeader><CardTitle>添加或更新豁免</CardTitle></CardHeader>
         <CardBody className="grid gap-3">
@@ -162,6 +159,6 @@ export default function GlobalExemptUsersPage() {
           ))}
         </CardBody>
       </Card>
-    </AdminShell>
+    </section>
   );
 }

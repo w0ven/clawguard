@@ -1137,7 +1137,7 @@ func (s *Service) handleJoinProtectionCleanupExpiry(
 			return VerificationExpiryResult{}, nil
 		}
 		if s.exemptUser(ctx, chat, user) {
-			return verificationExpiryRetry(time.Now().Add(time.Minute), "global exemption active"), nil
+			return verificationExpiryRetry(time.Now().Add(time.Minute), "group exemption active"), nil
 		}
 		if err := s.applyJoinProtectionTemporaryAction(chat, user, payload.Action, payload.ActionUntil); err != nil {
 			if isTerminalTelegramCleanupError(err) {
