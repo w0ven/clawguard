@@ -806,7 +806,11 @@ func (s *Server) handleUnban(c echo.Context) error {
 	}
 
 	if err := s.botService.Queries().DeleteBannedUser(c.Request().Context(), userID); err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "clear ban failed"})
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "clear ban failed; retry unban"})
+	}
+	_, err = s.botService.Queries().UnbanUserTrust(c.Request().Context(), store.UnbanUserTrustParams{ChatID: chatID, UserID: userID, Score: 0.5})
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "clear group trust ban failed; retry unban"})
 	}
 
 	return c.NoContent(http.StatusNoContent)
@@ -822,9 +826,10 @@ func (s *Server) handleListAudit(c echo.Context) error {
 		return c.JSON(http.StatusOK, map[string]any{"audit": []store.ConfigAudit{}})
 	}
 
+	scope, global := adminScopeFilter(admin)
 	items, err := s.botService.Queries().ListAuditByChat(c.Request().Context(), store.ListAuditByChatParams{
 		ChatID: chatID,
-		Limit:  parseLimit(c.QueryParam("limit")),
+		Limit:  parseLimit(c.QueryParam("limit")), Global: global, Scope: scope,
 	})
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "list audit failed"})

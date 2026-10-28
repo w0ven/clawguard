@@ -11,7 +11,7 @@ import (
 // Group exemption applies only to a real Telegram user, never a sender_chat
 // persona. A lookup failure is not an exemption. Existing per-group bans win.
 func (s *Service) groupExemption(ctx context.Context, chatID, userID int64) (exempt, listedBanned bool) {
-	if s == nil || s.queries == nil || chatID == 0 || userID <= 0 {
+	if s == nil || s.queries == nil || chatID == 0 || userID <= 0 || userID == 1087968824 || userID == 136817688 || userID == 777000 {
 		return false, false
 	}
 	active, banned, err := s.queries.GroupExemptionStatus(ctx, chatID, userID)
@@ -24,14 +24,14 @@ func (s *Service) groupExemption(ctx context.Context, chatID, userID int64) (exe
 	return active && !banned, active && banned
 }
 func (s *Service) exemptUser(ctx context.Context, chat *tele.Chat, user *tele.User) bool {
-	if chat == nil || user == nil {
+	if chat == nil || !realExemptUser(user) {
 		return false
 	}
 	yes, _ := s.groupExemption(ctx, chat.ID, user.ID)
 	return yes
 }
 func (s *Service) exemptMessage(ctx context.Context, msg *tele.Message) bool {
-	if msg == nil || msg.SenderChat != nil {
+	if msg == nil || msg.SenderChat != nil || !realExemptUser(msg.Sender) {
 		return false
 	}
 	return s.exemptUser(ctx, msg.Chat, msg.Sender)
@@ -54,3 +54,21 @@ func (s *Service) automaticActionAllowed(ctx context.Context, chatID int64) bool
 // Returning an error preserves the pending record and avoids reporting a kick
 // or verification pass which did not happen; an administrator can decide.
 var errExemptPending = errors.New("group exemption active; verification requires administrator review")
+
+// ExemptionTargetIsKnownBot checks durable observations and, if the user is
+// currently visible to Telegram, its current identity. An absent/inaccessible
+// future member stays unknown; runtime checks never exempt observed bots.
+func (s *Service) ExemptionTargetIsKnownBot(ctx context.Context, chatID, userID int64) (bool, error) {
+	known, err := s.queries.KnownBotUser(ctx, userID)
+	if err != nil || known {
+		return known, err
+	}
+	if s.bot == nil {
+		return false, nil
+	}
+	member, err := s.bot.ChatMemberOf(&tele.Chat{ID: chatID}, &tele.User{ID: userID})
+	if err == nil && member != nil && member.User != nil && member.User.ID == userID {
+		return member.User.IsBot, nil
+	}
+	return false, nil
+}

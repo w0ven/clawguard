@@ -132,3 +132,73 @@ func TestGroupExemptCommandsIntegration(t *testing.T) {
 		t.Fatalf("command audit=%d %v", audits, err)
 	}
 }
+
+type reviewCommandTransport struct {
+	groupCommandTransport
+	methods []string
+}
+
+func (r *reviewCommandTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	r.methods = append(r.methods, path.Base(req.URL.Path))
+	return r.groupCommandTransport.RoundTrip(req)
+}
+func TestReviewCommandDispatchIntegration(t *testing.T) {
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, os.Getenv("TEST_DATABASE_URL"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	const chatID int64 = -100777001
+	_, err = pool.Exec(ctx, `INSERT INTO groups(chat_id,title,type) VALUES($1,'command fixture','supergroup') ON CONFLICT DO NOTHING`, chatID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = pool.Exec(ctx, `INSERT INTO authorized_groups(chat_id) VALUES($1) ON CONFLICT DO NOTHING`, chatID); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM authorized_groups WHERE chat_id=$1`, chatID)
+		_, _ = pool.Exec(context.Background(), `DELETE FROM groups WHERE chat_id=$1`, chatID)
+	}()
+	tr := &reviewCommandTransport{}
+	client, err := tele.NewBot(tele.Settings{Token: "123:TEST", URL: "http://telegram.test", Synchronous: true, Client: &http.Client{Transport: tr}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &Service{logger: zap.NewNop(), queries: store.New(pool), bot: client, sender: client, sendLimiter: NewSendLimiter(), joinProtector: newJoinProtector()}
+	s.verifyBtn = tele.Btn{Unique: "verify_human"}
+	s.verifyMathBtn = tele.Btn{Unique: "verify_math"}
+	s.verifyRandBtn = tele.Btn{Unique: "verify_random"}
+	s.verifyAdminBtn = tele.Btn{Unique: "verify_admin"}
+	s.registerHandlers()
+	s.cacheAuthorizedGroup(ctx, chatID, true)
+	s.cacheSystemState(ctx, store.SystemState{})
+	p := keywordReplyPolicy("none", 0)
+	p.Filter.Keywords.Enabled = true
+	p.Filter.Keywords.List = []string{"blocked"}
+	p.Filter.Keywords.Action = "delete"
+	p.AI.Enabled = false
+	s.policySnapshots.Store(chatID, p)
+	s.policySnapshotAt.Store(chatID, time.Now())
+	s.chatAdmins.Store(fmt.Sprintf("chat_admin:%d:%d", chatID, 102), chatAdminCacheEntry{IsAdmin: false, ExpireAt: time.Now().Add(time.Hour)})
+	for i, text := range []string{"/exempt blocked", "/exempt@other_bot blocked", "/help blocked"} {
+		before := countString(tr.methods, "deleteMessage")
+		msg := &tele.Message{ID: 500 + i, Text: text, Chat: &tele.Chat{ID: chatID, Type: tele.ChatSuperGroup}, Sender: &tele.User{ID: 102, FirstName: "user"}}
+		if err = s.ProcessUpdate(tele.Update{ID: 500 + i, Message: msg}); err != nil {
+			t.Fatal(err)
+		}
+		if countString(tr.methods, "deleteMessage") != before+1 {
+			t.Fatalf("%q bypassed filter: %v", text, tr.methods)
+		}
+	}
+	before := countString(tr.methods, "deleteMessage")
+	m := &tele.Message{ID: 505, Text: "/exempt 123 --note blocked", Chat: &tele.Chat{ID: chatID, Type: tele.ChatSuperGroup}, Sender: &tele.User{ID: 101, FirstName: "admin"}}
+	if err = s.ProcessUpdate(tele.Update{ID: 505, Message: m}); err != nil {
+		t.Fatal(err)
+	}
+	if countString(tr.methods, "deleteMessage") != before {
+		t.Fatal("admin command target/remark filtered")
+	}
+	_, _ = pool.Exec(ctx, `DELETE FROM group_exempt_users WHERE chat_id=$1`, chatID)
+}

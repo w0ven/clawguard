@@ -14,6 +14,7 @@ RETURNING id, scope, chat_id, admin_id, action, before, after, diff, created_at;
 SELECT id, scope, chat_id, admin_id, action, before, after, diff, created_at
 FROM config_audit
 WHERE ($1::BIGINT IS NULL OR chat_id = $1)
+  AND ($3::BOOLEAN OR chat_id = ANY($4::BIGINT[]))
 ORDER BY created_at DESC
 LIMIT $2;
 

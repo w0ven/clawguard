@@ -85,6 +85,15 @@ func TestGroupExemptAPIIntegration(t *testing.T) {
 		return rec
 	}
 	base := "/api/admin/groups/-100/exempt-users"
+	if _, err = fx.pool.Exec(ctx, `INSERT INTO user_trust(chat_id,user_id,is_bot) VALUES(-100,987654,true)`); err != nil {
+		t.Fatal(err)
+	}
+	if rec := request("PUT", base+"/987654", `{"note":"bot"}`, scoped, true); rec.Code != 400 {
+		t.Fatalf("known bot accepted: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := request("PUT", base+"/1087968824", `{}`, scoped, true); rec.Code != 400 {
+		t.Fatalf("virtual sender accepted: %d %s", rec.Code, rec.Body.String())
+	}
 	id := "12345678901234567"
 	path := base + "/" + id
 	for _, m := range []string{"GET", "PUT", "DELETE"} {

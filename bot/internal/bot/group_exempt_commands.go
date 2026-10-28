@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -52,36 +53,39 @@ func parseExemptCommand(msg *tele.Message, remove bool) (int64, *time.Time, stri
 		return id, nil, "", nil
 	}
 	var until *time.Time
-	if len(args) > 0 {
-		token := args[0]
-		last := token[len(token)-1]
-		if last == 'm' || last == 'h' || last == 'd' || last == 'w' {
-			n, err := strconv.ParseInt(token[:len(token)-1], 10, 64)
-			if err == nil {
-				var unit time.Duration
-				switch last {
-				case 'm':
-					unit = time.Minute
-				case 'h':
-					unit = time.Hour
-				case 'd':
-					unit = 24 * time.Hour
-				case 'w':
-					unit = 7 * 24 * time.Hour
-				}
-				if n <= 0 || n > int64((365*24*time.Hour)/unit) {
-					return 0, nil, "", errors.New("时长须在 1 分钟至 365 天内")
-				}
-				v := time.Now().Add(time.Duration(n) * unit)
-				until = &v
-				args = args[1:]
-			} else if token[0] >= '0' && token[0] <= '9' {
-				return 0, nil, "", errors.New("时长无效")
+	durationLike := regexp.MustCompile(`^[+-]?[0-9].*$`)
+	parseDuration := func(token string) (*time.Time, error) {
+		t := strings.ToLower(token)
+		if len(t) < 2 {
+			return nil, errors.New("时长无效")
+		}
+		unit := map[byte]time.Duration{'m': time.Minute, 'h': time.Hour, 'd': 24 * time.Hour, 'w': 7 * 24 * time.Hour}[t[len(t)-1]]
+		n, err := strconv.ParseInt(t[:len(t)-1], 10, 64)
+		if err != nil || unit == 0 || n <= 0 || n > int64((365*24*time.Hour)/unit) {
+			return nil, errors.New("时长无效，使用 1m/1h/1d/1w，最多 365 天")
+		}
+		v := time.Now().Add(time.Duration(n) * unit)
+		return &v, nil
+	}
+	if len(args) > 0 && args[0] != "--" && args[0] != "--note" && durationLike.MatchString(args[0]) && strings.IndexFunc(args[0], func(r rune) bool { return (r < '0' || r > '9') }) >= 0 {
+		var e error
+		until, e = parseDuration(args[0])
+		if e != nil {
+			return 0, nil, "", e
+		}
+		args = args[1:]
+	}
+	explicitNote := len(args) > 0 && (args[0] == "--" || args[0] == "--note")
+	if explicitNote {
+		args = args[1:]
+	} else {
+		for _, token := range args {
+			if token == "--" || token == "--note" || (durationLike.MatchString(token) && strings.IndexFunc(token, func(r rune) bool { return r < '0' || r > '9' }) >= 0) {
+				return 0, nil, "", errors.New("时长必须位于备注之前；歧义备注请用 --note")
 			}
-		} else if token[0] >= '0' && token[0] <= '9' {
-			return 0, nil, "", errors.New("时长无效，使用 m/h/d/w")
 		}
 	}
+
 	note := strings.Join(args, " ")
 	if len(note) > 500 {
 		return 0, nil, "", errors.New("备注过长")
@@ -144,7 +148,16 @@ func (s *Service) handleGroupExemptCommand(c tele.Context, command string) error
 	}
 	id, until, note, err := parseExemptCommand(msg, command == "unexempt")
 	if err != nil {
-		return c.Send(err.Error() + "；用法：/exempt ID [1d] [备注] 或回复消息 /exempt [1d] [备注]；/unexempt ID 或回复消息")
+		return c.Send(err.Error() + "；用法：/exempt ID [1d] [备注] 或回复消息 /exempt [1d] [备注]；歧义备注用 --note；/unexempt ID 或回复消息")
+	}
+	if command == "exempt" {
+		knownBot, lookupErr := s.ExemptionTargetIsKnownBot(ctx, chat.ID, id)
+		if lookupErr != nil {
+			return c.Send("无法核实用户身份，请重试")
+		}
+		if knownBot {
+			return c.Send("机器人不能加入真人豁免，请使用独立机器人白名单")
+		}
 	}
 	err = s.queries.Transact(ctx, func(q *store.Queries) error {
 		if err := q.LockGroupExemptUser(ctx, chat.ID, id); err != nil {

@@ -19,6 +19,7 @@ const listAuditByChat = `-- name: ListAuditByChat :many
 SELECT id, scope, chat_id, admin_id, action, before, after, diff, created_at
 FROM config_audit
 WHERE ($1::BIGINT IS NULL OR chat_id = $1)
+  AND ($3::BOOLEAN OR chat_id = ANY($4::BIGINT[]))
 ORDER BY created_at DESC
 LIMIT $2
 `
@@ -44,6 +45,8 @@ type InsertAuditEntryParams struct {
 type ListAuditByChatParams struct {
 	ChatID *int64
 	Limit  int32
+	Global bool
+	Scope  []int64
 }
 
 type ListAuditByAdminParams struct {
@@ -69,7 +72,7 @@ func (q *Queries) InsertAuditEntry(ctx context.Context, arg InsertAuditEntryPara
 }
 
 func (q *Queries) ListAuditByChat(ctx context.Context, arg ListAuditByChatParams) ([]ConfigAudit, error) {
-	rows, err := q.db.Query(ctx, listAuditByChat, arg.ChatID, arg.Limit)
+	rows, err := q.db.Query(ctx, listAuditByChat, arg.ChatID, arg.Limit, arg.Global, arg.Scope)
 	if err != nil {
 		return nil, err
 	}

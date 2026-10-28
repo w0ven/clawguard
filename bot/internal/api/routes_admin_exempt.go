@@ -66,6 +66,16 @@ func (s *Server) putGroupExemptUser(c echo.Context) error {
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "用户 ID 必须为正整数"})
 	}
+	if id == 1087968824 || id == 136817688 || id == 777000 {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "虚拟身份不能豁免"})
+	}
+	knownBot, err := s.botService.ExemptionTargetIsKnownBot(c.Request().Context(), chatID, id)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "无法核实用户身份"})
+	}
+	if knownBot {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "机器人不能加入真人豁免，请使用机器人白名单"})
+	}
 	var input struct {
 		Note      string     `json:"note"`
 		ExpiresAt *time.Time `json:"expires_at"`

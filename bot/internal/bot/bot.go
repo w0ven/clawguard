@@ -396,6 +396,18 @@ func (s *Service) ProcessUpdate(update tele.Update) (err error) {
 	}
 	finalizeClaim = true
 
+	// Telebot discards commands addressed to other bots before OnText. They
+	// remain ordinary group content for moderation, but never execute here.
+	if m := update.Message; m != nil && m.Chat != nil && (m.Chat.Type == tele.ChatGroup || m.Chat.Type == tele.ChatSuperGroup) {
+		fields := strings.Fields(m.Text)
+		if len(fields) > 0 && strings.HasPrefix(fields[0], "/") {
+			name, target, ok := strings.Cut(fields[0], "@")
+			if ok && len(name) > 1 && target != "" && s.bot.Me != nil && !strings.EqualFold(target, s.bot.Me.Username) {
+				c := s.bot.NewContext(update)
+				return s.runHandler("foreign_command", c, s.handleIncomingMessage)
+			}
+		}
+	}
 	s.bot.ProcessUpdate(update)
 	return execution.result()
 }
@@ -595,7 +607,22 @@ func (s *Service) preprocessGroupCommand(c tele.Context) (bool, error) {
 	if s.exemptMessage(ctx, msg) {
 		return false, nil
 	}
-	return s.applyDeletedAccountMessageFilter(ctx, msg, policy, state.ActionsPaused)
+	handled, err := s.applyDeletedAccountMessageFilter(ctx, msg, policy, state.ActionsPaused)
+	if err != nil || handled {
+		return handled, err
+	}
+	// Only verified chat administrators get command-content protection.
+	member, memberErr := s.bot.ChatMemberOf(chat, msg.Sender)
+	if memberErr != nil || member == nil || member.User == nil || member.User.ID != msg.Sender.ID {
+		return true, nil
+	}
+	if member.Role == tele.Administrator || member.Role == tele.Creator {
+		return false, nil
+	}
+	if err := s.handleIncomingMessageWithOptions(c, false); err != nil {
+		return true, err
+	}
+	return false, nil
 }
 
 func (s *Service) handleUserJoined(c tele.Context) error {
@@ -2615,6 +2642,7 @@ func (s *Service) handleUnbanCommand(c tele.Context) error {
 			warnings = append(warnings, "用户并未处于本地封禁状态，已跳过本地信任状态解封")
 		} else {
 			s.logger.Warn("reset user trust status on unban failed", zap.Error(err), zap.Int64("user_id", target.UserID))
+			return c.Send("清理本群信任封禁失败，请重试")
 		}
 	}
 

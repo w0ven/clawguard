@@ -107,6 +107,7 @@ export function GroupExemptUsers({ chatId }: { chatId: string }) {
               placeholder="正整数 ID"
             />
           </label>
+          <p className="text-sm text-[var(--text-muted)]">仅限真人成员；已知机器人请使用独立机器人白名单。尚未识别的 ID 可预先添加，但识别为机器人后不会生效。</p>
           <label className="grid gap-1 text-sm">
             备注（可选）
             <Input

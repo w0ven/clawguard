@@ -14,7 +14,7 @@ type GroupExemptUser struct {
 }
 
 func (q *Queries) GroupExemptionStatus(ctx context.Context, chatID, userID int64) (active, banned bool, err error) {
-	err = q.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM group_exempt_users WHERE chat_id=$2 AND user_id=$1 AND (expires_at IS NULL OR expires_at>now())), EXISTS(SELECT 1 FROM user_trust WHERE chat_id=$2 AND user_id=$1 AND status='banned')`, userID, chatID).Scan(&active, &banned)
+	err = q.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM group_exempt_users WHERE chat_id=$2 AND user_id=$1 AND (expires_at IS NULL OR expires_at>now()) AND NOT EXISTS(SELECT 1 FROM user_trust WHERE user_id=$1 AND is_bot)), EXISTS(SELECT 1 FROM user_trust WHERE chat_id=$2 AND user_id=$1 AND status='banned')`, userID, chatID).Scan(&active, &banned)
 	return
 }
 func (q *Queries) LockGroupExemptUser(ctx context.Context, chatID, userID int64) error {
@@ -50,4 +50,12 @@ func (q *Queries) UpsertGroupExemptUser(ctx context.Context, chatID, userID int6
 func (q *Queries) DeleteGroupExemptUser(ctx context.Context, chatID, userID int64) (int64, error) {
 	tag, err := q.db.Exec(ctx, `DELETE FROM group_exempt_users WHERE chat_id=$1 AND user_id=$2`, chatID, userID)
 	return tag.RowsAffected(), err
+}
+
+// KnownBotUser checks observed identities across groups; unknown IDs remain eligible
+// for future joins, but are never exempt once a bot identity is observed.
+func (q *Queries) KnownBotUser(ctx context.Context, userID int64) (bool, error) {
+	var known bool
+	err := q.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM user_trust WHERE user_id=$1 AND is_bot)`, userID).Scan(&known)
+	return known, err
 }

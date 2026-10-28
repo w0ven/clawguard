@@ -222,6 +222,30 @@ func TestGroupExemptionBotPathsIntegration(t *testing.T) {
 	if exempt, _ := s.groupExemption(ctx, chatID, userID); !exempt {
 		t.Fatal("group B action changed group A exemption")
 	}
+	// A stale exemption for a bot must never defeat OtherBotsAction.
+	botID := userID + 50
+	if _, err = q.UpsertGroupExemptUser(ctx, chatID, botID, "mistaken bot", nil); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM group_exempt_users WHERE chat_id=$1 AND user_id=$2`, chatID, botID)
+	}()
+	botPolicy := policy
+	botPolicy.Filter.OtherBotsAction = "ban"
+	s.policySnapshots.Store(chatID, botPolicy)
+	botUser := &tele.User{ID: botID, IsBot: true, FirstName: "fixture bot"}
+	beforeKick = countString(transport.Methods(), "kickChatMember")
+	botUpdate := &tele.ChatMemberUpdate{Chat: msg.Chat, OldChatMember: &tele.ChatMember{User: botUser, Role: tele.Left}, NewChatMember: &tele.ChatMember{User: botUser, Role: tele.Member}}
+	if err = s.handleChatMemberUpdate(b.NewContext(tele.Update{ID: 553, ChatMember: botUpdate})); err != nil {
+		t.Fatal(err)
+	}
+	if countString(transport.Methods(), "kickChatMember") != beforeKick+1 {
+		t.Fatalf("bot exemption bypassed other bot policy: %v", transport.Methods())
+	}
+	if active, _ := s.groupExemption(ctx, chatID, botID); active {
+		t.Fatal("known bot exempted in ID-only background path")
+	}
+	s.policySnapshots.Store(chatID, policy)
 	// Redis fallback jobs also use the task's own group, not a global ID.
 	_, redisClient := newJoinProtectionTestRedis(t)
 	s.redis = redisClient

@@ -222,7 +222,7 @@ func (s *Service) handleIncomingMessageWithOptions(c tele.Context, isEdited bool
 		return nil
 	}
 
-	if msg.SenderChat == nil {
+	if msg.SenderChat == nil && realExemptUser(msg.Sender) {
 		exempt, listedBanned := s.groupExemption(ctx, msg.Chat.ID, msg.Sender.ID)
 		if listedBanned {
 			return s.enforceExistingBannedMessage(ctx, msg, policy)
