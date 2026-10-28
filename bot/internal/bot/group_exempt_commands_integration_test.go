@@ -6,11 +6,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/jackc/pgx/v5"
 	"io"
 	"net/http"
 	"os"
 	"path"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -134,10 +136,23 @@ func TestGroupExemptCommandsIntegration(t *testing.T) {
 	}
 }
 
+type countedExemptPool struct {
+	*pgxpool.Pool
+	exemptionQueries atomic.Int64
+}
+
+func (p *countedExemptPool) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
+	if strings.Contains(sql, "FROM group_exempt_users") && strings.Contains(sql, "EXISTS") {
+		p.exemptionQueries.Add(1)
+	}
+	return p.Pool.QueryRow(ctx, sql, args...)
+}
+
 type reviewCommandTransport struct {
 	groupCommandTransport
-	methods []string
-	bodies  []string
+	methods  []string
+	bodies   []string
+	onLookup func([]byte)
 }
 
 func (r *reviewCommandTransport) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -145,6 +160,9 @@ func (r *reviewCommandTransport) RoundTrip(req *http.Request) (*http.Response, e
 	if req.Body != nil {
 		raw, _ := io.ReadAll(req.Body)
 		r.bodies = append(r.bodies, string(raw))
+		if path.Base(req.URL.Path) == "getChatMember" && r.onLookup != nil {
+			r.onLookup(raw)
+		}
 		req.Body = io.NopCloser(strings.NewReader(string(raw)))
 	}
 	return r.groupCommandTransport.RoundTrip(req)
@@ -173,7 +191,8 @@ func TestReviewCommandDispatchIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := &Service{logger: zap.NewNop(), queries: store.New(pool), bot: client, sender: client, sendLimiter: NewSendLimiter(), joinProtector: newJoinProtector()}
+	counted := &countedExemptPool{Pool: pool}
+	s := &Service{logger: zap.NewNop(), queries: store.New(counted), bot: client, sender: client, sendLimiter: NewSendLimiter(), joinProtector: newJoinProtector()}
 	s.verifyBtn = tele.Btn{Unique: "verify_human"}
 	s.verifyMathBtn = tele.Btn{Unique: "verify_math"}
 	s.verifyRandBtn = tele.Btn{Unique: "verify_random"}
@@ -191,14 +210,40 @@ func TestReviewCommandDispatchIntegration(t *testing.T) {
 	s.chatAdmins.Store(fmt.Sprintf("chat_admin:%d:%d", chatID, 102), chatAdminCacheEntry{IsAdmin: false, ExpireAt: time.Now().Add(time.Hour)})
 	for i, text := range []string{"/exempt blocked", "/exempt@other_bot blocked", "/help blocked"} {
 		before := countString(tr.methods, "deleteMessage")
+		beforeQueries := counted.exemptionQueries.Load()
 		msg := &tele.Message{ID: 500 + i, Text: text, Chat: &tele.Chat{ID: chatID, Type: tele.ChatSuperGroup}, Sender: &tele.User{ID: 102, FirstName: "user"}}
 		if err = s.ProcessUpdate(tele.Update{ID: 500 + i, Message: msg}); err != nil {
 			t.Fatal(err)
+		}
+		if i != 1 && counted.exemptionQueries.Load()-beforeQueries != 2 {
+			t.Fatalf("%s: want one initial and one fresh action query, got %d", text, counted.exemptionQueries.Load()-beforeQueries)
 		}
 		if countString(tr.methods, "deleteMessage") != before+1 {
 			t.Fatalf("%q bypassed filter: %v", text, tr.methods)
 		}
 	}
+	tr.onLookup = func(raw []byte) {
+		if strings.Contains(string(raw), `"user_id":"104"`) || strings.Contains(string(raw), `"user_id":104`) {
+			_, e := pool.Exec(ctx, `INSERT INTO group_exempt_users(chat_id,user_id,note) VALUES($1,104,'added while checking') ON CONFLICT (chat_id,user_id) DO UPDATE SET expires_at=NULL`, chatID)
+			if e != nil {
+				t.Error(e)
+			}
+		}
+	}
+	s.chatAdmins.Store(fmt.Sprintf("chat_admin:%d:%d", chatID, 104), chatAdminCacheEntry{IsAdmin: false, ExpireAt: time.Now().Add(time.Hour)})
+	freshBefore := countString(tr.methods, "deleteMessage")
+	fresh := &tele.Message{ID: 509, Text: "/exempt blocked", Chat: &tele.Chat{ID: chatID, Type: tele.ChatSuperGroup}, Sender: &tele.User{ID: 104, FirstName: "new"}}
+	if err = s.ProcessUpdate(tele.Update{ID: 509, Message: fresh}); err != nil {
+		t.Fatal(err)
+	}
+	if countString(tr.methods, "deleteMessage") != freshBefore {
+		t.Fatal("new exemption did not stop pending punishment")
+	}
+	var added bool
+	if err = pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM group_exempt_users WHERE chat_id=$1 AND user_id=104)`, chatID).Scan(&added); err != nil || !added {
+		t.Fatalf("fixture did not add exemption: %v %v", added, err)
+	}
+	tr.onLookup = nil
 	before := countString(tr.methods, "deleteMessage")
 	m := &tele.Message{ID: 505, Text: "/exempt 123 --note blocked", Chat: &tele.Chat{ID: chatID, Type: tele.ChatSuperGroup}, Sender: &tele.User{ID: 101, FirstName: "admin"}}
 	if err = s.ProcessUpdate(tele.Update{ID: 505, Message: m}); err != nil {
@@ -236,6 +281,77 @@ func TestReviewCommandDispatchIntegration(t *testing.T) {
 	}
 	if countString(tr.methods, "deleteMessage") != before+1 {
 		t.Fatalf("admin lookup failure bypassed ordinary filter: %v", tr.methods)
+	}
+	if _, err = pool.Exec(ctx, `DELETE FROM group_exempt_users WHERE chat_id=$1`, chatID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = pool.Exec(ctx, `INSERT INTO group_exempt_users(chat_id,user_id) SELECT $1,i FROM generate_series(9000,9020) i`, chatID); err != nil {
+		t.Fatal(err)
+	}
+	beforeBodies := len(tr.bodies)
+	m.ID = 510
+	m.Text = "/exemptlist 2"
+	if err = s.ProcessUpdate(tele.Update{ID: 510, Message: m}); err != nil {
+		t.Fatal(err)
+	}
+	pageBody := strings.Join(tr.bodies[beforeBodies:], "\n")
+	if !strings.Contains(pageBody, "9020") || strings.Contains(pageBody, "9000") {
+		t.Fatalf("command page wrong: %s", pageBody)
+	}
+	_, err = pool.Exec(ctx, `INSERT INTO banned_users(user_id,source,reason) VALUES(600,'manual','legacy global'); INSERT INTO group_ban_records(chat_id,user_id,source,reason) VALUES(-999,600,'manual','other group')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM group_ban_records WHERE user_id=600`)
+		_, _ = pool.Exec(context.Background(), `DELETE FROM banned_users WHERE user_id=600`)
+		_, _ = pool.Exec(context.Background(), `DELETE FROM user_trust WHERE chat_id=$1 AND user_id=600`, chatID)
+	}()
+	// Telegram identity lookup failure must not dispatch either management command.
+	blockedBefore := countString(tr.methods, "kickChatMember") + countString(tr.methods, "banChatMember")
+	bad.ID = 511
+	bad.Text = "/spam 600"
+	if err = s.ProcessUpdate(tele.Update{ID: 511, Message: bad}); err != nil {
+		t.Fatal(err)
+	}
+	if countString(tr.methods, "kickChatMember")+countString(tr.methods, "banChatMember") != blockedBefore {
+		t.Fatal("unknown admin executed spam")
+	}
+	m.ID = 512
+	m.Text = "/spam 600"
+	if err = s.ProcessUpdate(tele.Update{ID: 512, Message: m}); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	var reason string
+	if err = pool.QueryRow(ctx, `SELECT count(*) FROM group_ban_records WHERE chat_id=$1 AND user_id=600`, chatID).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("spam record %d %v bodies=%v", n, err, tr.bodies)
+	}
+	if err = pool.QueryRow(ctx, `SELECT reason FROM banned_users WHERE user_id=600`).Scan(&reason); err != nil || reason != "legacy global" {
+		t.Fatalf("legacy overwritten %q %v", reason, err)
+	}
+	bad.ID = 513
+	bad.Text = "/unban 600"
+	unbanBefore := countString(tr.methods, "unbanChatMember")
+	if err = s.ProcessUpdate(tele.Update{ID: 513, Message: bad}); err != nil {
+		t.Fatal(err)
+	}
+	if countString(tr.methods, "unbanChatMember") != unbanBefore {
+		t.Fatal("unknown admin executed unban")
+	}
+	m.ID = 514
+	m.Text = "/unban 600"
+	if err = s.ProcessUpdate(tele.Update{ID: 514, Message: m}); err != nil {
+		t.Fatal(err)
+	}
+	if err = pool.QueryRow(ctx, `SELECT count(*) FROM group_ban_records WHERE chat_id=$1 AND user_id=600`, chatID).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("unban record %d %v", n, err)
+	}
+	if err = pool.QueryRow(ctx, `SELECT count(*) FROM group_ban_records WHERE chat_id=-999 AND user_id=600`).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("other group record %d %v", n, err)
+	}
+	if err = pool.QueryRow(ctx, `SELECT reason FROM banned_users WHERE user_id=600`).Scan(&reason); err != nil || reason != "legacy global" {
+		t.Fatalf("legacy lost %q %v", reason, err)
 	}
 	_, _ = pool.Exec(ctx, `DELETE FROM group_exempt_users WHERE chat_id=$1`, chatID)
 }

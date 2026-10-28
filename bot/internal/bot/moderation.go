@@ -2,6 +2,7 @@ package bot
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -223,7 +224,12 @@ func (s *Service) handleIncomingMessageWithOptions(c tele.Context, isEdited bool
 	}
 
 	if msg.SenderChat == nil && realExemptUser(msg.Sender) {
-		exempt, listedBanned := s.groupExemption(ctx, msg.Chat.ID, msg.Sender.ID)
+		cached, ok := c.Get(commandNonExemptKey).(commandNonExempt)
+		c.Set(commandNonExemptKey, nil)
+		exempt, listedBanned := false, false
+		if !ok || cached.chatID != msg.Chat.ID || cached.userID != msg.Sender.ID {
+			exempt, listedBanned = s.groupExemption(ctx, msg.Chat.ID, msg.Sender.ID)
+		}
 		if listedBanned {
 			return s.enforceExistingBannedMessage(ctx, msg, policy)
 		}
@@ -2568,7 +2574,7 @@ func (s *Service) applyAIAction(ctx context.Context, msg *tele.Message, policy c
 		}
 		actionRollback, actionOK := s.acquireUserActionLock(msg.Chat.ID, msg.Sender.ID)
 		if actionOK {
-			if err := s.muteUser(msg.Chat, msg.Sender, 600); err != nil {
+			if err := s.muteUser(msg.Chat, msg.Sender, 600, decisionIDs...); err != nil {
 				actionRollback()
 				auditOutcome = "failed"
 				auditError = redact.ErrorString(err)
@@ -2705,7 +2711,7 @@ func (s *Service) applyAIAction(ctx context.Context, msg *tele.Message, policy c
 		}
 		if updated.Status == "trusted" {
 			s.restoreTrustedUserPermissions(updated, "ai_status_update")
-		} else if isUngraduatedTrustStatus(updated.Status) {
+		} else if action != "mute" && isUngraduatedTrustStatus(updated.Status) {
 			s.applyUngraduatedPermissionRestriction(msg.Chat, msg.Sender, policy, updated, "ai_status_update")
 		}
 	}
@@ -3419,7 +3425,7 @@ func (s *Service) deleteMessage(msg *tele.Message) error {
 	return nil
 }
 
-func (s *Service) muteUser(chat *tele.Chat, user *tele.User, seconds int) error {
+func (s *Service) muteUser(chat *tele.Chat, user *tele.User, seconds int, decisionIDs ...int64) error {
 	if chat == nil || user == nil {
 		return nil
 	}
@@ -3437,8 +3443,36 @@ func (s *Service) muteUser(chat *tele.Chat, user *tele.User, seconds int) error 
 		Rights:          tele.NoRights(),
 		RestrictedUntil: time.Now().Add(time.Duration(seconds) * time.Second).Unix(),
 	}
+	var token string
+	var decisionID int64
+	if len(decisionIDs) > 0 {
+		decisionID = decisionIDs[0]
+	}
+	if s.queries != nil {
+		if decisionID > 0 {
+			raw := make([]byte, 16)
+			if _, err := rand.Read(raw); err != nil {
+				return err
+			}
+			token = hex.EncodeToString(raw)
+			if err := s.queries.ReserveAIMute(context.Background(), chat.ID, user.ID, decisionID, member.RestrictedUntil, token); err != nil {
+				return fmt.Errorf("record AI mute ownership: %w", err)
+			}
+		} else if err := s.queries.InvalidateAIMute(context.Background(), chat.ID, user.ID); err != nil {
+			return fmt.Errorf("invalidate AI mute ownership: %w", err)
+		}
+	}
 	if err := s.bot.Restrict(chat, member); err != nil {
 		return normalizeTelegramActionError("restrict", err)
+	}
+	if token != "" {
+		ok, err := s.queries.ActivateAIMute(context.Background(), chat.ID, user.ID, token)
+		if err != nil {
+			return fmt.Errorf("activate AI mute ownership: %w", err)
+		}
+		if !ok {
+			return fmt.Errorf("AI mute ownership changed after action")
+		}
 	}
 	return nil
 }

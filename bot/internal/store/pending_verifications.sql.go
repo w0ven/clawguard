@@ -18,7 +18,8 @@ INSERT INTO pending_verifications (
     next_attempt_at
 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)
 ON CONFLICT (chat_id, user_id) DO UPDATE
-SET username = EXCLUDED.username,
+SET id = EXCLUDED.id,
+    username = EXCLUDED.username,
     first_name = EXCLUDED.first_name,
     method = EXCLUDED.method,
     payload = EXCLUDED.payload,

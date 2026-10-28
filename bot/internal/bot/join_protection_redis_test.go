@@ -3,6 +3,7 @@ package bot
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -138,7 +139,7 @@ func TestRedisDeferredCleanupQueueLifecycle(t *testing.T) {
 	if !ok || loaded.ChatID != task.ChatID || loaded.UserID != task.UserID || loaded.TemporaryBanSeconds != 3600 || loaded.Action != task.Action || loaded.Rule != task.Rule || loaded.MembershipGeneration != task.MembershipGeneration || !loaded.ActionUntil.Equal(task.ActionUntil) {
 		t.Fatalf("loaded = %+v", loaded)
 	}
-	if loaded.Member != "400:500:u123" {
+	if !strings.HasPrefix(loaded.Member, "400:500:") {
 		t.Fatalf("member = %q", loaded.Member)
 	}
 	if ttl := server.TTL(joinProtectionCleanupTaskKey(loaded.Member)); ttl != 0 {
@@ -194,10 +195,20 @@ func TestCancelJoinProtectionCleanupRemovesEveryMembershipGeneration(t *testing.
 	if err := client.Set(ctx, membershipSessionKey(410, 510), "u2", time.Hour).Err(); err != nil {
 		t.Fatal(err)
 	}
+	members, err := client.SMembers(ctx, joinProtectionCleanupGroupKey(410)).Result()
+	if err != nil || len(members) != 3 {
+		t.Fatalf("members=%v err=%v", members, err)
+	}
 	if err := cancelJoinProtectionCleanupRedis(ctx, client, 410, 510); err != nil {
 		t.Fatal(err)
 	}
-	for _, member := range []string{"410:510:u1", "410:510:u2"} {
+	for _, member := range members {
+		if strings.HasPrefix(member, "410:511:") {
+			if !server.Exists(joinProtectionCleanupTaskKey(member)) {
+				t.Fatal("another user's cleanup task was removed")
+			}
+			continue
+		}
 		if server.Exists(joinProtectionCleanupTaskKey(member)) {
 			t.Fatalf("cleanup task %q still exists", member)
 		}
@@ -207,9 +218,6 @@ func TestCancelJoinProtectionCleanupRemovesEveryMembershipGeneration(t *testing.
 	}
 	if server.Exists(membershipSessionKey(410, 510)) {
 		t.Fatal("membership session still exists")
-	}
-	if !server.Exists(joinProtectionCleanupTaskKey("410:511:other")) {
-		t.Fatal("another user's cleanup task was removed")
 	}
 }
 

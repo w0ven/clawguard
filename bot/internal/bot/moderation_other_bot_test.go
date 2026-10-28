@@ -36,6 +36,9 @@ func newOtherBotMockDB(policy config.GuardPolicy) *otherBotMockDB {
 }
 
 func (db *otherBotMockDB) Exec(_ context.Context, query string, args ...any) (pgconn.CommandTag, error) {
+	if strings.Contains(query, "UPDATE ai_mute_ownership SET state='conflict'") {
+		return pgconn.NewCommandTag("UPDATE 0"), nil
+	}
 	if strings.Contains(query, "banned_reason=banned_reason - 'decision_id'") {
 		return pgconn.NewCommandTag("UPDATE 0"), nil
 	}

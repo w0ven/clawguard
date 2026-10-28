@@ -138,6 +138,7 @@ function AIReviewPageInner() {
     try {
       const res = await apiFetch<{
         unban_performed?: boolean;
+        unmute_performed?: boolean;
         trust_score_changed?: number;
         side_effect_warnings?: string[];
       }>(`/api/admin/ai-decisions/${item.id}`, {
@@ -153,6 +154,8 @@ function AIReviewPageInner() {
       } else if (override === "false_positive") {
         if (res.unban_performed) {
           pushToast("已解封用户", "success");
+        } else if (res.unmute_performed) {
+          pushToast("已解除禁言", "success");
         } else {
           pushToast("已标记为误封", "success");
         }
@@ -171,11 +174,12 @@ function AIReviewPageInner() {
   async function batchOverride(override: string) {
     const entries = Object.values(selected);
     const results = await Promise.allSettled(entries.map((item) => applyDecision(item, override, { reload: false, toast: false })));
-    const success = results.filter((item) => item.status === "fulfilled").length;
-    const failed = results.length - success;
+    const success = results.filter((item) => item.status === "fulfilled" && !item.value?.side_effect_warnings?.length).length;
+    const partial = results.filter((item) => item.status === "fulfilled" && !!item.value?.side_effect_warnings?.length).length;
+    const failed = results.filter((item) => item.status === "rejected").length;
     if (results.length > 0) await load();
     const warnings = results.flatMap((result) => result.status === "fulfilled" ? result.value?.side_effect_warnings ?? [] : []);
-    pushToast(`批量操作完成：成功 ${success} 条，失败 ${failed} 条${warnings.length ? `；${warnings.join("；")}` : ""}`, failed === 0 && !warnings.length ? "success" : "error");
+    pushToast(`批量操作完成：成功 ${success} 条，部分失败 ${partial} 条，失败 ${failed} 条${warnings.length ? `；${warnings.join("；")}` : ""}`, failed === 0 && !warnings.length ? "success" : "error");
   }
 
   return (

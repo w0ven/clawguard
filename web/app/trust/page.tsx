@@ -208,7 +208,7 @@ function TrustPageInner() {
 
   async function updateStatus(item: UserTrust, nextStatus: string) {
     try {
-      await apiFetch(`/api/admin/user-trust/${item.chat_id}/${item.user_id}`, {
+      const result = await apiFetch<{telegram_action_error?: string; telegram_permission_error?: string}>(`/api/admin/user-trust/${item.chat_id}/${item.user_id}`, {
         method: "PUT",
         body: JSON.stringify({
           status: nextStatus,
@@ -217,7 +217,12 @@ function TrustPageInner() {
         }),
       });
       await load(filters);
-      pushToast("已更新", "success");
+      const syncError = result.telegram_action_error || result.telegram_permission_error;
+      if (syncError) {
+        pushToast(`Telegram 同步失败，请重试：${syncError}`, "error");
+      } else {
+        pushToast("已更新", "success");
+      }
     } catch (e) {
       pushToast(e instanceof Error ? e.message : "更新失败", "error");
     }

@@ -22,16 +22,24 @@ import (
 )
 
 type reviewRecordingTransport struct {
-	mu        sync.Mutex
-	methods   []string
-	failUnban bool
+	mu           sync.Mutex
+	methods      []string
+	failUnban    bool
+	blockStarted chan struct{}
+	blockRelease chan struct{}
 }
 
 func (x *reviewRecordingTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	x.mu.Lock()
 	x.methods = append(x.methods, r.URL.Path)
-	fail := x.failUnban && strings.HasSuffix(r.URL.Path, "/unbanChatMember")
+	isUnban := strings.HasSuffix(r.URL.Path, "/unbanChatMember")
+	fail := x.failUnban && isUnban
+	started, release := x.blockStarted, x.blockRelease
 	x.mu.Unlock()
+	if isUnban && started != nil {
+		close(started)
+		<-release
+	}
 	if fail {
 		return nil, fmt.Errorf("simulated telegram failure")
 	}
@@ -83,7 +91,23 @@ func TestReviewUnbanAndScopedAudit(t *testing.T) {
 		server.ServeHTTP(rec, req)
 		return rec
 	}
-	t.Run("web_unban_keeps_banned_and_next_message_rebans", func(t *testing.T) {
+	t.Run("scoped_dashboard_counts", func(t *testing.T) {
+		_, e := fx.pool.Exec(ctx, `INSERT INTO groups(chat_id,title,type) VALUES(-300,'allowed','supergroup'),(-200,'denied','supergroup');
+        INSERT INTO pending_verifications(chat_id,user_id,method,expires_at) VALUES(-100,100,'button',now()+interval '1 day'),(-300,101,'button',now()+interval '1 day'),(-300,102,'button',now()-interval '1 day'),(-200,103,'button',now()+interval '1 day');
+        INSERT INTO violations(chat_id,user_id,rule,action,created_at) VALUES(-100,100,'test','warn',date_trunc('day',now())),(-300,101,'test','warn',now()),(-300,102,'test','warn',date_trunc('day',now())-interval '1 microsecond'),(-200,103,'test','warn',now());`)
+		if e != nil {
+			t.Fatal(e)
+		}
+		rec := request("GET", "/api/admin/stats", "", scoped)
+		if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"groups_count":2`) || !strings.Contains(rec.Body.String(), `"active_verifications":2`) || !strings.Contains(rec.Body.String(), `"today_violations":2`) {
+			t.Fatalf("scoped stats %d %s", rec.Code, rec.Body)
+		}
+		stats, e := fx.queries.GetScopedAdminStats(ctx, nil)
+		if e != nil || stats.GroupsCount != 0 || stats.TodayViolations != 0 || stats.ActiveVerifications != 0 {
+			t.Fatalf("empty scope %+v %v", stats, e)
+		}
+	})
+	t.Run("web_unban_clears_group_ban_and_does_not_reban", func(t *testing.T) {
 		rec := request("POST", "/api/admin/unban?chat_id=-100&user_id=555", "", owner)
 		if rec.Code != 204 {
 			t.Fatalf("unban=%d %s", rec.Code, rec.Body.String())
@@ -111,6 +135,34 @@ func TestReviewUnbanAndScopedAudit(t *testing.T) {
 			t.Fatalf("unbanned user was rebanned: calls=%v", methods)
 		}
 		t.Logf("unban HTTP=%d, trust=%s, next message calls=%v", rec.Code, trust.Status, methods)
+	})
+	t.Run("group_bans_preserve_legacy_and_other_group", func(t *testing.T) {
+		_, e := fx.pool.Exec(ctx, `INSERT INTO banned_users(user_id,source,reason) VALUES(600,'manual','legacy global'); INSERT INTO group_ban_records(chat_id,user_id,source,reason) VALUES(-300,600,'manual','group B')`)
+		if e != nil {
+			t.Fatal(e)
+		}
+		rec := request("POST", "/api/admin/ban?chat_id=-100&user_id=600", "", scoped)
+		if rec.Code != 204 {
+			t.Fatalf("group ban %d %s", rec.Code, rec.Body)
+		}
+		var legacy string
+		var count int
+		if e = fx.pool.QueryRow(ctx, `SELECT reason FROM banned_users WHERE user_id=600`).Scan(&legacy); e != nil || legacy != "legacy global" {
+			t.Fatalf("legacy overwritten: %q %v", legacy, e)
+		}
+		if e = fx.pool.QueryRow(ctx, `SELECT count(*) FROM group_ban_records WHERE user_id=600`).Scan(&count); e != nil || count != 2 {
+			t.Fatalf("group bans count %d %v", count, e)
+		}
+		rec = request("POST", "/api/admin/unban?chat_id=-100&user_id=600", "", scoped)
+		if rec.Code != 204 {
+			t.Fatalf("group unban %d %s", rec.Code, rec.Body)
+		}
+		if e = fx.pool.QueryRow(ctx, `SELECT count(*) FROM group_ban_records WHERE user_id=600 AND chat_id=-300`).Scan(&count); e != nil || count != 1 {
+			t.Fatalf("other group lost %d %v", count, e)
+		}
+		if e = fx.pool.QueryRow(ctx, `SELECT reason FROM banned_users WHERE user_id=600`).Scan(&legacy); e != nil || legacy != "legacy global" {
+			t.Fatalf("legacy deleted: %q %v", legacy, e)
+		}
 	})
 	t.Run("ai_review_ownership_retry_and_isolation", func(t *testing.T) {
 		makeDecision := func(user int64, owned bool) int64 {
@@ -160,7 +212,13 @@ func TestReviewUnbanAndScopedAudit(t *testing.T) {
 		if _, err = fx.pool.Exec(ctx, `DROP TRIGGER fail_review ON ai_false_positive_reviews; DROP FUNCTION fail_review_insert()`); err != nil {
 			t.Fatal(err)
 		}
+		callsBeforeRetry := len(transport.calls())
 		rec = call(id)
+		for _, method := range transport.calls()[callsBeforeRetry:] {
+			if strings.HasSuffix(method, "/unbanChatMember") {
+				t.Fatal("resend after Telegram succeeded and settlement failed")
+			}
+		}
 		if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"unban_performed":true`) {
 			t.Fatalf("retry=%d %s", rec.Code, rec.Body)
 		}
@@ -178,6 +236,161 @@ func TestReviewUnbanAndScopedAudit(t *testing.T) {
 		trust, e = fx.queries.GetUserTrust(ctx, -100, 777)
 		if e != nil || trust.Score != score {
 			t.Fatalf("duplicate changed score: %v %v", trust.Score, e)
+		}
+		for _, priorOverride := range []string{`"confirm"`, `null`} {
+			setRec := request("PUT", fmt.Sprintf("/api/admin/ai-decisions/%d", id), `{"admin_override":`+priorOverride+`}`, owner)
+			if setRec.Code != 200 {
+				t.Fatalf("set override %s: %d %s", priorOverride, setRec.Code, setRec.Body)
+			}
+			setDecision, setErr := fx.queries.GetAIDecisionByID(ctx, id)
+			if setErr != nil || (priorOverride == `null` && setDecision.AdminOverride != nil) || (priorOverride == `"confirm"` && (setDecision.AdminOverride == nil || *setDecision.AdminOverride != "confirm")) {
+				t.Fatalf("initial override %s not persisted: %v %v", priorOverride, setDecision.AdminOverride, setErr)
+			}
+			priorTrust, err := fx.queries.GetUserTrust(ctx, -100, 777)
+			if err != nil {
+				t.Fatal(err)
+			}
+			callsBefore := len(transport.calls())
+			rec = call(id)
+			if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"admin_override":"false_positive"`) || !strings.Contains(rec.Body.String(), `"unban_performed":false`) || !strings.Contains(rec.Body.String(), "后续封禁不会自动解除") {
+				t.Fatalf("completed %s -> false_positive: %d %s", priorOverride, rec.Code, rec.Body)
+			}
+			current, err := fx.queries.GetAIDecisionByID(ctx, id)
+			if err != nil || current.AdminOverride == nil || *current.AdminOverride != "false_positive" {
+				t.Fatalf("override not saved: %+v %v", current.AdminOverride, err)
+			}
+			afterTrust, err := fx.queries.GetUserTrust(ctx, -100, 777)
+			if err != nil || priorTrust.Score != afterTrust.Score {
+				t.Fatalf("repeat review changed score: %v -> %v %v", priorTrust.Score, afterTrust.Score, err)
+			}
+			for _, method := range transport.calls()[callsBefore:] {
+				if strings.HasSuffix(method, "/unbanChatMember") {
+					t.Fatal("completed review resent unban")
+				}
+			}
+		}
+		manualResult := request("POST", "/api/admin/ban?chat_id=-100&user_id=777", "", owner)
+		if manualResult.Code != 204 {
+			t.Fatalf("later manual ban=%d %s", manualResult.Code, manualResult.Body)
+		}
+		setRec := request("PUT", fmt.Sprintf("/api/admin/ai-decisions/%d", id), `{"admin_override":"confirm"}`, owner)
+		if setRec.Code != 200 {
+			t.Fatalf("confirm after manual ban: %d %s", setRec.Code, setRec.Body)
+		}
+		priorTrust, err := fx.queries.GetUserTrust(ctx, -100, 777)
+		if err != nil {
+			t.Fatal(err)
+		}
+		callsBefore := len(transport.calls())
+		rec = call(id)
+		if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"admin_override":"false_positive"`) || !strings.Contains(rec.Body.String(), `"unban_performed":false`) || !strings.Contains(rec.Body.String(), "后续封禁不会自动解除") {
+			t.Fatalf("manual ban then completed review: %d %s", rec.Code, rec.Body)
+		}
+		for _, method := range transport.calls()[callsBefore:] {
+			if strings.HasSuffix(method, "/unbanChatMember") {
+				t.Fatal("completed review removed later manual ban")
+			}
+		}
+		afterTrust, err := fx.queries.GetUserTrust(ctx, -100, 777)
+		if err != nil || priorTrust.Score != afterTrust.Score {
+			t.Fatalf("manual ban review changed score: %v -> %v %v", priorTrust.Score, afterTrust.Score, err)
+		}
+		var manualBanCount int
+		if err = fx.pool.QueryRow(ctx, `SELECT count(*) FROM group_ban_records WHERE chat_id=-100 AND user_id=777 AND source='manual'`).Scan(&manualBanCount); err != nil || manualBanCount != 1 {
+			t.Fatalf("manual ban record changed: %d %v", manualBanCount, err)
+		}
+		stale := makeDecision(784, true)
+		if _, e = fx.pool.Exec(ctx, `INSERT INTO ai_unban_review_claims(decision_id,token,state,lease_until) VALUES($1,'interrupted','claimed',now()-interval '1 second')`, stale); e != nil {
+			t.Fatal(e)
+		}
+		rec = call(stale)
+		if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"unban_performed":true`) {
+			t.Fatalf("expired claim retry: %d %s", rec.Code, rec.Body)
+		}
+		blocked := makeDecision(781, true)
+		started, release := make(chan struct{}), make(chan struct{})
+		transport.mu.Lock()
+		transport.blockStarted, transport.blockRelease = started, release
+		transport.mu.Unlock()
+		result := make(chan *httptest.ResponseRecorder, 1)
+		go func() { result <- call(blocked) }()
+		select {
+		case <-started:
+		case <-time.After(3 * time.Second):
+			t.Fatal("telegram was not reached")
+		}
+		rowCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+		_, e = fx.pool.Exec(rowCtx, `UPDATE user_trust SET notes='concurrent access' WHERE chat_id=-100 AND user_id=781`)
+		cancel()
+		if e != nil {
+			close(release)
+			t.Fatalf("user row remained locked over Telegram: %v", e)
+		}
+		rec = call(blocked)
+		if rec.Code != 409 {
+			close(release)
+			t.Fatalf("concurrent claim =%d %s", rec.Code, rec.Body)
+		}
+		close(release)
+		rec = <-result
+		if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"unban_performed":true`) {
+			t.Fatalf("blocked review=%d %s", rec.Code, rec.Body)
+		}
+		transport.mu.Lock()
+		transport.blockStarted, transport.blockRelease = nil, nil
+		transport.mu.Unlock()
+		conflicting := makeDecision(782, true)
+		started, release = make(chan struct{}), make(chan struct{})
+		transport.mu.Lock()
+		transport.blockStarted, transport.blockRelease = started, release
+		transport.mu.Unlock()
+		result = make(chan *httptest.ResponseRecorder, 1)
+		go func() { result <- call(conflicting) }()
+		select {
+		case <-started:
+		case <-time.After(3 * time.Second):
+			t.Fatal("telegram was not reached")
+		}
+		if e = svc.BanChatUser(ctx, -100, 782); e != nil {
+			close(release)
+			t.Fatal(e)
+		}
+		close(release)
+		rec = <-result
+		if rec.Code != 200 || !strings.Contains(rec.Body.String(), "冲突") || strings.Contains(rec.Body.String(), `"unban_performed":true`) {
+			t.Fatalf("manual ban conflict=%d %s", rec.Code, rec.Body)
+		}
+		assertStatus(-100, 782, "banned")
+		var override string
+		if e = fx.pool.QueryRow(ctx, `SELECT admin_override FROM ai_decisions WHERE id=$1`, conflicting).Scan(&override); e != nil || override != "false_positive" {
+			t.Fatalf("conflict review not saved: %q %v", override, e)
+		}
+		transport.mu.Lock()
+		transport.blockStarted, transport.blockRelease = nil, nil
+		transport.mu.Unlock()
+		beforeConflict := len(transport.calls())
+		rec = call(conflicting)
+		if rec.Code != 200 || !strings.Contains(rec.Body.String(), "冲突") {
+			t.Fatalf("conflict retry=%d %s", rec.Code, rec.Body)
+		}
+		for _, method := range transport.calls()[beforeConflict:] {
+			if strings.HasSuffix(method, "/unbanChatMember") {
+				t.Fatal("conflict retried telegram")
+			}
+		}
+		already := makeDecision(785, true)
+		if _, e = fx.pool.Exec(ctx, `WITH inserted AS (INSERT INTO ai_false_positive_reviews(decision_id) VALUES($1)) UPDATE ai_decisions SET admin_override='false_positive' WHERE id=$1`, already); e != nil {
+			t.Fatal(e)
+		}
+		beforeLegacy := len(transport.calls())
+		rec = call(already)
+		if rec.Code != 200 || !strings.Contains(rec.Body.String(), "无法确认当前封禁归属") {
+			t.Fatalf("legacy idempotency=%d %s", rec.Code, rec.Body)
+		}
+		for _, method := range transport.calls()[beforeLegacy:] {
+			if strings.HasSuffix(method, "/unbanChatMember") {
+				t.Fatal("legacy review dispatched unban")
+			}
 		}
 		legacy := makeDecision(778, false)
 		before := len(transport.calls())
@@ -215,7 +428,7 @@ func TestReviewUnbanAndScopedAudit(t *testing.T) {
 		}
 		assertStatus(-100, 780, "banned")
 	})
-	t.Run("scoped_audit_limit_precedes_scope", func(t *testing.T) {
+	t.Run("scoped_audit_filters_before_limit", func(t *testing.T) {
 		_, e := fx.pool.Exec(ctx, `INSERT INTO config_audit(scope,chat_id,admin_id,action,diff,created_at) VALUES('group',-100,$1,'visible-target','{}',now()-interval '1 minute'),('group',-200,$1,'other-group','{}',now())`, owner.ID)
 		if e != nil {
 			t.Fatal(e)

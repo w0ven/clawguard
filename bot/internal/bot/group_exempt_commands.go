@@ -120,21 +120,16 @@ func (s *Service) handleGroupExemptCommand(c tele.Context, command string) error
 				return c.Send("页码无效")
 			}
 		}
-		items, err := s.queries.ListGroupExemptUsers(ctx, chat.ID)
+		items, total, err := s.queries.ListGroupExemptUsersPage(ctx, chat.ID, "", "all", 20, (page-1)*20)
 		if err != nil {
 			return c.Send("名单加载失败")
 		}
-		start := (page - 1) * 20
-		if start >= len(items) {
+		if len(items) == 0 {
 			return c.Send("本页无豁免用户")
-		}
-		end := start + 20
-		if end > len(items) {
-			end = len(items)
 		}
 		var out strings.Builder
 		fmt.Fprintf(&out, "本群豁免（第 %d 页）：\n", page)
-		for _, u := range items[start:end] {
+		for _, u := range items {
 			expiry := "永久"
 			if u.ExpiresAt != nil {
 				expiry = u.ExpiresAt.UTC().Format(time.RFC3339)
@@ -143,6 +138,9 @@ func (s *Service) handleGroupExemptCommand(c tele.Context, command string) error
 				}
 			}
 			fmt.Fprintf(&out, "%d · %s\n", u.UserID, expiry)
+		}
+		if int64(page*20) < total {
+			fmt.Fprintf(&out, "下一页：/exemptlist %d", page+1)
 		}
 		return c.Send(out.String())
 	}
