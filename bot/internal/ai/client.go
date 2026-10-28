@@ -6,67 +6,11 @@ import (
 )
 
 type Message struct {
-	// OptionalContext is trusted, local-only provenance for prompt budgeting.
-	// Zero value is mandatory; neither user text nor provider JSON can set it.
-	OptionalContext string     `json:"-"`
-	Role            string     `json:"role"`
-	Content         any        `json:"content"`
-	Name            string     `json:"name,omitempty"`
-	ToolCallID      string     `json:"tool_call_id,omitempty"`
-	ToolCalls       []ToolCall `json:"tool_calls,omitempty"`
+	Role    string `json:"role"`
+	Content any    `json:"content"`
 }
 
-// ToolDefinition is the provider-neutral read-only tool schema used by the
-// assistant. It deliberately does not expose a service, database, or bot
-// object to the model.
-type ToolDefinition struct {
-	Type     string       `json:"type"`
-	Function ToolFunction `json:"function"`
-}
-
-type ToolFunction struct {
-	Name        string         `json:"name"`
-	Description string         `json:"description"`
-	Parameters  map[string]any `json:"parameters"`
-}
-
-type ToolCall struct {
-	ID       string `json:"id"`
-	Type     string `json:"type"`
-	Function struct {
-		Name      string `json:"name"`
-		Arguments string `json:"arguments"`
-	} `json:"function"`
-}
-
-type ToolChatRequest struct {
-	// PreserveMessages is trusted internal provenance, not provider/model input.
-	// Native SGB has already assembled the complete ordered system/user payload.
-	PreserveMessages bool
-	Model            string
-	SystemPrompt     string
-	Messages         []Message
-	Tools            []ToolDefinition
-	MaxTokens        int
-	Temperature      float64
-	Timeout          time.Duration
-}
-
-type ToolChatResult struct {
-	Model            string
-	Content          string
-	ToolCalls        []ToolCall
-	FinishReason     string
-	LatencyMs        int
-	PromptTokens     int
-	CompletionTokens int
-}
-
-type ToolCallingClient interface {
-	ChatWithTools(context.Context, ToolChatRequest) (*ToolChatResult, error)
-}
-
-// ProviderError preserves only transport metadata needed by the pool router.
+// ProviderError preserves transport metadata for provider HTTP errors.
 // Response bodies are not retained, preventing provider secrets or prompts from
 // leaking into health status and logs.
 type ProviderError struct {
@@ -90,14 +34,13 @@ func (e *ProviderError) Unwrap() error {
 }
 
 type CheckRequest struct {
-	DisableThinking  bool
-	PreserveMessages bool
-	Model            string
-	SystemPrompt     string
-	Messages         []Message
-	MaxTokens        int
-	Temperature      float64
-	Timeout          time.Duration
+	DisableThinking bool
+	Model           string
+	SystemPrompt    string
+	Messages        []Message
+	MaxTokens       int
+	Temperature     float64
+	Timeout         time.Duration
 }
 
 type Verdict struct {
@@ -132,8 +75,4 @@ type LLMClient interface {
 	// Chat returns the raw assistant reply text, bypassing verdict parsing.
 	// Used by the admin "test" button and any free-form diagnostic flow.
 	Chat(ctx context.Context, req CheckRequest) (*ChatRawResult, error)
-}
-
-type EmbeddingClient interface {
-	Embed(ctx context.Context, model, input string, timeout time.Duration) ([]float64, error)
 }

@@ -348,6 +348,8 @@ Webhook 地址是 `PUBLIC_BASE_URL/webhook/<WEBHOOK_SECRET>`，日志里不会�
 
 ## 🚢 发布与升级
 
+> 升级提示：对话助手及其服务已移除，历史 PostgreSQL 表和 `assistant_native_data` 卷不会自动清理。请按需先备份；不要使用 `docker compose down -v` 或删除历史卷，否则数据会丢失。旧助手容器不会由新配置继续管理，升级时需按运维流程处理。
+
 合并到 `main` 后，GitHub Actions 构建：
 
 ```text

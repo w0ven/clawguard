@@ -173,7 +173,7 @@ func (s *Service) handleEditedMessage(c tele.Context) error {
 	return s.handleIncomingMessageWithOptions(c, true)
 }
 
-func (s *Service) handleIncomingMessageWithOptions(c tele.Context, isEdited bool) (resultErr error) {
+func (s *Service) handleIncomingMessageWithOptions(c tele.Context, isEdited bool) error {
 	s.MarkUpdateSeen()
 	msg := c.Message()
 	if msg == nil || msg.Chat == nil || (msg.Sender == nil && msg.SenderChat == nil) || msg.Private() {
@@ -184,25 +184,6 @@ func (s *Service) handleIncomingMessageWithOptions(c tele.Context, isEdited bool
 	if isAnonymousGroupAdminMessage(msg) {
 		return nil
 	}
-	s.setAssistantEligibility(msg, assistantEligibilityUnknown)
-	defer func() {
-		status := assistantEligibilityUnknown
-		if key := assistantMessageKey(msg); key != "" {
-			if value, ok := s.assistantEligibility.LoadAndDelete(key); ok {
-				if parsed, typeOK := value.(assistantEligibility); typeOK {
-					status = parsed
-				}
-			}
-		}
-		if isEdited && status != assistantEligibilityEligible && s.assistant != nil && s.queries != nil && msg.Chat != nil {
-			if invalidateErr := s.queries.InvalidateGroupAssistantSource(context.Background(), msg.Chat.ID, int64(msg.ID)); invalidateErr != nil {
-				s.logger.Warn("invalidate edited assistant source failed", zap.Error(invalidateErr), zap.Int64("chat_id", msg.Chat.ID), zap.Int("message_id", msg.ID))
-				if resultErr == nil {
-					resultErr = invalidateErr
-				}
-			}
-		}
-	}()
 
 	ctx := context.Background()
 	authorized, err := s.IsAuthorizedGroup(ctx, msg.Chat.ID)
@@ -264,15 +245,13 @@ func (s *Service) handleIncomingMessageWithOptions(c tele.Context, isEdited bool
 		return err
 	}
 	if handled {
-		s.setAssistantEligibility(msg, assistantEligibilityBlocked)
 		return nil
 	}
 
-	keywordReplied := s.maybeKeywordReplyWithResult(ctx, msg, policy)
+	s.maybeKeywordReply(ctx, msg, policy)
 
 	content := s.buildReviewableContent(ctx, msg)
 	if content.Skip {
-		s.consumeAssistantEligibility(msg)
 		return nil
 	}
 	if content.Kind != "text" {
@@ -291,7 +270,6 @@ func (s *Service) handleIncomingMessageWithOptions(c tele.Context, isEdited bool
 			if err := s.applyFilterResult(ctx, msg, policy, result, state.ActionsPaused); err != nil {
 				return err
 			}
-			s.setAssistantEligibility(msg, assistantEligibilityBlocked)
 			return nil
 		default:
 			s.logger.Warn("unknown non_text_messages policy, fallback to ai_review", zap.String("action", policy.Filter.NonTextMessages), zap.Int64("chat_id", msg.Chat.ID))
@@ -299,22 +277,10 @@ func (s *Service) handleIncomingMessageWithOptions(c tele.Context, isEdited bool
 	}
 
 	if state.AIPaused {
-		s.consumeAssistantEligibility(msg)
 		return nil
 	}
 
-	if err := s.applyAIModeration(ctx, msg, policy, isAdmin, content, isEdited); err != nil {
-		return err
-	}
-	eligibility := assistantEligibilityUnknown
-	if key := assistantMessageKey(msg); key != "" {
-		if value, ok := s.assistantEligibility.Load(key); ok {
-			if parsed, typeOK := value.(assistantEligibility); typeOK {
-				eligibility = parsed
-			}
-		}
-	}
-	return s.handleApprovedAssistantMessage(ctx, msg, isEdited, eligibility, keywordReplied, isAdmin)
+	return s.applyAIModeration(ctx, msg, policy, isAdmin, content, isEdited)
 }
 
 func isAnonymousGroupAdminMessage(msg *tele.Message) bool {
@@ -427,15 +393,12 @@ func (s *Service) applyAIModeration(ctx context.Context, msg *tele.Message, poli
 	}
 	nonWhitelistedBot := isOtherBot(msg.Sender, s.bot) && !isBotWhitelisted(msg.Sender, policy.Filter.BotWhitelist)
 	if nonWhitelistedBot && (!policy.AI.Enabled || s.aiModerator == nil) {
-		s.setAssistantEligibility(msg, assistantEligibilityBlocked)
 		return nil
 	}
 	if !policy.AI.Enabled || s.aiModerator == nil {
-		s.setAssistantEligibility(msg, assistantEligibilityEligible)
 		return nil
 	}
 	if isAdmin {
-		s.setAssistantEligibility(msg, assistantEligibilityEligible)
 		return nil
 	}
 
@@ -448,11 +411,9 @@ func (s *Service) applyAIModeration(ctx context.Context, msg *tele.Message, poli
 	switch trust.Status {
 	case "trusted":
 		if !nonWhitelistedBot {
-			s.setAssistantEligibility(msg, assistantEligibilityEligible)
 			return nil
 		}
 	case "banned":
-		s.setAssistantEligibility(msg, assistantEligibilityBlocked)
 		paused, stateErr := s.actionsPaused(ctx)
 		if stateErr != nil {
 			s.logger.Warn("system state unavailable for banned-user enforcement, skip moderation", zap.Error(stateErr), zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID))
@@ -545,7 +506,6 @@ func (s *Service) applyAIModeration(ctx context.Context, msg *tele.Message, poli
 		return err
 	}
 	if handled {
-		s.setAssistantEligibility(msg, assistantEligibilityBlocked)
 		return nil
 	}
 
@@ -565,9 +525,6 @@ func (s *Service) applyAIModeration(ctx context.Context, msg *tele.Message, poli
 		IsUngraduated:     trust.Status != "trusted",
 	})
 	if err != nil {
-		if isUngraduatedTrustStatus(trust.Status) {
-			s.setAssistantEligibility(msg, assistantEligibilityBlocked)
-		}
 		s.logger.Warn("ai moderation failed", zap.Error(err), zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID), zap.String("trust_status", trust.Status))
 		recordCtx, recordCancel := context.WithTimeout(context.Background(), 3*time.Second)
 		if recordErr := s.recordAIDecisionError(recordCtx, msg, content.Text, err); recordErr != nil {
@@ -579,16 +536,10 @@ func (s *Service) applyAIModeration(ctx context.Context, msg *tele.Message, poli
 		return s.applyAIModerationErrorFallback(fallbackCtx, msg, policy, trust, err)
 	}
 	if output.Skipped {
-		s.setAssistantEligibility(msg, assistantEligibilityEligible)
 		return s.maybeGraduateUser(ctx, trust, policy.AI)
 	}
 
 	action := s.decideAIAction(policy.AI, output)
-	if action == "none" {
-		s.setAssistantEligibility(msg, assistantEligibilityEligible)
-	} else {
-		s.setAssistantEligibility(msg, assistantEligibilityBlocked)
-	}
 	if output.FlagOnly && action != "none" {
 		action = "flag"
 	}

@@ -49,7 +49,6 @@ const navSections: readonly NavSection[] = [
     label: "群与策略",
     items: [
       { href: "/groups", label: "群管理", icon: Users },
-      { href: "/assistant", label: "群助手", icon: Bot },
       { href: "/authorized-groups", label: "群授权", icon: Waypoints },
     ],
   },
@@ -80,7 +79,7 @@ const navSections: readonly NavSection[] = [
 
 const navItems = navSections.flatMap((section) => section.items);
 const primaryMobileItems = navItems.filter((item) =>
-  ["/dashboard", "/groups", "/assistant", "/violations"].includes(item.href),
+  ["/dashboard", "/groups", "/violations"].includes(item.href),
 );
 
 export function AdminShell({
@@ -100,7 +99,7 @@ export function AdminShell({
   const { confirmNavigation } = useDirtyNavigation();
   const [menuOpen, setMenuOpen] = useState(false);
 
-  const isActive = (href: string) => pathname === href || pathname.startsWith(href + "/") || (href === "/assistant" && /\/groups\/[^/]+\/assistant(?:\/|$)/.test(pathname));
+  const isActive = (href: string) => pathname === href || pathname.startsWith(href + "/");
 
   async function handleLogout() {
     if (!confirmNavigation("当前页面有未保存的修改，确定登出吗？")) return;

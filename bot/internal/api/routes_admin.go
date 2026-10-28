@@ -85,8 +85,6 @@ func (s *Server) registerAdminRoutes() {
 	s.registerAdminLLMRoutes(admin)
 	s.registerAdminAdKillerRoutes(admin)
 	s.registerScheduledMessageRoutes(admin)
-	s.registerGroupAssistantRoutes(admin)
-	s.registerAssistantGlobalRoutes(admin)
 }
 
 func (s *Server) handleListGroups(c echo.Context) error {
