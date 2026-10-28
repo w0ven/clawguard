@@ -41,6 +41,7 @@ import { useToast } from "@/components/providers";
 import { useDirtyGuard, useDirtyNavigation } from "@/components/dirty-guard";
 import { ScheduledMessagesEditor } from "@/components/scheduled-messages-editor";
 import { JoinProtectionEditor } from "@/components/join-protection-editor";
+import { GroupExemptUsers } from "@/components/group-exempt-users";
 import { Save, ChevronDown, ChevronRight } from "lucide-react";
 
 type FieldKind =
@@ -719,6 +720,7 @@ const tabs = [
   { value: "logging", label: "运行日志" },
   { value: "audit", label: "变更审计" },
   { value: "scheduled", label: "定时消息" },
+  { value: "exempt-users", label: "用户豁免" },
 ];
 
 const INDEPENDENT_TABS = new Set(["scheduled", "join-protection"]);
@@ -730,6 +732,7 @@ const configScenes = [
   { value: "automation", label: "群运营", tabs: ["anti-spam", "scheduled"] },
   { value: "intelligence", label: "AI 与反馈", tabs: ["ai", "feedback"] },
   { value: "records", label: "记录与诊断", tabs: ["logging", "audit"] },
+  { value: "exempt-users", label: "用户豁免", tabs: ["exempt-users"] },
 ] as const;
 
 function tabsForScene(scene: string) {
@@ -1424,12 +1427,14 @@ export function GroupConfigEditor({ group, mergedPolicy }: Props) {
           onValueChange={changeScene}
           className="w-full"
         />
-        <Tabs
-          tabs={tabsForScene(activeScene)}
-          value={activeTab}
-          onValueChange={changeTab}
-          className="w-full border-0 bg-transparent p-0"
-        />
+        {activeScene !== "exempt-users" && (
+          <Tabs
+            tabs={tabsForScene(activeScene)}
+            value={activeTab}
+            onValueChange={changeTab}
+            className="w-full border-0 bg-transparent p-0"
+          />
+        )}
       </section>
 
       {activeTab === "basic" && (
@@ -1489,7 +1494,8 @@ export function GroupConfigEditor({ group, mergedPolicy }: Props) {
       {activeTab !== "basic" &&
         activeTab !== "audit" &&
         activeTab !== "scheduled" &&
-        activeTab !== "join-protection" && (
+        activeTab !== "join-protection" &&
+        activeTab !== "exempt-users" && (
           <fieldset disabled={saving} className="min-w-0 border-0 p-0">
             <div className="space-y-3">
             {tabFields.map((field) => {
@@ -1601,6 +1607,8 @@ export function GroupConfigEditor({ group, mergedPolicy }: Props) {
 
       {activeTab === "join-protection" && <JoinProtectionEditor chatId={group.chat_id} />}
 
+      {activeTab === "exempt-users" && <GroupExemptUsers chatId={String(group.chat_id)} />}
+
       {activeTab === "audit" && (
         <Card>
           <CardHeader>
@@ -1663,7 +1671,7 @@ export function GroupConfigEditor({ group, mergedPolicy }: Props) {
       )}
 
       {/* sticky save */}
-      {activeTab !== "scheduled" && activeTab !== "join-protection" && (
+      {activeTab !== "scheduled" && activeTab !== "join-protection" && (activeTab !== "exempt-users" || isDirty) && (
         <div className="glass-savebar miniapp-savebar fixed inset-x-3 bottom-4 z-20 flex items-center justify-between gap-3 rounded-2xl px-3 py-2.5 md:inset-x-auto md:bottom-6 md:left-[calc(17rem+2rem)] md:right-8 md:px-4">
           <div className="min-w-0">
             <p className="truncate text-sm font-semibold">{isDirty ? "群策略草稿" : "群策略已保存"}</p>

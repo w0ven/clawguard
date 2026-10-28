@@ -107,7 +107,12 @@ type Moderator struct {
 	inflightByChat map[int64]int
 }
 
+// ErrModelsExhausted identifies a completed model chain, not a safety skip.
+var ErrModelsExhausted = errors.New("ai model chain exhausted")
+
 type CheckInput struct {
+	BeforeModel func(context.Context) *CheckOutput
+
 	ChatID            int64
 	UserID            int64
 	Text              string
@@ -135,10 +140,8 @@ type CheckOutput struct {
 	Cached        bool    `json:"cached"`
 	FlagOnly      bool    `json:"flag_only"`
 	Skipped       bool    `json:"skipped"`
-	// Action is set by deterministic prefilters such as AdKiller.  Model
-	// output itself never controls this field; it lets profile moderation
-	// preserve the prefilter's configured action when handling a bio hit.
-	Action        string  `json:"action,omitempty"`
+	// Action preserves the configured AdKiller band; models do not set it.
+	Action string `json:"action,omitempty"`
 }
 
 type pendingBatch struct {
@@ -218,7 +221,7 @@ func (m *Moderator) CheckMessage(ctx context.Context, input CheckInput) (CheckOu
 	if input.Policy.SkipMessagesShorterThan > 0 && !input.IsUngraduated && len([]rune(strings.TrimSpace(input.Text))) < input.Policy.SkipMessagesShorterThan {
 		return CheckOutput{Skipped: true}, nil
 	}
-	if !input.SkipCache {
+	if !input.SkipCache && input.BeforeModel == nil {
 		if output, ok, err := m.fromCache(ctx, input); err == nil && ok {
 			output.Cached = true
 			return output, nil
@@ -233,6 +236,17 @@ func (m *Moderator) CheckMessage(ctx context.Context, input CheckInput) (CheckOu
 	}
 	if !reserved {
 		return CheckOutput{Skipped: true}, nil
+	}
+	if input.BeforeModel != nil {
+		if output := input.BeforeModel(ctx); output != nil {
+			return *output, nil
+		}
+		if !input.SkipCache {
+			if output, ok, err := m.fromCache(ctx, input); err == nil && ok {
+				output.Cached = true
+				return output, nil
+			}
+		}
 	}
 
 	key := strconv.FormatInt(input.ChatID, 10) + ":" + strconv.FormatInt(input.UserID, 10) + ":" + normalizeScene(input.Scene)
@@ -256,6 +270,20 @@ func (m *Moderator) CheckMessage(ctx context.Context, input CheckInput) (CheckOu
 
 	select {
 	case <-ctx.Done():
+		// A final model call may finish at the deadline. Allow its already
+		// terminating batch a short bounded interval to report exhaustion;
+		// explicit cancellation is returned immediately.
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			timer := time.NewTimer(100 * time.Millisecond)
+			defer timer.Stop()
+			select {
+			case result := <-waiter:
+				if errors.Is(result.err, ErrModelsExhausted) {
+					return result.output, result.err
+				}
+			case <-timer.C:
+			}
+		}
 		return CheckOutput{}, ctx.Err()
 	case result := <-waiter:
 		return result.output, result.err
@@ -279,6 +307,18 @@ func (m *Moderator) flushBatch(key string, window time.Duration) {
 	batchCtx, cancel := context.WithTimeout(batchCtx, 30*time.Second)
 	defer cancel()
 
+	// Image batches must deliver each result independently: a later failed
+	// visual request must never turn an earlier successful verdict into an
+	// error eligible for an unrelated fallback.
+	for _, input := range batch.inputs {
+		if strings.TrimSpace(input.ImageBase64) != "" || len(input.ImagesBase64) > 0 {
+			for i, single := range batch.inputs {
+				output, err := m.checkSingle(batchCtx, single)
+				batch.waiters[i] <- batchResult{output: output, err: err}
+			}
+			return
+		}
+	}
 	outputs, err := m.checkBatch(batchCtx, batch.inputs)
 	if err != nil {
 		for _, waiter := range batch.waiters {
@@ -293,7 +333,7 @@ func (m *Moderator) flushBatch(key string, window time.Duration) {
 
 func (m *Moderator) checkBatch(ctx context.Context, inputs []CheckInput) ([]CheckOutput, error) {
 	for _, input := range inputs {
-		if strings.TrimSpace(input.ImageBase64) != "" {
+		if strings.TrimSpace(input.ImageBase64) != "" || len(input.ImagesBase64) > 0 {
 			return m.checkIndividually(ctx, inputs)
 		}
 	}
@@ -399,7 +439,7 @@ func (m *Moderator) checkBatch(ctx context.Context, inputs []CheckInput) ([]Chec
 			zap.Int("retry_rounds", aiRetryRoundCount(policy.MaxRetries)),
 			zap.Error(lastErr))
 	}
-	return nil, lastErr
+	return nil, fmt.Errorf("%w: %w", ErrModelsExhausted, lastErr)
 }
 
 func (m *Moderator) checkIndividually(ctx context.Context, inputs []CheckInput) ([]CheckOutput, error) {
@@ -522,7 +562,7 @@ func (m *Moderator) checkSingle(ctx context.Context, input CheckInput) (CheckOut
 			zap.Int("retry_rounds", aiRetryRoundCount(policy.MaxRetries)),
 			zap.Error(lastErr))
 	}
-	return CheckOutput{}, lastErr
+	return CheckOutput{}, fmt.Errorf("%w: %w", ErrModelsExhausted, lastErr)
 }
 
 func effectiveTimeout(policyMs int, providerTimeout time.Duration) time.Duration {

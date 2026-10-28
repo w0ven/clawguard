@@ -117,7 +117,15 @@ func computeAIModerationTimeout(policy config.AIPolicy) time.Duration {
 }
 
 func computeProfileCheckTimeout(policy config.GuardPolicy) time.Duration {
-	return computeAIReviewTimeout(policy.AI)
+	budget := computeAIReviewTimeout(policy.AI)
+	if policy.AI.AdKiller.Enabled {
+		textBudget := time.Duration(policy.AI.AdKiller.TimeoutMs) * time.Millisecond
+		if textBudget <= 0 {
+			textBudget = adkiller.DefaultTimeout
+		}
+		budget += textBudget + time.Second
+	}
+	return budget
 }
 
 func computeAIReviewTimeout(policy config.AIPolicy) time.Duration {
@@ -1177,8 +1185,13 @@ func int64Ptr(v int64) *int64 {
 
 func (s *Service) startAsyncVerificationChecks(chat *tele.Chat, user *tele.User, policy config.GuardPolicy) {
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		parent := s.lifecycleCtx
+		if parent == nil {
+			parent = context.Background()
+		}
+		ctx, cancel := context.WithTimeout(parent, 30*time.Second)
 		defer cancel()
+		ctx = context.WithValue(ctx, adKillerParentContextKey{}, parent)
 
 		totalStartedAt := time.Now()
 		if s.exemptUser(ctx, chat, user) {
@@ -1224,6 +1237,7 @@ func (s *Service) startAsyncVerificationChecks(chat *tele.Chat, user *tele.User,
 
 		profileStartedAt := time.Now()
 		profileCtx, profileCancel := context.WithTimeout(ctx, computeProfileCheckTimeout(policy))
+		profileCtx = context.WithValue(profileCtx, adKillerParentContextKey{}, parent)
 		matched, aiOutput, err := s.checkProfile(profileCtx, chat, user, policy)
 		profileCancel()
 		s.logger.Info("verification step completed",
@@ -1235,15 +1249,26 @@ func (s *Service) startAsyncVerificationChecks(chat *tele.Chat, user *tele.User,
 		if err != nil {
 			s.holdProfileReviewAfterError(chat, user, policy, err, "join")
 		} else if matched != "" {
+			actionCtx := ctx
+			if aiOutput != nil && isAdKillerTextModel(aiOutput.Model) {
+				if ctx.Err() != nil {
+					var actionCancel context.CancelFunc
+					actionCtx, actionCancel = adKillerFallbackContext(ctx, policy.AI.AdKiller)
+					defer actionCancel()
+				}
+				if !s.adKillerAllowed(actionCtx, chat.ID) || s.exemptUser(actionCtx, chat, user) {
+					return
+				}
+			}
 			payload, _ := json.Marshal(map[string]string{"matched": matched})
 			decisionMode := "join_keyword"
 			if strings.EqualFold(strings.TrimSpace(policy.Verify.ProfileCheckMode), "ai") {
 				decisionMode = "join_ai"
 			}
-			if aiOutput != nil && strings.EqualFold(aiOutput.Model, "adkiller") {
-				decisionMode = "join_adkiller"
+			if aiOutput != nil && isAdKillerTextModel(aiOutput.Model) {
+				decisionMode = "join_adkiller_text_fallback"
 			}
-			if err := s.handleAsyncVerificationMatch(ctx, asyncVerificationMatch{
+			if err := s.handleAsyncVerificationMatch(actionCtx, asyncVerificationMatch{
 				chat:         chat,
 				user:         user,
 				policy:       policy,

@@ -22,6 +22,7 @@ import (
 	"golang.org/x/sync/errgroup"
 	tele "gopkg.in/telebot.v3"
 
+	"github.com/openclaw/clawguard/internal/adkiller"
 	"github.com/openclaw/clawguard/internal/ai"
 	"github.com/openclaw/clawguard/internal/config"
 	"github.com/openclaw/clawguard/internal/redact"
@@ -245,8 +246,22 @@ func (s *Service) handleIncomingMessageWithOptions(c tele.Context, isEdited bool
 		return nil
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, computeAIModerationTimeout(policy.AI))
+	budget := computeAIModerationTimeout(policy.AI)
+	if policy.AI.AdKiller.Enabled {
+		// Reserve fallback budget separately, without shortening the model chain.
+		textBudget := time.Duration(policy.AI.AdKiller.TimeoutMs) * time.Millisecond
+		if textBudget <= 0 {
+			textBudget = adkiller.DefaultTimeout
+		}
+		budget += textBudget + time.Second
+		if policy.AI.ImageModerationEnabled && (msg.Photo != nil || msg.Sticker != nil) {
+			budget += adKillerImageTimeout
+		}
+	}
+	parentCtx := ctx
+	ctx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
+	ctx = context.WithValue(ctx, adKillerParentContextKey{}, parentCtx)
 
 	isAdmin := false
 	adminStatus, err := s.isChatAdmin(ctx, msg.Chat.ID, msg.Sender.ID)
@@ -522,15 +537,27 @@ func (s *Service) applyAIModeration(ctx context.Context, msg *tele.Message, poli
 		scene = "video"
 	}
 
-	handled, err := s.applyAdKillerPrefilter(ctx, msg, policy, trust, content, isEdited)
-	if err != nil {
-		return err
-	}
-	if handled {
-		return nil
+	// The OCR hook runs inside CheckMessage only after pause and quota checks.
+	imageAttempted := false
+	var imageEval adKillerEval
+	var beforeModel func(context.Context) *ai.CheckOutput
+	if imageBase64 != "" && (msg.Photo != nil || msg.Sticker != nil) && policy.AI.AdKiller.Enabled && adkiller.ChatEnabled(policy.AI.AdKiller.EnabledChatIDs, msg.Chat.ID) && s.adkiller != nil && s.adkiller.HasAPIKey() {
+		beforeModel = func(callCtx context.Context) *ai.CheckOutput {
+			if !s.adKillerAllowed(callCtx, msg.Chat.ID) || s.exemptMessage(callCtx, msg) {
+				return nil
+			}
+			imageAttempted = true
+			image, decodeErr := base64.StdEncoding.DecodeString(imageBase64)
+			if decodeErr != nil {
+				return nil
+			}
+			imageEval = s.evaluateAdKillerImage(callCtx, msg.Chat.ID, msg.Sender.ID, msg.ID, image, msg.Caption, policy.AI.AdKiller)
+			return imageEval.Output
+		}
 	}
 
 	output, err := s.aiModerator.CheckMessage(ctx, ai.CheckInput{
+		BeforeModel:       beforeModel,
 		ChatID:            msg.Chat.ID,
 		UserID:            msg.Sender.ID,
 		Text:              aiModerationText(content),
@@ -545,6 +572,22 @@ func (s *Service) applyAIModeration(ctx context.Context, msg *tele.Message, poli
 		Policy:            policy.AI,
 		IsUngraduated:     trust.Status != "trusted",
 	})
+	if err != nil && errors.Is(err, ai.ErrModelsExhausted) && !imageAttempted {
+		fallbackCtx, fallbackCancel := adKillerFallbackContext(ctx, policy.AI.AdKiller)
+		defer fallbackCancel()
+		if s.adKillerAllowed(fallbackCtx, msg.Chat.ID) && !s.exemptMessage(fallbackCtx, msg) {
+			eval, _ := s.evaluateAdKiller(fallbackCtx, msg.Chat.ID, msg.Sender.ID, msg.ID, content.Text, policy.AI.AdKiller)
+			if eval.Succeeded {
+				if eval.Output != nil {
+					output = *eval.Output
+				} else {
+					output = ai.CheckOutput{Verdict: ai.Verdict{Verdict: "normal", Category: "正常", Reason: "AdKiller 文字兜底未命中"}, Model: "adkiller-text-fallback"}
+				}
+				ctx = fallbackCtx
+				err = nil
+			}
+		}
+	}
 	if err != nil {
 		s.logger.Warn("ai moderation failed", zap.Error(err), zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID), zap.String("trust_status", trust.Status))
 		recordCtx, recordCancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -559,16 +602,30 @@ func (s *Service) applyAIModeration(ctx context.Context, msg *tele.Message, poli
 	if !s.automaticActionAllowed(ctx, msg.Chat.ID) || s.exemptMessage(ctx, msg) {
 		return nil
 	}
+	if strings.HasPrefix(output.Model, "adkiller-") && !s.adKillerAllowed(ctx, msg.Chat.ID) {
+		return nil
+	}
 	if output.Skipped {
 		return s.maybeGraduateUser(ctx, trust, policy.AI)
 	}
 
 	action := s.decideAIAction(policy.AI, output)
+	if output.Action != "" {
+		action = output.Action
+	}
 	if output.FlagOnly && action != "none" {
 		action = "flag"
 	}
 	var aiDecisionMetadata []byte
 	md := map[string]any{}
+	if output.Model == "adkiller-image-ocr" {
+		md["source"] = "adkiller_image_ocr"
+		md["score"] = imageEval.Result.Score
+		md["level"] = imageEval.Result.Level
+	}
+	if output.Model == "adkiller-text-fallback" {
+		md["source"] = "adkiller_text_fallback"
+	}
 	if scene == "video" && len(content.VideoFrames) > 0 {
 		md["frame_count"] = len(content.VideoFrames)
 		md["video_duration_sec"] = content.VideoMeta.DurationSec
@@ -3689,16 +3746,6 @@ func (s *Service) checkProfile(ctx context.Context, chat *tele.Chat, user *tele.
 	}
 	bio := strings.TrimSpace(privateChat.Bio)
 
-	if matched, output, skipLLM, err := s.checkBioAdKiller(ctx, chatID, user, bio, policy, "join_adkiller"); err != nil {
-		s.enqueueProfileCheckLog(chatID, user, bio, logMode, "error", nil, nil, nil)
-		return "", nil, err
-	} else if matched != "" {
-		return matched, output, nil
-	} else if skipLLM && mode == "ai" {
-		mode = "keyword"
-		logMode = "keyword"
-	}
-
 	// keyword mode: existing behavior
 	if logMode == "keyword" {
 		for _, blacklisted := range policy.Verify.ProfileBlacklist {
@@ -3736,6 +3783,16 @@ func (s *Service) checkProfile(ctx context.Context, chat *tele.Chat, user *tele.
 			Policy:     policy.AI,
 			SkipCache:  true,
 		})
+		if err != nil && policy.AI.Enabled && errors.Is(err, ai.ErrModelsExhausted) {
+			fallbackCtx, fallbackCancel := adKillerFallbackContext(ctx, policy.AI.AdKiller)
+			defer fallbackCancel()
+			if s.adKillerAllowed(fallbackCtx, chatID) && !s.exemptUser(fallbackCtx, chat, user) {
+				matched, fallback, succeeded, _ := s.checkBioAdKiller(fallbackCtx, chatID, user, bio, policy, "join_adkiller_text_fallback")
+				if succeeded && s.adKillerAllowed(fallbackCtx, chatID) && !s.exemptUser(fallbackCtx, chat, user) {
+					return matched, fallback, nil
+				}
+			}
+		}
 		if err != nil {
 			s.enqueueProfileCheckLog(chatID, user, bio, "ai", "error", nil, nil, nil)
 			return "", nil, fmt.Errorf("ai profile check: %w", err)
@@ -3807,15 +3864,6 @@ func (s *Service) checkProfileOnMessage(ctx context.Context, chat *tele.Chat, us
 	}
 	_ = fromCache
 
-	if matched, output, skipLLM, err := s.checkBioAdKiller(ctx, chatID, user, bio, policy, "on_message_adkiller"); err != nil {
-		s.enqueueProfileCheckLog(chatID, user, bio, "on_message_"+mode, "error", nil, nil, nil)
-		return "", nil, err
-	} else if matched != "" {
-		return matched, output, nil
-	} else if skipLLM && mode == "ai" {
-		mode = "keyword"
-	}
-
 	// 关键词模式：复用 Verify.ProfileBlacklist
 	if mode == "keyword" {
 		for _, blacklisted := range policy.Verify.ProfileBlacklist {
@@ -3846,6 +3894,16 @@ func (s *Service) checkProfileOnMessage(ctx context.Context, chat *tele.Chat, us
 		SenderName: displayName(user),
 		Policy:     policy.AI,
 	})
+	if err != nil && policy.AI.Enabled && errors.Is(err, ai.ErrModelsExhausted) {
+		fallbackCtx, fallbackCancel := adKillerFallbackContext(ctx, policy.AI.AdKiller)
+		defer fallbackCancel()
+		if s.adKillerAllowed(fallbackCtx, chatID) && !s.exemptUser(fallbackCtx, chat, user) {
+			matched, fallback, succeeded, _ := s.checkBioAdKiller(fallbackCtx, chatID, user, bio, policy, "on_message_adkiller_text_fallback")
+			if succeeded && s.adKillerAllowed(fallbackCtx, chatID) && !s.exemptUser(fallbackCtx, chat, user) {
+				return matched, fallback, nil
+			}
+		}
+	}
 	if err != nil {
 		s.enqueueProfileCheckLog(chatID, user, bio, "on_message_ai", "error", nil, nil, nil)
 		return "", nil, fmt.Errorf("ai on-message profile check: %w", err)
@@ -3886,8 +3944,13 @@ func (s *Service) asyncProfileCheck(msg *tele.Message, policy config.GuardPolicy
 			}
 		}()
 
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		parent := s.lifecycleCtx
+		if parent == nil {
+			parent = context.Background()
+		}
+		ctx, cancel := context.WithTimeout(parent, 30*time.Second)
 		defer cancel()
+		ctx = context.WithValue(ctx, adKillerParentContextKey{}, parent)
 
 		if s.exemptMessage(ctx, msg) {
 			return
@@ -3901,7 +3964,18 @@ func (s *Service) asyncProfileCheck(msg *tele.Message, policy config.GuardPolicy
 			return
 		}
 
-		if err := s.handleProfileOnMessageViolation(ctx, msg, policy, matched, output); err != nil {
+		actionCtx := ctx
+		if output != nil && isAdKillerTextModel(output.Model) {
+			if ctx.Err() != nil {
+				var actionCancel context.CancelFunc
+				actionCtx, actionCancel = adKillerFallbackContext(ctx, policy.AI.AdKiller)
+				defer actionCancel()
+			}
+			if !s.adKillerAllowed(actionCtx, msg.Chat.ID) || s.exemptMessage(actionCtx, msg) {
+				return
+			}
+		}
+		if err := s.handleProfileOnMessageViolation(actionCtx, msg, policy, matched, output); err != nil {
 			s.logger.Error("handle async on-message profile violation failed",
 				zap.Error(err),
 				zap.Int64("chat_id", msg.Chat.ID),
@@ -4176,8 +4250,8 @@ func (s *Service) handleProfileOnMessageViolation(
 	if strings.EqualFold(strings.TrimSpace(policy.AI.ProfileOnMessageMode), "keyword") {
 		decisionMode = "on_message_keyword"
 	}
-	if aiOutput != nil && strings.EqualFold(aiOutput.Model, "adkiller") {
-		decisionMode = "on_message_adkiller"
+	if aiOutput != nil && isAdKillerTextModel(aiOutput.Model) {
+		decisionMode = "on_message_adkiller_text_fallback"
 	}
 	decisionID, recordErr := s.recordProfileViolationDecision(ctx, msg.Chat, msg.Sender, msg, matched, decisionMode, aiOutput)
 	if recordErr != nil {
