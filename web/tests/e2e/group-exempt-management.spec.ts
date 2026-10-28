@@ -18,7 +18,7 @@ test('exemption search pagination and safe expiry editing', async ({page}) => {
   if(req.method()==='PUT'){const body=req.postDataJSON();writes.push(body);entries=entries.map(x=>x.user_id===id?{...x,...body}:x);return route.fulfill({json:{ok:true}});}
   entries=entries.filter(x=>x.user_id!==id);return route.fulfill({status:204});
  });
- await login(page);await page.goto('/groups/-1001');
+ await login(page);await page.goto('/groups/-1001');await page.getByRole('button',{name:'用户豁免',exact:true}).click();
  await expect(page.getByText('共 21 条 · 第 1 页')).toBeVisible();
  await page.getByRole('button',{name:'编辑 100'}).click();
  await expect(page.getByLabel('Telegram 用户 ID')).toHaveValue('100');
@@ -37,6 +37,6 @@ test('exemption search pagination and safe expiry editing', async ({page}) => {
 test('switching groups cannot show old pending response or edit state',async ({page})=>{
  await page.route('**/api/admin/groups/-1001/exempt-users**',async route=>{await new Promise(r=>setTimeout(r,250));await route.fulfill({json:{users:[{user_id:'311',note:'old group',expires_at:null,created_at:'2026-01-01T00:00:00Z'}],total:1,has_more:false}}).catch(()=>{});});
  await page.route('**/api/admin/groups/-1002/exempt-users**',async route=>route.fulfill({json:{users:[{user_id:'422',note:'new group',expires_at:null,created_at:'2026-01-01T00:00:00Z'}],total:1,has_more:false}}));
- await login(page);await page.goto('/groups/-1001');await expect(page.getByRole('button',{name:'编辑 311'})).toBeVisible();await page.getByRole('button',{name:'编辑 311'}).click();
- await page.getByLabel('搜索豁免').fill('delayed');await page.goto('/groups/-1002');await expect(page.getByRole('button',{name:'编辑 422'})).toBeVisible();await page.waitForTimeout(400);await expect(page.getByText('old group')).toHaveCount(0);await expect(page.getByLabel('Telegram 用户 ID')).toHaveValue('');
+ await login(page);await page.goto('/groups/-1001');await page.getByRole('button',{name:'用户豁免',exact:true}).click();await expect(page.getByRole('button',{name:'编辑 311'})).toBeVisible();await page.getByRole('button',{name:'编辑 311'}).click();
+ await page.getByLabel('搜索豁免').fill('delayed');await page.goto('/groups/-1002');await page.getByRole('button',{name:'用户豁免',exact:true}).click();await expect(page.getByRole('button',{name:'编辑 422'})).toBeVisible();await page.waitForTimeout(400);await expect(page.getByText('old group')).toHaveCount(0);await expect(page.getByLabel('Telegram 用户 ID')).toHaveValue('');
 });
