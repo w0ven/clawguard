@@ -221,6 +221,7 @@ redis.call('PERSIST', KEYS[1])
 redis.call('ZADD', KEYS[2], ARGV[9], ARGV[12])
 redis.call('SADD', KEYS[3], ARGV[12])
 redis.call('PERSIST', KEYS[3])
+redis.call('SET', KEYS[5], ARGV[12])
 if ARGV[11] ~= '' and not redis.call('GET', KEYS[4]) then
     redis.call('PSETEX', KEYS[4], ARGV[13], ARGV[11])
 end
@@ -240,14 +241,14 @@ var cancelJoinProtectionCleanupScript = redis.NewScript(`
 local members = redis.call('SMEMBERS', KEYS[1])
 local removed = 0
 for _, member in ipairs(members) do
-    if member == ARGV[1] or string.sub(member, 1, string.len(ARGV[2])) == ARGV[2] then
+    if (member == ARGV[1] or string.sub(member, 1, string.len(ARGV[2])) == ARGV[2]) and not redis.call('HGET', ARGV[3] .. member, 'completed_action') then
         redis.call('DEL', ARGV[3] .. member)
         redis.call('ZREM', KEYS[2], member)
         redis.call('SREM', KEYS[1], member)
         removed = removed + 1
     end
 end
-redis.call('DEL', KEYS[3])
+redis.call('DEL', KEYS[3], KEYS[4])
 return removed
 `)
 
@@ -291,6 +292,7 @@ type joinProtectionDeferredCleanup struct {
 	Rule                 string
 	MembershipGeneration string
 	CreatedAt            time.Time
+	CompletedAction      string
 }
 
 func joinProtectionStateKey(chatID int64) string {
@@ -311,6 +313,10 @@ func joinProtectionCleanupGroupKey(chatID int64) string {
 
 func joinProtectionCleanupTaskKey(member string) string {
 	return "clawguard:join-protection:cleanup-task:" + member
+}
+
+func joinProtectionCleanupCurrentKey(chatID, userID int64) string {
+	return fmt.Sprintf("clawguard:join-protection:cleanup-current:%d:%d", chatID, userID)
 }
 
 func membershipSessionMapKey(chatID, userID int64) string {
@@ -608,10 +614,12 @@ func markTelegramCleanupFailureRedis(
 }
 
 func enqueueJoinProtectionCleanupRedis(ctx context.Context, rdb redis.Cmdable, task joinProtectionDeferredCleanup, now time.Time) error {
-	member := fmt.Sprintf("%d:%d", task.ChatID, task.UserID)
-	if generation := strings.TrimSpace(task.MembershipGeneration); generation != "" {
-		member += ":" + generation
+	token, err := generateVerificationToken()
+	if err != nil {
+		return err
 	}
+	member := fmt.Sprintf("%d:%d:%s", task.ChatID, task.UserID, token)
+
 	action := strings.TrimSpace(task.Action)
 	if action == "" {
 		action = "temporary_ban"
@@ -624,7 +632,7 @@ func enqueueJoinProtectionCleanupRedis(ctx context.Context, rdb redis.Cmdable, t
 	if !task.ActionUntil.IsZero() {
 		actionUntilMillis = task.ActionUntil.UnixMilli()
 	}
-	_, err := enqueueJoinProtectionCleanupScript.Run(
+	_, err = enqueueJoinProtectionCleanupScript.Run(
 		ctx,
 		rdb,
 		[]string{
@@ -632,6 +640,7 @@ func enqueueJoinProtectionCleanupRedis(ctx context.Context, rdb redis.Cmdable, t
 			joinProtectionCleanupQueueKey,
 			joinProtectionCleanupGroupKey(task.ChatID),
 			membershipSessionKey(task.ChatID, task.UserID),
+			joinProtectionCleanupCurrentKey(task.ChatID, task.UserID),
 		},
 		task.ChatID,
 		task.UserID,
@@ -719,6 +728,7 @@ func claimDueJoinProtectionCleanupRedis(ctx context.Context, rdb redis.Cmdable, 
 		Rule:                 values["rule"],
 		MembershipGeneration: values["membership_generation"],
 		CreatedAt:            createdAt,
+		CompletedAction:      values["completed_action"],
 	}, true, nil
 }
 
@@ -731,6 +741,20 @@ func validDeferredCleanupAction(action string, temporaryBanSeconds int, actionUn
 	default:
 		return false
 	}
+}
+
+// Persist the external result in the Redis task before attempting PostgreSQL.
+// The compare with task existence avoids resurrecting a cancelled task.
+var completeJoinProtectionCleanupScript = redis.NewScript(`
+if redis.call('EXISTS', KEYS[1]) == 0 then return 0 end
+redis.call('HSET', KEYS[1], 'completed_action', ARGV[1])
+redis.call('PERSIST', KEYS[1])
+return 1
+`)
+
+func completeJoinProtectionCleanupRedis(ctx context.Context, rdb redis.Cmdable, member, action string) (bool, error) {
+	n, err := completeJoinProtectionCleanupScript.Run(ctx, rdb, []string{joinProtectionCleanupTaskKey(member)}, action).Int()
+	return n == 1, err
 }
 
 func rescheduleJoinProtectionCleanupRedis(ctx context.Context, rdb redis.Cmdable, member string, retryAt time.Time) error {
@@ -746,16 +770,29 @@ func rescheduleJoinProtectionCleanupRedis(ctx context.Context, rdb redis.Cmdable
 	return err
 }
 
+var removeJoinProtectionCleanupScript = redis.NewScript(`
+redis.call('DEL', KEYS[1])
+redis.call('ZREM', KEYS[2], ARGV[1])
+redis.call('SREM', KEYS[3], ARGV[1])
+if redis.call('GET', KEYS[4]) == ARGV[1] then redis.call('DEL', KEYS[4]) end
+return 1
+`)
+
 func removeJoinProtectionCleanupRedis(ctx context.Context, rdb redis.Cmdable, member string, chatID int64) error {
-	_, err := rdb.Pipelined(ctx, func(pipe redis.Pipeliner) error {
-		pipe.Del(ctx, joinProtectionCleanupTaskKey(member))
-		pipe.ZRem(ctx, joinProtectionCleanupQueueKey, member)
-		if chatID != 0 {
-			pipe.SRem(ctx, joinProtectionCleanupGroupKey(chatID), member)
-		}
-		return nil
-	})
-	return err
+	_, userID := cleanupTaskMemberIDs(member)
+	return removeJoinProtectionCleanupScript.Run(ctx, rdb, []string{joinProtectionCleanupTaskKey(member), joinProtectionCleanupQueueKey, joinProtectionCleanupGroupKey(chatID), joinProtectionCleanupCurrentKey(chatID, userID)}, member).Err()
+}
+
+// Legacy tasks have no current pointer; a newer queued instance always wins.
+func joinProtectionCleanupCurrent(ctx context.Context, rdb redis.Cmdable, task joinProtectionDeferredCleanup) (bool, error) {
+	current, err := rdb.Get(ctx, joinProtectionCleanupCurrentKey(task.ChatID, task.UserID)).Result()
+	if err == redis.Nil {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return current == task.Member, nil
 }
 
 func cancelJoinProtectionCleanupRedis(ctx context.Context, rdb redis.Cmdable, chatID, userID int64) error {
@@ -763,7 +800,7 @@ func cancelJoinProtectionCleanupRedis(ctx context.Context, rdb redis.Cmdable, ch
 	return cancelJoinProtectionCleanupScript.Run(
 		ctx,
 		rdb,
-		[]string{joinProtectionCleanupGroupKey(chatID), joinProtectionCleanupQueueKey, membershipSessionKey(chatID, userID)},
+		[]string{joinProtectionCleanupGroupKey(chatID), joinProtectionCleanupQueueKey, membershipSessionKey(chatID, userID), joinProtectionCleanupCurrentKey(chatID, userID)},
 		base,
 		base+":",
 		"clawguard:join-protection:cleanup-task:",

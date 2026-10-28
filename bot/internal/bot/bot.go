@@ -1106,7 +1106,7 @@ func (s *Service) startVerification(chat *tele.Chat, user *tele.User, joinEventM
 		readable := normalizeTelegramActionError("restrict", err)
 		s.logger.Error("restrict new member", zap.Error(readable), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
 		s.sendBotPermissionWarningToChat(chat, verificationStartFailureNotice(readable))
-		if cleanupErr := s.handleVerificationPromptFailure(ctx, chat, user, policy, readable); cleanupErr != nil {
+		if cleanupErr := s.handleVerificationPromptFailure(ctx, chat, user, policy, readable, membershipGeneration); cleanupErr != nil {
 			s.releaseVerificationJoinLock(ctx, chat.ID, user.ID)
 			return errors.Join(readable, cleanupErr)
 		}
@@ -1126,7 +1126,7 @@ func (s *Service) startVerification(chat *tele.Chat, user *tele.User, joinEventM
 	verifyStartedAt := time.Now()
 	if err := s.startVerificationPrompt(ctx, chat, user, policy); err != nil {
 		s.joinProtector.ReleasePending(chat.ID)
-		if cleanupErr := s.handleVerificationPromptFailure(ctx, chat, user, policy, err); cleanupErr != nil {
+		if cleanupErr := s.handleVerificationPromptFailure(ctx, chat, user, policy, err, membershipGeneration); cleanupErr != nil {
 			s.releaseVerificationJoinLock(ctx, chat.ID, user.ID)
 			return errors.Join(err, cleanupErr)
 		}
@@ -2034,7 +2034,41 @@ type VerificationExpiryResult struct {
 	RetryReason string
 }
 
+func verificationCleanupKey(pending store.PendingVerification) string {
+	return fmt.Sprintf("pending:%d", pending.ID)
+}
+
+// Settle previously executed cleanups even if authorization, exemptions or
+// the current pending instance have changed since the Telegram action.
+func (s *Service) RecoverVerificationCleanupSettlements(ctx context.Context, limit int32) error {
+	keys, err := s.queries.UnsettledVerificationCleanups(ctx, limit)
+	if err != nil {
+		return err
+	}
+	var first error
+	for _, key := range keys {
+		if _, _, err := s.queries.SettleVerificationCleanup(ctx, key); err != nil {
+			if rescheduleErr := s.queries.RescheduleVerificationCleanup(ctx, key); rescheduleErr != nil {
+				err = errors.Join(err, rescheduleErr)
+			}
+			if first == nil {
+				first = err
+			}
+		}
+	}
+	return first
+}
+
 func (s *Service) HandleVerificationExpiry(ctx context.Context, pending store.PendingVerification) (VerificationExpiryResult, error) {
+	key := verificationCleanupKey(pending)
+	completed, err := s.queries.PendingVerificationCleanupExists(ctx, key)
+	if err != nil {
+		return VerificationExpiryResult{}, fmt.Errorf("load cleanup result: %w", err)
+	}
+	if completed {
+		_, _, err := s.queries.SettleVerificationCleanup(ctx, key)
+		return VerificationExpiryResult{}, err
+	}
 	current, err := s.pendingVerificationClaimCurrent(ctx, pending)
 	if err != nil {
 		return VerificationExpiryResult{}, fmt.Errorf("check pending verification claim: %w", err)
@@ -2080,6 +2114,28 @@ func (s *Service) HandleVerificationExpiry(ctx context.Context, pending store.Pe
 	if pause, reason := s.deferredExemption(ctx, chat, user); pause {
 		return verificationExpiryRetry(time.Now().Add(time.Minute), reason), nil
 	}
+	// Prompt-failure cleanup snapshots the join generation as well as the
+	// pending instance, so a later membership cannot be punished by this job.
+	var cleanupMeta struct {
+		MembershipGeneration string `json:"membership_generation"`
+	}
+	if pending.Method == "cleanup" && json.Unmarshal(pending.Payload, &cleanupMeta) == nil && cleanupMeta.MembershipGeneration != "" {
+		current, err := s.membershipSessionCurrent(ctx, pending.ChatID, pending.UserID, cleanupMeta.MembershipGeneration)
+		if err != nil {
+			return verificationExpiryRetry(time.Now().Add(time.Minute), "membership session unavailable"), nil
+		}
+		if !current {
+			_, err := s.deleteProcessedPendingVerification(ctx, pending)
+			return VerificationExpiryResult{}, err
+		}
+	}
+	current, err = s.pendingVerificationClaimCurrent(ctx, pending)
+	if err != nil {
+		return VerificationExpiryResult{}, err
+	}
+	if !current {
+		return VerificationExpiryResult{}, nil
+	}
 	failAction := verificationFailActionSnapshot(pending.Payload, policy.Verify.FailAction)
 	action, err := s.applyVerificationFailAction(chat, user, failAction)
 	if err != nil {
@@ -2090,42 +2146,38 @@ func (s *Service) HandleVerificationExpiry(ctx context.Context, pending store.Pe
 			return verificationExpiryRetry(retryAt, redact.ErrorString(err)), nil
 		}
 	}
-	lockKey := fmt.Sprintf("clawguard:verify:lock:%d:%d", chat.ID, user.ID)
-	if value, ok := s.joinEventLocks.LoadAndDelete(lockKey); ok {
-		if timer, timerOK := value.(*time.Timer); timerOK {
-			timer.Stop()
-		}
-	}
-	s.markTelegramCleanupSuccess(ctx, pending.ChatID)
-
-	s.finalizeVerificationPrompt(chat, pending, verificationResultHTML(user, "timeout"))
-
-	deleted, err := s.deleteProcessedPendingVerification(ctx, pending)
-	if err != nil {
-		return VerificationExpiryResult{}, fmt.Errorf("delete expired pending verification: %w", err)
-	}
-	if deleted == 0 {
-		return VerificationExpiryResult{}, nil
-	}
-	if pendingReservesJoinProtectionSlot(pending.Method) {
-		s.joinProtector.ReleasePending(pending.ChatID)
-	}
-
-	if _, err := s.queries.InsertViolation(ctx, store.InsertViolationParams{
-		ChatID:   pending.ChatID,
-		UserID:   pending.UserID,
-		Username: pending.Username,
-		Rule:     "verify_timeout",
-		Action:   action,
-	}); err != nil {
-		s.logger.Warn("record verification timeout result failed after cleanup", zap.Error(err), zap.Int64("chat_id", pending.ChatID), zap.Int64("user_id", pending.UserID))
-	}
-
-	s.sendActionFeedback(chat, nil, policy.Feedback.VerifyFail, map[string]string{
-		"user":         feedbackUserLabel(user, policy.Feedback.VerifyFail.ParseMode),
-		"user_mention": feedbackUserMention(user, policy.Feedback.VerifyFail.ParseMode),
-		"reason":       "验证超时",
+	inserted, err := s.queries.RecordVerificationCleanup(ctx, store.VerificationCleanupSettlement{
+		Key: key, PendingID: &pending.ID, ChatID: pending.ChatID, UserID: pending.UserID,
+		Username: pending.Username, Rule: "verify_timeout", Action: action,
 	})
+	if err != nil {
+		return VerificationExpiryResult{}, fmt.Errorf("persist completed verification cleanup: %w", err)
+	}
+	if inserted {
+		// These best-effort notifications are emitted only by the writer which
+		// first persisted the result, never by a settlement retry.
+		current, currentErr := s.pendingVerificationClaimCurrent(ctx, pending)
+		if currentErr == nil && current {
+			lockKey := fmt.Sprintf("clawguard:verify:lock:%d:%d", chat.ID, user.ID)
+			if value, ok := s.joinEventLocks.LoadAndDelete(lockKey); ok {
+				if timer, timerOK := value.(*time.Timer); timerOK {
+					timer.Stop()
+				}
+			}
+			if pendingReservesJoinProtectionSlot(pending.Method) {
+				s.joinProtector.ReleasePending(pending.ChatID)
+			}
+			s.finalizeVerificationPrompt(chat, pending, verificationResultHTML(user, "timeout"))
+			s.sendActionFeedback(chat, nil, policy.Feedback.VerifyFail, map[string]string{
+				"user":         feedbackUserLabel(user, policy.Feedback.VerifyFail.ParseMode),
+				"user_mention": feedbackUserMention(user, policy.Feedback.VerifyFail.ParseMode), "reason": "验证超时",
+			})
+		}
+		s.markTelegramCleanupSuccess(ctx, pending.ChatID)
+	}
+	if _, _, err = s.queries.SettleVerificationCleanup(ctx, key); err != nil {
+		return VerificationExpiryResult{}, fmt.Errorf("settle completed verification cleanup: %w", err)
+	}
 
 	s.logger.Info(
 		"expired verification handled",
@@ -2146,26 +2198,11 @@ func verificationExpiryRetry(retryAt time.Time, reason string) VerificationExpir
 }
 
 func (s *Service) pendingVerificationClaimCurrent(ctx context.Context, pending store.PendingVerification) (bool, error) {
-	if pending.LeaseOwner == nil || strings.TrimSpace(*pending.LeaseOwner) == "" {
-		return true, nil
-	}
-	return s.queries.IsPendingVerificationClaimCurrent(ctx, store.IsPendingVerificationClaimCurrentParams{
-		ID:         pending.ID,
-		LeaseOwner: *pending.LeaseOwner,
-	})
+	return s.queries.VerificationPendingCurrent(ctx, pending)
 }
 
 func (s *Service) deleteProcessedPendingVerification(ctx context.Context, pending store.PendingVerification) (int64, error) {
-	if pending.LeaseOwner != nil && strings.TrimSpace(*pending.LeaseOwner) != "" {
-		return s.queries.DeleteClaimedPendingVerification(ctx, store.DeleteClaimedPendingVerificationParams{
-			ID:         pending.ID,
-			LeaseOwner: *pending.LeaseOwner,
-		})
-	}
-	return s.queries.DeletePendingVerification(ctx, store.DeletePendingVerificationParams{
-		ChatID: pending.ChatID,
-		UserID: pending.UserID,
-	})
+	return s.queries.DeletePendingVerificationInstance(ctx, pending)
 }
 
 func (s *Service) failVerificationImmediately(ctx context.Context, chat *tele.Chat, user *tele.User, pending store.PendingVerification, failAction, rule string) error {

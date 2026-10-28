@@ -251,7 +251,11 @@ func TestGroupExemptionBotPathsIntegration(t *testing.T) {
 	_, redisClient := newJoinProtectionTestRedis(t)
 	s.redis = redisClient
 	for _, id := range []int64{chatID, groupB} {
-		task := joinProtectionDeferredCleanup{ChatID: id, UserID: userID, FirstName: "fixture", Action: joinProtectionActionTemporaryBan, ActionUntil: time.Now().Add(time.Hour), TemporaryBanSeconds: 3600}
+		generation := fmt.Sprintf("fixture-%d", id)
+		if err = s.rememberMembershipSession(ctx, id, userID, generation); err != nil {
+			t.Fatal(err)
+		}
+		task := joinProtectionDeferredCleanup{ChatID: id, UserID: userID, FirstName: "fixture", Action: joinProtectionActionTemporaryBan, ActionUntil: time.Now().Add(time.Hour), TemporaryBanSeconds: 3600, MembershipGeneration: generation}
 		if err = enqueueJoinProtectionCleanupRedis(ctx, redisClient, task, time.Now().Add(-time.Second)); err != nil {
 			t.Fatal(err)
 		}

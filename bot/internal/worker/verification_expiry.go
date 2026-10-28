@@ -61,6 +61,11 @@ func (w *VerificationExpiry) Run(ctx context.Context) {
 }
 
 func (w *VerificationExpiry) processExpired(ctx context.Context) {
+	// Settlement is database-only and remains safe when moderation is paused or
+	// the old pending has been replaced by a new verification.
+	if err := w.botService.RecoverVerificationCleanupSettlements(ctx, verificationExpiryBatch); err != nil {
+		w.logger.Error("settle completed verification cleanups", zap.Error(err))
+	}
 	pendingList, err := w.queries.ClaimExpiredPendingVerifications(ctx, store.ClaimExpiredPendingVerificationsParams{
 		LeaseSeconds: int32(verificationExpiryLease / time.Second),
 		LeaseOwner:   w.leaseOwner,
