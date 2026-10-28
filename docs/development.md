@@ -6,7 +6,7 @@
 
 | 组件 | 版本 |
 | :--- | :--- |
-| Go | 1.26（toolchain 1.26.6，见 `bot/go.mod`） |
+| Go | 最低 1.26.10（见 `bot/go.mod`） |
 | Node.js | 22 |
 | PostgreSQL | 16 |
 | Redis | 7 |

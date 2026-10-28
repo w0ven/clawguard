@@ -778,6 +778,9 @@ func (s *Service) applyJoinProtectionTemporaryAction(chat *tele.Chat, user *tele
 }
 
 func (s *Service) handleJoinProtectionAction(ctx context.Context, chat *tele.Chat, user *tele.User, policy config.JoinProtectionPolicy, action, membershipGeneration string, now time.Time) error {
+	if s.exemptUser(ctx, chat, user) {
+		return nil
+	}
 	if action != joinProtectionActionTemporaryRestrict {
 		action = joinProtectionActionTemporaryBan
 	}
@@ -852,6 +855,9 @@ func (s *Service) handleJoinProtectionAction(ctx context.Context, chat *tele.Cha
 	var fallbackRestrict func() error
 	if action == joinProtectionActionTemporaryBan {
 		fallbackRestrict = func() error {
+			if s.exemptUser(ctx, chat, user) {
+				return nil
+			}
 			return s.temporaryRestrictJoinFloodUser(chat, user, actionUntil)
 		}
 	}
@@ -862,6 +868,9 @@ func (s *Service) handleJoinProtectionAction(ctx context.Context, chat *tele.Cha
 			return allowed
 		},
 		applyAction: func() error {
+			if s.exemptUser(ctx, chat, user) {
+				return nil
+			}
 			return s.applyJoinProtectionTemporaryAction(chat, user, action, actionUntil)
 		},
 		fallbackRestrict: fallbackRestrict,
@@ -896,7 +905,7 @@ func (s *Service) ProcessJoinProtectionCleanupFallbacks(ctx context.Context, lim
 			break
 		}
 		state, stateErr := s.GetSystemState(ctx)
-		if stateErr != nil || state.ActionsPaused {
+		if stateErr != nil || state.Frozen || state.ActionsPaused {
 			if err := rescheduleJoinProtectionCleanupRedis(ctx, s.redis, task.Member, time.Now().Add(time.Minute)); err != nil {
 				s.logger.Error("reschedule join protection cleanup while actions paused", zap.Error(err), zap.Int64("chat_id", task.ChatID), zap.Int64("user_id", task.UserID))
 			}
@@ -904,6 +913,13 @@ func (s *Service) ProcessJoinProtectionCleanupFallbacks(ctx context.Context, lim
 				return fmt.Errorf("reload system state before join protection cleanup: %w", stateErr)
 			}
 			return nil
+		}
+		authorized, authErr := s.IsAuthorizedGroup(ctx, task.ChatID)
+		if authErr != nil || !authorized {
+			if err := rescheduleJoinProtectionCleanupRedis(ctx, s.redis, task.Member, time.Now().Add(time.Minute)); err != nil {
+				return err
+			}
+			continue
 		}
 		allowed, cooldownUntil := s.allowTelegramCleanup(ctx, task.ChatID, time.Now())
 		if !allowed {
@@ -918,6 +934,13 @@ func (s *Service) ProcessJoinProtectionCleanupFallbacks(ctx context.Context, lim
 			chat.Title = group.Title
 		}
 		user := &tele.User{ID: task.UserID, Username: task.Username, FirstName: task.FirstName}
+		if pause, reason := s.deferredExemption(ctx, chat, user); pause {
+			s.logger.Info("deferred cleanup paused", zap.String("reason", reason), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
+			if err := rescheduleJoinProtectionCleanupRedis(ctx, s.redis, task.Member, time.Now().Add(time.Minute)); err != nil {
+				return err
+			}
+			continue
+		}
 		action := task.Action
 		var actionErr error
 		now := time.Now()
@@ -945,6 +968,12 @@ func (s *Service) ProcessJoinProtectionCleanupFallbacks(ctx context.Context, lim
 			action, actionErr = s.applyVerificationFailAction(chat, user, task.Action)
 		}
 		if actionErr != nil && !isTerminalTelegramCleanupError(actionErr) {
+			if s.exemptUser(ctx, chat, user) {
+				if err := rescheduleJoinProtectionCleanupRedis(ctx, s.redis, task.Member, time.Now().Add(time.Minute)); err != nil {
+					return err
+				}
+				continue
+			}
 			if task.Action == joinProtectionActionTemporaryBan {
 				_ = s.temporaryRestrictJoinFloodUser(chat, user, task.ActionUntil)
 			} else if task.Action != joinProtectionActionTemporaryRestrict {
@@ -1108,6 +1137,9 @@ func (s *Service) handleJoinProtectionCleanupExpiry(
 		if !current {
 			return VerificationExpiryResult{}, nil
 		}
+		if s.exemptUser(ctx, chat, user) {
+			return verificationExpiryRetry(time.Now().Add(time.Minute), "group exemption active"), nil
+		}
 		if err := s.applyJoinProtectionTemporaryAction(chat, user, payload.Action, payload.ActionUntil); err != nil {
 			if isTerminalTelegramCleanupError(err) {
 				action = "already_absent"
@@ -1151,6 +1183,9 @@ func (s *Service) handleJoinProtectionCleanupExpiry(
 }
 
 func (s *Service) handleVerificationPromptFailure(ctx context.Context, chat *tele.Chat, user *tele.User, policy config.GuardPolicy, promptErr error) error {
+	if s.exemptUser(ctx, chat, user) {
+		return nil
+	}
 	if chat == nil || user == nil {
 		return nil
 	}
@@ -1232,6 +1267,9 @@ func (s *Service) handleVerificationPromptFailure(ctx context.Context, chat *tel
 	}
 	action, cleanupErr := runPromptFailureCleanup(promptFailureCleanupOps{
 		applyAction: func() (string, error) {
+			if s.exemptUser(ctx, chat, user) {
+				return "", errExemptPending
+			}
 			return s.applyVerificationFailAction(chat, user, policy.Verify.FailAction)
 		},
 		persist: persistCleanup,

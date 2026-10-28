@@ -21,7 +21,7 @@ func ungraduatedInviteRestrictionEnabled(policy config.GuardPolicy) bool {
 }
 
 func (s *Service) handleUngraduatedInviteServiceMessage(ctx context.Context, msg *tele.Message, policy config.GuardPolicy) bool {
-	if msg == nil || msg.Chat == nil || len(msg.UsersJoined) == 0 {
+	if msg == nil || msg.Chat == nil || msg.SenderChat != nil || len(msg.UsersJoined) == 0 {
 		return false
 	}
 	return s.handleUngraduatedInvite(ctx, msg.Chat, msg.Sender, msg.UsersJoined, msg, policy, "new_chat_members")
@@ -38,11 +38,22 @@ func (s *Service) handleUngraduatedInvite(ctx context.Context, chat *tele.Chat, 
 	if s == nil || s.queries == nil || chat == nil || inviter == nil || !ungraduatedInviteRestrictionEnabled(policy) {
 		return false
 	}
+	if s.exemptUser(ctx, chat, inviter) {
+		return false
+	}
 	if inviter.IsBot || (s.bot != nil && s.bot.Me != nil && inviter.ID == s.bot.Me.ID) {
 		return false
 	}
 
 	blockedTargets := s.inviteTargetsForRestriction(inviter, targets)
+	filtered := blockedTargets[:0]
+	for _, target := range blockedTargets {
+		targetCopy := target
+		if !s.exemptUser(ctx, chat, &targetCopy) {
+			filtered = append(filtered, targetCopy)
+		}
+	}
+	blockedTargets = filtered
 	if len(blockedTargets) == 0 {
 		return false
 	}
@@ -96,6 +107,9 @@ func (s *Service) handleUngraduatedInvite(ctx context.Context, chat *tele.Chat, 
 	pausedDuringAction := false
 	for i := range blockedTargets {
 		target := blockedTargets[i]
+		if s.exemptUser(ctx, chat, inviter) || s.exemptUser(ctx, chat, &target) {
+			continue
+		}
 		if err := s.kickUser(chat, &target); err != nil {
 			if errors.Is(err, errActionsPaused) {
 				pausedDuringAction = true

@@ -4,11 +4,13 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"go.uber.org/zap"
 
+	"github.com/openclaw/clawguard/internal/bot"
 	"github.com/openclaw/clawguard/internal/config"
 )
 
@@ -55,5 +57,25 @@ func TestHealthEndpointsHaveDistinctLivenessAndReadinessSemantics(t *testing.T) 
 	}
 	if body["status"] != "not_ready" {
 		t.Fatalf("GET /readyz status body = %v, want not_ready", body["status"])
+	}
+}
+
+// Assert removal for a real service as well as the nil test configuration;
+// route inventory avoids auth middleware masking a still-registered endpoint.
+func TestAssistantRoutesRemovedAndGovernanceRoutesRetained(t *testing.T) {
+	for _, svc := range []*bot.Service{nil, {}} {
+		server := NewServer(config.Config{HTTPPort: 8080}, zap.NewNop(), svc, nil)
+		routes := map[string]bool{}
+		for _, r := range server.echo.Routes() {
+			if strings.Contains(r.Path, "/assistant") || strings.HasPrefix(r.Path, "/internal/native/") {
+				t.Errorf("removed route still registered: %s %s", r.Method, r.Path)
+			}
+			routes[r.Method+" "+r.Path] = true
+		}
+		for _, want := range []string{"GET /api/admin/groups", "PUT /api/admin/groups/:chat_id/config", "GET /api/admin/ai-decisions", "GET /api/admin/llm/providers", "POST /webhook/:secret"} {
+			if !routes[want] {
+				t.Errorf("governance route missing: %s", want)
+			}
+		}
 	}
 }

@@ -69,18 +69,15 @@ type chatCompletionRequest struct {
 	Messages    []Message        `json:"messages"`
 	Temperature float64          `json:"temperature"`
 	MaxTokens   int              `json:"max_tokens,omitempty"`
-	Tools       []ToolDefinition `json:"tools,omitempty"`
 }
 
 type chatCompletionResponse struct {
 	Model   string `json:"model"`
 	Choices []struct {
 		Message struct {
-			Role      string     `json:"role"`
-			Content   string     `json:"content"`
-			ToolCalls []ToolCall `json:"tool_calls,omitempty"`
+			Role    string `json:"role"`
+			Content string `json:"content"`
 		} `json:"message"`
-		FinishReason string `json:"finish_reason"`
 	} `json:"choices"`
 	Usage struct {
 		PromptTokens     int `json:"prompt_tokens"`
@@ -254,10 +251,7 @@ func (c *OpenAICompatibleClient) Chat(ctx context.Context, req CheckRequest) (*C
 	ctx, cancel := c.withRequestTimeout(ctx, req.Timeout)
 	defer cancel()
 
-	msgs := append([]Message{}, req.Messages...)
-	if !req.PreserveMessages {
-		msgs = append([]Message{{Role: "system", Content: req.SystemPrompt}}, msgs...)
-	}
+	msgs := append([]Message{{Role: "system", Content: req.SystemPrompt}}, req.Messages...)
 	body, err := json.Marshal(chatCompletionRequest{
 		Model:       req.Model,
 		Messages:    msgs,
@@ -308,55 +302,4 @@ func (c *OpenAICompatibleClient) Chat(ctx context.Context, req CheckRequest) (*C
 		CompletionTokens: decoded.Usage.CompletionTokens,
 		CostCents:        estimateCostCents(decoded.Usage.PromptTokens, decoded.Usage.CompletionTokens),
 	}, nil
-}
-
-type embeddingRequest struct {
-	Model string `json:"model"`
-	Input string `json:"input"`
-}
-
-type embeddingResponse struct {
-	Data []struct {
-		Embedding []float64 `json:"embedding"`
-	} `json:"data"`
-}
-
-func (c *OpenAICompatibleClient) Embed(ctx context.Context, model, input string, timeout time.Duration) ([]float64, error) {
-	ctx, cancel := c.withRequestTimeout(ctx, timeout)
-	defer cancel()
-	body, err := json.Marshal(embeddingRequest{Model: model, Input: input})
-	if err != nil {
-		return nil, fmt.Errorf("marshal embedding request: %w", err)
-	}
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/embeddings", bytes.NewReader(body))
-	if err != nil {
-		return nil, fmt.Errorf("create embedding request: %w", err)
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	if c.apiKey != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+c.apiKey)
-	}
-	for key, value := range c.extraHeaders {
-		if strings.TrimSpace(key) == "" || strings.TrimSpace(value) == "" {
-			continue
-		}
-		httpReq.Header.Set(key, value)
-	}
-	resp, err := c.client.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("call embedding: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 300 {
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1024))
-		return nil, providerHTTPError(resp, fmt.Errorf("embedding status %d", resp.StatusCode))
-	}
-	var decoded embeddingResponse
-	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
-		return nil, fmt.Errorf("decode embedding response: %w", err)
-	}
-	if len(decoded.Data) == 0 || len(decoded.Data[0].Embedding) == 0 {
-		return nil, fmt.Errorf("embedding returned no vector")
-	}
-	return decoded.Data[0].Embedding, nil
 }

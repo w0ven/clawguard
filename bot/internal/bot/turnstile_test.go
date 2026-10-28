@@ -29,7 +29,7 @@ func TestVerifyTurnstileWithCloudflareClientTimeout(t *testing.T) {
 	}
 
 	start := time.Now()
-	_, err := service.verifyTurnstileWithCloudflare(context.Background(), "cf-response", "127.0.0.1")
+	_, err := service.verifyTurnstileWithCloudflare(context.Background(), "pending-token", "cf-response", "127.0.0.1")
 	if err == nil {
 		t.Fatal("expected siteverify timeout error")
 	}
@@ -73,7 +73,7 @@ func TestVerifyTurnstileWithCloudflareReusesIdempotencyKey(t *testing.T) {
 	}
 
 	for i := 0; i < 2; i++ {
-		payload, err := service.verifyTurnstileWithCloudflare(context.Background(), "same-cf-response", "")
+		payload, err := service.verifyTurnstileWithCloudflare(context.Background(), "same-pending-token", "same-cf-response", "")
 		if err != nil {
 			t.Fatalf("verify %d: %v", i+1, err)
 		}
@@ -89,6 +89,51 @@ func TestVerifyTurnstileWithCloudflareReusesIdempotencyKey(t *testing.T) {
 	}
 	if keys[0] != keys[1] {
 		t.Fatalf("idempotency keys differ: %q != %q", keys[0], keys[1])
+	}
+}
+
+func TestVerifyTurnstileResponseCannotReuseSuccessAcrossPendingTokens(t *testing.T) {
+	redisClient := newFakeRedisClient(t)
+	var mu sync.Mutex
+	consumed := make(map[string]string)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseMultipartForm(1 << 20); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		response, key := r.FormValue("response"), r.FormValue("idempotency_key")
+		mu.Lock()
+		defer mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		if previous, ok := consumed[response]; ok && previous != key {
+			fmt.Fprint(w, `{"success":false,"error-codes":["timeout-or-duplicate"]}`)
+			return
+		}
+		consumed[response] = key
+		fmt.Fprint(w, `{"success":true}`)
+	}))
+	defer server.Close()
+	restoreTurnstileSiteverify(t, server.URL, server.Client())
+	service := &Service{cfg: config.Config{TurnstileSecret: "secret"}, logger: zap.NewNop(), redis: redisClient}
+
+	for _, tc := range []struct {
+		name, token, response string
+		wantSuccess           bool
+	}{
+		{"first verification", "pending-a", "cf-response", true},
+		{"same verification retry", "pending-a", "cf-response", true},
+		{"different verification replay", "pending-b", "cf-response", false},
+		{"new challenge", "pending-b", "fresh-cf-response", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			result, err := service.verifyTurnstileWithCloudflare(context.Background(), tc.token, tc.response, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Success != tc.wantSuccess {
+				t.Fatalf("success = %v, want %v", result.Success, tc.wantSuccess)
+			}
+		})
 	}
 }
 

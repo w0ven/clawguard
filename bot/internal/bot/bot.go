@@ -30,49 +30,47 @@ import (
 )
 
 type Service struct {
-	cfg                  config.Config
-	logger               *zap.Logger
-	queries              *store.Queries
-	redis                redis.Cmdable
-	casClient            *casclient.Client
-	aiProviders          ai.ProviderRegistry
-	aiModels             ai.ModelRegistry
-	aiResolver           *ai.Resolver
-	aiModerator          *ai.Moderator
-	adkiller             *adkiller.Client
-	bot                  *tele.Bot
-	sender               telegramSender
-	sendLimiter          *SendLimiter
-	lifecycleCtx         context.Context
-	lifecycleCancel      context.CancelFunc
-	wg                   sync.WaitGroup
-	verifyBtn            tele.Btn
-	verifyMathBtn        tele.Btn
-	verifyRandBtn        tele.Btn
-	verifyAdminBtn       tele.Btn
-	startedAt            time.Time
-	lastUpdateAt         atomic.Value
-	lastAIOKAt           atomic.Value
-	lastAIFailAt         atomic.Value
-	lastAIError          atomic.Value
-	bioCheckInFlight     sync.Map
-	userActionLocks      sync.Map
-	messageDeleteLocks   sync.Map
-	joinEventLocks       sync.Map
-	updateExecutions     sync.Map
-	membershipSessions   sync.Map
-	authorizedGroups     sync.Map
-	authorizedGroupAt    sync.Map
-	policySnapshots      sync.Map
-	policySnapshotAt     sync.Map
-	chatAdmins           sync.Map
-	systemState          atomic.Value
-	systemStateAt        atomic.Int64
-	runtimeGuardsOnce    sync.Once
-	joinProtector        *joinProtector
-	cleanupBreaker       *telegramCleanupBreaker
-	assistant            *GroupAssistant
-	assistantEligibility sync.Map
+	cfg                config.Config
+	logger             *zap.Logger
+	queries            *store.Queries
+	redis              redis.Cmdable
+	casClient          *casclient.Client
+	aiProviders        ai.ProviderRegistry
+	aiModels           ai.ModelRegistry
+	aiResolver         *ai.Resolver
+	aiModerator        *ai.Moderator
+	adkiller           *adkiller.Client
+	bot                *tele.Bot
+	sender             telegramSender
+	sendLimiter        *SendLimiter
+	lifecycleCtx       context.Context
+	lifecycleCancel    context.CancelFunc
+	wg                 sync.WaitGroup
+	verifyBtn          tele.Btn
+	verifyMathBtn      tele.Btn
+	verifyRandBtn      tele.Btn
+	verifyAdminBtn     tele.Btn
+	startedAt          time.Time
+	lastUpdateAt       atomic.Value
+	lastAIOKAt         atomic.Value
+	lastAIFailAt       atomic.Value
+	lastAIError        atomic.Value
+	bioCheckInFlight   sync.Map
+	userActionLocks    sync.Map
+	messageDeleteLocks sync.Map
+	joinEventLocks     sync.Map
+	updateExecutions   sync.Map
+	membershipSessions sync.Map
+	authorizedGroups   sync.Map
+	authorizedGroupAt  sync.Map
+	policySnapshots    sync.Map
+	policySnapshotAt   sync.Map
+	chatAdmins         sync.Map
+	systemState        atomic.Value
+	systemStateAt      atomic.Int64
+	runtimeGuardsOnce  sync.Once
+	joinProtector      *joinProtector
+	cleanupBreaker     *telegramCleanupBreaker
 }
 
 type buttonPayload struct {
@@ -244,7 +242,6 @@ func New(ctx context.Context, cfg config.Config, logger *zap.Logger, queries *st
 	svc.aiResolver = resolver
 	svc.aiModerator = ai.NewModerator(ctx, logger, rdb, queries, providers, models, resolver, svc)
 	svc.adkiller = adkiller.NewClient(adkiller.DefaultBaseURL, logger)
-	svc.assistant = NewGroupAssistant(svc)
 	if err := svc.ReloadAdKillerSecret(ctx); err != nil {
 		logger.Warn("load adkiller secret failed", zap.Error(err))
 	}
@@ -285,6 +282,9 @@ func (s *Service) setupCommandMenu(ctx context.Context) error {
 		{Text: "spam", Description: "封禁用户 /spam @user"},
 		{Text: "cas", Description: "查询 CAS 黑名单状态"},
 		{Text: "warn_status", Description: "查看警告记录"},
+		{Text: "exempt", Description: "豁免本群用户"},
+		{Text: "unexempt", Description: "撤销本群用户豁免"},
+		{Text: "exemptlist", Description: "查看本群豁免名单"},
 	}
 	// 群内管理员菜单
 	if _, err := s.bot.Raw("setMyCommands", map[string]any{
@@ -396,6 +396,18 @@ func (s *Service) ProcessUpdate(update tele.Update) (err error) {
 	}
 	finalizeClaim = true
 
+	// Telebot discards commands addressed to other bots before OnText. They
+	// remain ordinary group content for moderation, but never execute here.
+	if m := update.Message; m != nil && m.Chat != nil && (m.Chat.Type == tele.ChatGroup || m.Chat.Type == tele.ChatSuperGroup) {
+		fields := strings.Fields(m.Text)
+		if len(fields) > 0 && strings.HasPrefix(fields[0], "/") {
+			name, target, ok := strings.Cut(fields[0], "@")
+			if ok && len(name) > 1 && target != "" && s.bot.Me != nil && !strings.EqualFold(target, s.bot.Me.Username) {
+				c := s.bot.NewContext(update)
+				return s.runHandler("foreign_command", c, s.handleIncomingMessage)
+			}
+		}
+	}
 	s.bot.ProcessUpdate(update)
 	return execution.result()
 }
@@ -437,18 +449,11 @@ func (s *Service) registerHandlers() {
 		return s.runHandler("verify_admin", c, s.handleVerifyAdmin)
 	})
 
-	s.bot.Handle(tele.OnCallback, func(c tele.Context) error {
-		return s.runHandler("native_assistant_callback", c, s.handleNativeAssistantCallback)
-	})
-
 	s.bot.Handle(tele.OnText, func(c tele.Context) error {
 		return s.runHandler("text", c, s.handleIncomingMessage)
 	})
 	s.bot.Handle(tele.OnEdited, func(c tele.Context) error {
 		return s.runHandler("edited", c, s.handleEditedMessage)
-	})
-	s.bot.Handle(tele.OnPinned, func(c tele.Context) error {
-		return s.runHandler("pinned", c, s.assistant.handlePinned)
 	})
 	s.bot.Handle(tele.OnPhoto, func(c tele.Context) error {
 		return s.runHandler("photo", c, s.handleIncomingMessage)
@@ -528,6 +533,12 @@ func (s *Service) registerHandlers() {
 	s.bot.Handle("/spam", func(c tele.Context) error {
 		return s.runCommandHandler("spam", c, s.handleSpamCommand)
 	})
+	for _, name := range []string{"exempt", "unexempt", "exemptlist"} {
+		name := name
+		s.bot.Handle("/"+name, func(c tele.Context) error {
+			return s.runCommandHandler(name, c, func(c tele.Context) error { return s.handleGroupExemptCommand(c, name) })
+		})
+	}
 }
 
 func (s *Service) runHandler(name string, c tele.Context, handler func(tele.Context) error) (err error) {
@@ -593,7 +604,29 @@ func (s *Service) preprocessGroupCommand(c tele.Context) (bool, error) {
 		s.logger.Warn("load guard policy failed for command", zap.Error(err), zap.Int64("chat_id", chat.ID))
 		return true, nil
 	}
-	return s.applyDeletedAccountMessageFilter(ctx, msg, policy, state.ActionsPaused)
+	if s.exemptMessage(ctx, msg) {
+		return false, nil
+	}
+	handled, err := s.applyDeletedAccountMessageFilter(ctx, msg, policy, state.ActionsPaused)
+	if err != nil || handled {
+		return handled, err
+	}
+	// Only verified chat administrators get command-content protection.
+	member, memberErr := s.bot.ChatMemberOf(chat, msg.Sender)
+	if memberErr != nil || member == nil || member.User == nil || member.User.ID != msg.Sender.ID {
+		// Match the ordinary message path, but never dispatch the command.
+		if err := s.handleIncomingMessageWithOptions(c, false); err != nil {
+			return true, err
+		}
+		return true, nil
+	}
+	if member.Role == tele.Administrator || member.Role == tele.Creator {
+		return false, nil
+	}
+	if err := s.handleIncomingMessageWithOptions(c, false); err != nil {
+		return true, err
+	}
+	return false, nil
 }
 
 func (s *Service) handleUserJoined(c tele.Context) error {
@@ -628,6 +661,9 @@ func (s *Service) handleUserJoined(c tele.Context) error {
 	policy, err := s.LoadGuardPolicy(ctx, chat.ID)
 	if err != nil {
 		return fmt.Errorf("load guard policy for join service message: %w", err)
+	}
+	if state.Frozen || s.exemptUser(ctx, chat, user) {
+		return nil
 	}
 	if !state.ActionsPaused && policy.Verify.DeleteJoinMessage {
 		go s.deleteJoinEventMessageAsync(chat, user, msg)
@@ -681,6 +717,15 @@ func (s *Service) handleChatMemberUpdate(c tele.Context) error {
 	if err != nil {
 		s.logger.Warn("load system state for chat-member join failed", zap.Error(err), zap.Int64("chat_id", update.Chat.ID), zap.Int64("user_id", member.User.ID))
 		return err
+	}
+	if state.Frozen {
+		return nil
+	}
+	if s.exemptUser(ctx, update.Chat, member.User) {
+		if policy.Verify.Enabled && !state.ActionsPaused && s.acquireVerificationJoinLock(update.Chat.ID, member.User.ID) {
+			s.sendWelcomeMessage(ctx, update.Chat, member.User, nil)
+		}
+		return nil
 	}
 	actionsPaused := state.ActionsPaused
 	if handled, err := s.handleDeletedAccountJoin(ctx, update.Chat, member.User, policy, actionsPaused); err != nil {
@@ -928,6 +973,9 @@ func (s *Service) startVerification(chat *tele.Chat, user *tele.User, joinEventM
 		s.logger.Warn("load system state failed for verification, skip flow", zap.Error(err), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
 		return fmt.Errorf("load system state for verification: %w", err)
 	}
+	if state.Frozen || s.exemptUser(ctx, chat, user) {
+		return nil
+	}
 	actionsPaused := state.ActionsPaused
 
 	policyStartedAt := time.Now()
@@ -1030,6 +1078,9 @@ func (s *Service) startVerification(chat *tele.Chat, user *tele.User, joinEventM
 
 	s.upsertJoinSideEffects(ctx, chat, user)
 
+	if s.exemptUser(ctx, chat, user) {
+		return nil
+	}
 	member := tele.ChatMember{
 		User:   user,
 		Rights: tele.NoRights(),
@@ -1119,6 +1170,9 @@ func (s *Service) startAsyncVerificationChecks(chat *tele.Chat, user *tele.User,
 		defer cancel()
 
 		totalStartedAt := time.Now()
+		if s.exemptUser(ctx, chat, user) {
+			return
+		}
 
 		if policy.AntiSpam.CASEnabled && s.casClient != nil {
 			casStartedAt := time.Now()
@@ -1291,12 +1345,16 @@ type asyncVerificationMatchOps struct {
 }
 
 func (s *Service) handleAsyncVerificationMatch(ctx context.Context, match asyncVerificationMatch) error {
+	if match.chat == nil || match.user == nil || !s.automaticActionAllowed(ctx, match.chat.ID) || s.exemptUser(ctx, match.chat, match.user) {
+		return nil
+	}
 	if match.feedbackKind == "profile" && match.decisionMode == "" {
 		match.decisionMode = "join_keyword"
 		if strings.EqualFold(strings.TrimSpace(match.policy.Verify.ProfileCheckMode), "ai") {
 			match.decisionMode = "join_ai"
 		}
 	}
+	var profileDecisionID int64
 	return performAsyncVerificationMatch(ctx, asyncVerificationMatchOps{
 		banUser:                  s.banUser,
 		awaitPendingVerification: s.awaitPendingVerification,
@@ -1334,14 +1392,16 @@ func (s *Service) handleAsyncVerificationMatch(ctx context.Context, match asyncV
 			})
 		},
 		recordAIDecision: func(ctx context.Context, chat *tele.Chat, user *tele.User, matched string, mode string, aiOutput *ai.CheckOutput) error {
-			return s.recordProfileViolationDecision(ctx, chat, user, nil, matched, mode, aiOutput)
+			var err error
+			profileDecisionID, err = s.recordProfileViolationDecision(ctx, chat, user, nil, matched, mode, aiOutput)
+			return err
 		},
 		updateTrustBanned: func(ctx context.Context, chatID, userID int64, notes string) {
 			fakeMsg := &tele.Message{
 				Chat:   match.chat,
 				Sender: match.user,
 			}
-			s.resetTrustAfterViolation(ctx, fakeMsg, "ban", stringPtr(notes))
+			s.resetTrustAfterViolation(ctx, fakeMsg, "ban", stringPtr(notes), profileDecisionID)
 		},
 		logger: s.logger,
 	}, match)
@@ -1910,6 +1970,10 @@ func (s *Service) handleVerifyRandom(c tele.Context) error {
 }
 
 func (s *Service) completeVerification(ctx context.Context, chat *tele.Chat, user *tele.User, pending store.PendingVerification, resultKind ...string) error {
+	manual := len(resultKind) > 0 && resultKind[0] == "admin_pass"
+	if !manual && s.exemptUser(ctx, chat, user) {
+		return errExemptPending
+	}
 	deleted, err := s.queries.DeletePendingVerification(ctx, store.DeletePendingVerificationParams{
 		ChatID: chat.ID,
 		UserID: user.ID,
@@ -1925,7 +1989,7 @@ func (s *Service) completeVerification(ctx context.Context, chat *tele.Chat, use
 		s.logger.Warn("load guard policy before verification permission sync failed, using defaults", zap.Error(polErr), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
 		policy = config.DefaultPolicy
 	}
-	if err := s.applyVerificationPassPermissions(ctx, chat, user, policy); err != nil {
+	if err := s.applyVerificationPassPermissions(ctx, chat, user, policy, manual); err != nil {
 		if restoreErr := s.restorePendingVerification(ctx, pending); restoreErr != nil {
 			s.logger.Error("restore pending verification after restrict failure", zap.Error(restoreErr), zap.Int64("chat_id", pending.ChatID), zap.Int64("user_id", pending.UserID))
 		}
@@ -1968,6 +2032,10 @@ func (s *Service) HandleVerificationExpiry(ctx context.Context, pending store.Pe
 		return VerificationExpiryResult{}, nil
 	}
 
+	authorized, authErr := s.IsAuthorizedGroup(ctx, pending.ChatID)
+	if authErr != nil || !authorized {
+		return verificationExpiryRetry(time.Now().Add(time.Minute), "group authorization unavailable or disabled"), nil
+	}
 	policy, err := s.LoadGuardPolicy(ctx, pending.ChatID)
 	if err != nil {
 		return verificationExpiryRetry(time.Now().Add(30*time.Second), "guard policy unavailable"), nil
@@ -1976,8 +2044,8 @@ func (s *Service) HandleVerificationExpiry(ctx context.Context, pending store.Pe
 	if stateErr != nil {
 		return verificationExpiryRetry(time.Now().Add(30*time.Second), "system state unavailable"), nil
 	}
-	if state.ActionsPaused {
-		return verificationExpiryRetry(time.Now().Add(30*time.Second), "telegram actions paused"), nil
+	if state.Frozen || state.ActionsPaused {
+		return verificationExpiryRetry(time.Now().Add(30*time.Second), "system frozen or telegram actions paused"), nil
 	}
 
 	chat := &tele.Chat{ID: pending.ChatID}
@@ -1985,6 +2053,9 @@ func (s *Service) HandleVerificationExpiry(ctx context.Context, pending store.Pe
 		ID:        pending.UserID,
 		Username:  derefString(pending.Username),
 		FirstName: derefString(pending.FirstName),
+	}
+	if pause, reason := s.deferredExemption(ctx, chat, user); pause {
+		return verificationExpiryRetry(time.Now().Add(time.Minute), reason), nil
 	}
 	if pending.Method == "join_protection_cleanup" {
 		return s.handleJoinProtectionCleanupExpiry(ctx, pending, policy, chat, user)
@@ -1995,6 +2066,9 @@ func (s *Service) HandleVerificationExpiry(ctx context.Context, pending store.Pe
 		return verificationExpiryRetry(retryAt, "telegram cleanup cooldown"), nil
 	}
 
+	if pause, reason := s.deferredExemption(ctx, chat, user); pause {
+		return verificationExpiryRetry(time.Now().Add(time.Minute), reason), nil
+	}
 	failAction := verificationFailActionSnapshot(pending.Payload, policy.Verify.FailAction)
 	action, err := s.applyVerificationFailAction(chat, user, failAction)
 	if err != nil {
@@ -2084,6 +2158,9 @@ func (s *Service) deleteProcessedPendingVerification(ctx context.Context, pendin
 }
 
 func (s *Service) failVerificationImmediately(ctx context.Context, chat *tele.Chat, user *tele.User, pending store.PendingVerification, failAction, rule string) error {
+	if rule != "verify_admin_reject" && s.exemptUser(ctx, chat, user) {
+		return errExemptPending
+	}
 	action, err := s.applyVerificationFailAction(chat, user, failAction)
 	if err != nil {
 		return err
@@ -2572,6 +2649,7 @@ func (s *Service) handleUnbanCommand(c tele.Context) error {
 			warnings = append(warnings, "用户并未处于本地封禁状态，已跳过本地信任状态解封")
 		} else {
 			s.logger.Warn("reset user trust status on unban failed", zap.Error(err), zap.Int64("user_id", target.UserID))
+			return c.Send("清理本群信任封禁失败，请重试")
 		}
 	}
 

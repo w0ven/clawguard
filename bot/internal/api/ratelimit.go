@@ -21,8 +21,16 @@ const (
 	adminBanLimit             = 30
 	adminWriteLimit           = 120
 
-	apiRateLimitWindow = time.Minute // minutes: all API rate limit counts are per rolling Redis TTL window.
+	apiRateLimitWindow = time.Minute // minutes: all API rate limit counts use a fixed Redis TTL window.
 )
+
+const apiRateLimitCounterScript = `
+local count = redis.call("INCR", KEYS[1])
+if count == 1 or redis.call("PTTL", KEYS[1]) < 0 then
+    redis.call("PEXPIRE", KEYS[1], ARGV[1])
+end
+return count
+`
 
 type rateLimiter struct {
 	redis  redis.Cmdable
@@ -46,16 +54,11 @@ func (r rateLimiter) Allow(ctx context.Context, key string, limit int, window ti
 		return true, nil
 	}
 
-	count, err := r.redis.Incr(ctx, key).Result()
+	windowMilliseconds := max(window.Milliseconds(), 1)
+	count, err := r.redis.Eval(ctx, apiRateLimitCounterScript, []string{key}, windowMilliseconds).Int64()
 	if err != nil {
-		r.logger.Warn("api rate limit incr failed; failing open", zap.String("key", key), zap.Error(err))
+		r.logger.Warn("api rate limit counter failed; failing open", zap.String("key", key), zap.Error(err))
 		return true, err
-	}
-	if count == 1 {
-		if err := r.redis.Expire(ctx, key, window).Err(); err != nil {
-			r.logger.Warn("api rate limit expire failed; failing open", zap.String("key", key), zap.Error(err))
-			return true, err
-		}
 	}
 	return count <= int64(limit), nil
 }

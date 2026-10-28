@@ -37,7 +37,7 @@ Telegram 群组管理系统：入群验证、规则过滤、CAS 联动、AI 内�
 
 | 层 | 技术 |
 |---|---|
-| Bot / API | Go 1.26（toolchain 1.26.6）、telebot.v3、Echo v4 |
+| Bot / API | Go 1.26.10（最低版本）、telebot.v3、Echo v4 |
 | Web | Node.js 22、Next.js 16、React 19、Tailwind CSS |
 | 数据 | PostgreSQL 16、pgx/v5、sqlc、goose（当前到 `00031`） |
 | 状态 / 限流 | Redis 7，AOF `everysec` |
