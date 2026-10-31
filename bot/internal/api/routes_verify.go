@@ -7,11 +7,13 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/labstack/echo/v4"
 	"go.uber.org/zap"
 
+	"github.com/openclaw/clawguard/internal/auth"
 	"github.com/openclaw/clawguard/internal/bot"
 	"github.com/openclaw/clawguard/internal/redact"
 	"github.com/openclaw/clawguard/internal/store"
@@ -19,6 +21,8 @@ import (
 
 func (s *Server) registerVerifyRoutes() {
 	s.echo.GET("/api/verify/capabilities", s.handleVerifyCapabilities, s.apiRateLimit(s.ipRateLimitKey("verify:capabilities_ip"), turnstileVerifyIPLimit, apiRateLimitWindow))
+	s.echo.POST("/api/verify/mini/config", s.handleDualCaptchaConfig, s.apiRateLimit(s.ipRateLimitKey("verify:mini_ip"), turnstileVerifyIPLimit, apiRateLimitWindow))
+	s.echo.POST("/api/verify/mini/submit", s.handleDualCaptcha, s.apiRateLimit(s.ipRateLimitKey("verify:mini_ip"), turnstileVerifyIPLimit, apiRateLimitWindow))
 	s.echo.POST("/api/verify/dual/config", s.handleDualCaptchaConfig,
 		s.apiRateLimit(s.ipRateLimitKey("verify:dual_ip"), turnstileVerifyIPLimit, apiRateLimitWindow))
 	s.echo.POST("/api/verify/dual/submit", s.handleDualCaptcha,
@@ -86,32 +90,65 @@ func (s *Server) handleDualCaptchaConfig(c echo.Context) error {
 		return c.JSON(http.StatusServiceUnavailable, map[string]string{"error": "双重验证未配置"})
 	}
 	var payload struct {
-		Token string `json:"token"`
+		Token    string `json:"token"`
+		InitData string `json:"init_data"`
 	}
-	c.Request().Body = http.MaxBytesReader(c.Response(), c.Request().Body, 512)
+	c.Request().Body = http.MaxBytesReader(c.Response(), c.Request().Body, 20000)
 	if err := json.NewDecoder(c.Request().Body).Decode(&payload); err != nil || len(payload.Token) != 36 {
 		return c.JSON(http.StatusNotFound, map[string]string{"error": "验证已失效"})
 	}
 	if !s.allowDualCaptchaToken(c, payload.Token) {
 		return c.JSON(http.StatusTooManyRequests, map[string]string{"error": "请求过于频繁，请稍后重试"})
 	}
-	if _, err := s.botService.Queries().GetActiveDualCaptcha(c.Request().Context(), payload.Token); err != nil {
+	pending, err := s.botService.Queries().GetActiveDualCaptcha(c.Request().Context(), payload.Token)
+	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return c.JSON(http.StatusNotFound, map[string]string{"error": "验证已失效"})
 		}
 		return c.JSON(http.StatusServiceUnavailable, map[string]string{"error": "验证暂不可用"})
 	}
-	return c.JSON(http.StatusOK, map[string]string{"turnstile_sitekey": s.cfg.TurnstileSiteKey, "hcaptcha_sitekey": s.cfg.HCaptchaSiteKey})
+	var mode struct {
+		MiniApp bool `json:"miniapp"`
+	}
+	if json.Unmarshal(pending.Payload, &mode) != nil {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "验证已失效"})
+	}
+	mini := c.Path() == "/api/verify/mini/config"
+	if mode.MiniApp != mini {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "验证已失效"})
+	}
+	result := map[string]any{"turnstile_sitekey": s.cfg.TurnstileSiteKey, "hcaptcha_sitekey": s.cfg.HCaptchaSiteKey}
+	if mini {
+		identity, err := auth.VerifyWebAppData(payload.InitData, s.cfg.BotToken, time.Now(), 10*time.Minute)
+		if err != nil || identity.UserID != pending.UserID {
+			return c.JSON(http.StatusForbidden, map[string]string{"error": "无法验证当前账号，请本人从机器人私聊打开。"})
+		}
+		group, err := s.botService.Queries().GetGroupByChatID(c.Request().Context(), pending.ChatID)
+		if err != nil {
+			return c.JSON(http.StatusServiceUnavailable, map[string]string{"error": "验证暂不可用"})
+		}
+		result["group_title"] = group.Title
+		result["user_id"] = pending.UserID
+		result["username"] = pending.Username
+		result["expires_at"] = pending.ExpiresAt
+		passed, err := s.botService.Queries().DualCaptchaPassed(c.Request().Context(), pending.ID)
+		if err != nil {
+			return c.JSON(http.StatusServiceUnavailable, map[string]string{"error": "验证暂不可用"})
+		}
+		result["recovery_pending"] = passed
+	}
+	return c.JSON(http.StatusOK, result)
 }
 
 func (s *Server) handleDualCaptcha(c echo.Context) error {
 	c.Response().Header().Set("Cache-Control", "no-store")
 	req := c.Request()
-	req.Body = http.MaxBytesReader(c.Response(), req.Body, 16384)
+	req.Body = http.MaxBytesReader(c.Response(), req.Body, 36000)
 	var payload struct {
 		Token      string `json:"token"`
 		CFResponse string `json:"cf_response"`
 		HResponse  string `json:"h_response"`
+		InitData   string `json:"init_data"`
 	}
 	if err := json.NewDecoder(req.Body).Decode(&payload); err != nil || len(payload.Token) != 36 || strings.TrimSpace(payload.CFResponse) == "" || strings.TrimSpace(payload.HResponse) == "" || len(payload.CFResponse) > 2048 || len(payload.HResponse) > 8192 {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "请完成并重新提交两项验证"})
@@ -119,7 +156,16 @@ func (s *Server) handleDualCaptcha(c echo.Context) error {
 	if !s.allowDualCaptchaToken(c, payload.Token) {
 		return c.JSON(http.StatusTooManyRequests, map[string]string{"error": "请求过于频繁，请稍后重试"})
 	}
-	err := s.botService.VerifyDualCaptcha(req.Context(), payload.Token, payload.CFResponse, payload.HResponse, c.RealIP())
+	var err error
+	if c.Path() == "/api/verify/mini/submit" {
+		identity, identityErr := auth.VerifyWebAppData(payload.InitData, s.cfg.BotToken, time.Now(), 10*time.Minute)
+		if identityErr != nil {
+			return c.JSON(http.StatusForbidden, map[string]string{"error": "无法验证当前账号，请本人从机器人私聊打开。"})
+		}
+		err = s.botService.VerifyMiniAppDualCaptcha(req.Context(), payload.Token, payload.CFResponse, payload.HResponse, c.RealIP(), identity.UserID)
+	} else {
+		err = s.botService.VerifyDualCaptcha(req.Context(), payload.Token, payload.CFResponse, payload.HResponse, c.RealIP())
+	}
 	switch {
 	case err == nil:
 		return c.JSON(http.StatusOK, map[string]bool{"success": true})

@@ -4,6 +4,10 @@ export type TelegramWebApp = {
   ready: () => void;
   expand: () => void;
   close: () => void;
+  safeAreaInset?: { top: number; bottom: number };
+  contentSafeAreaInset?: { top: number; bottom: number };
+  onEvent?: (event: string, handler: () => void) => void;
+  offEvent?: (event: string, handler: () => void) => void;
   BackButton: {
     show: () => void;
     hide: () => void;

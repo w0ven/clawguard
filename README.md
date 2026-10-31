@@ -208,6 +208,10 @@ ingress:
 
 域名必须和 `PUBLIC_BASE_URL` 一致，且是 HTTPS。
 
+入群 Mini App 页面 `/verify/mini` 需要允许 Telegram Web 嵌入：仅此路径移除 `X-Frame-Options`，设置 `Content-Security-Policy: frame-ancestors 'self' https://web.telegram.org`；后台和其他路径保留 `X-Frame-Options: SAMEORIGIN`。仓库 Caddyfile 已示例此规则；若外层反代也添加了防嵌入头，须同步设置同一路径例外，避免两个反代的头冲突。
+
+新双重验证由群内按钮进入 Bot 私聊，再由私聊打开 Mini App，原已发出的网页验证链接继续有效。用户主动 `/start` 后记录私聊开启状态；升级前没有记录的用户视为未开启。入群成功回执为单次异步尽力发送，发送失败、进程中断或任务繁忙不重试、不影响已解除的入群限制；数据库记录 `sent`、`failed` 或 `unconfirmed`（未尝试或结果未确认），后续处罚通知不复用此单次回执机制。
+
 ### 5. 授权第一个群
 
 1. 把 bot 拉进群，设为管理员，至少给 **删除消息、限制成员、封禁成员**。

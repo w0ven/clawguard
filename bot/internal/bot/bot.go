@@ -760,7 +760,11 @@ func (s *Service) handleChatMemberUpdate(c tele.Context) error {
 		return s.handleOtherBotJoined(update, member.User)
 	}
 
-	return s.startVerification(update.Chat, member.User, nil, generation)
+	joinedAt := time.Time{}
+	if update.Unixtime > 0 {
+		joinedAt = time.Unix(update.Unixtime, 0)
+	}
+	return s.startVerificationAt(update.Chat, member.User, nil, generation, joinedAt)
 }
 
 func (s *Service) handleOtherBotJoined(update *tele.ChatMemberUpdate, user *tele.User) error {
@@ -971,6 +975,10 @@ func (s *Service) handleBotChatMemberUpdate(update *tele.ChatMemberUpdate) error
 }
 
 func (s *Service) startVerification(chat *tele.Chat, user *tele.User, joinEventMessage *tele.Message, membershipGeneration string) error {
+	return s.startVerificationAt(chat, user, joinEventMessage, membershipGeneration, time.Time{})
+}
+
+func (s *Service) startVerificationAt(chat *tele.Chat, user *tele.User, joinEventMessage *tele.Message, membershipGeneration string, joinedAt time.Time) error {
 	if chat == nil || user == nil {
 		return nil
 	}
@@ -1147,6 +1155,11 @@ func (s *Service) startVerification(chat *tele.Chat, user *tele.User, joinEventM
 
 	verifyStartedAt := time.Now()
 	promptCtx := context.WithValue(ctx, dualCaptchaGenerationKey{}, membershipGeneration)
+	deadlineStart := flowStartedAt
+	if !joinedAt.IsZero() && joinedAt.Before(deadlineStart) {
+		deadlineStart = joinedAt
+	}
+	promptCtx = context.WithValue(promptCtx, dualCaptchaStartTimeKey{}, deadlineStart)
 	if err := s.startVerificationPrompt(promptCtx, chat, user, policy); err != nil {
 		s.joinProtector.ReleasePending(chat.ID)
 		if cleanupErr := s.handleVerificationPromptFailure(ctx, chat, user, policy, err, membershipGeneration); cleanupErr != nil {
@@ -1652,6 +1665,11 @@ func (s *Service) startRandomVerification(ctx context.Context, chat *tele.Chat, 
 func (s *Service) storePendingVerification(ctx context.Context, chatID int64, user *tele.User, method string, payload []byte, messageID int, timeoutSeconds int, failAction string) error {
 	joinMessageID := int64(messageID)
 	expiresAt := time.Now().Add(time.Duration(timeoutSeconds) * time.Second)
+	if method == "turnstile_hcaptcha" {
+		if started, ok := ctx.Value(dualCaptchaStartTimeKey{}).(time.Time); ok && !started.IsZero() {
+			expiresAt = started.Add(time.Duration(timeoutSeconds) * time.Second)
+		}
+	}
 	payload, err := withVerificationFailActionSnapshot(payload, failAction)
 	if err != nil {
 		return fmt.Errorf("snapshot verification fail action: %w", err)
