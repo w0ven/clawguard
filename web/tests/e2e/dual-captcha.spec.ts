@@ -60,12 +60,16 @@ test('legacy Turnstile link still submits only its own endpoint', async ({ page 
     const w = window as any;
     w.turnstile = { render: (_node: unknown, opts: any) => { w.legacyOpts = opts; return 'legacy'; }, remove: () => {} };
   });
+  await page.route('https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit', route =>
+    route.fulfill({ contentType: 'application/javascript', body: '/* mocked Turnstile */' }),
+  );
   await page.route('**/api/verify/turnstile/**', async route => {
     submitted = route.request().postDataJSON();
     await route.fulfill({ json: { success: true } });
   });
   await page.goto(`/verify/${token}`);
   await expect.poll(() => page.evaluate(() => Boolean((window as any).legacyOpts))).toBe(true);
+  expect(await page.evaluate(() => (window as any).legacyOpts.sitekey)).toBe('playwright-fixture-site-key');
   await page.evaluate(() => (window as any).legacyOpts.callback('legacy-cf'));
   await expect(page.getByRole('heading', { name: '验证通过' })).toBeVisible();
   expect(submitted).toEqual({ cf_response: 'legacy-cf' });

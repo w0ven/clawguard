@@ -11,6 +11,8 @@ export default defineConfig({
   },
   webServer: {
     command: "npm run dev -- --hostname 127.0.0.1 --port 3100",
+    // The legacy widget reads this at build time; this value is only for the mocked test server.
+    env: { NEXT_PUBLIC_TURNSTILE_SITE_KEY: "playwright-fixture-site-key" },
     url: "http://127.0.0.1:3100",
     reuseExistingServer: !process.env.CI,
     timeout: 120_000,
