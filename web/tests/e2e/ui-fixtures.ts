@@ -26,7 +26,8 @@ export const test = base.extend<{mock:Mock}>({mock:[async({page},use,testInfo)=>
    else if(p==='/api/admin/global-config')data={config:body.config,version:8};
    else if(p.endsWith('/join-protection'))data={join_protection:body,status};
    else data={ok:true};
-  } else if(p==='/api/auth/me') data={admin:{id:1,telegram_id:1,role:'super_admin',display_name:'Fixture Admin'}};
+  } else if(p==='/api/verify/capabilities') data={dual_captcha_available:false};
+  else if(p==='/api/auth/me') data={admin:{id:1,telegram_id:1,role:'super_admin',display_name:'Fixture Admin'}};
   else if(p==='/api/admin/groups')data={groups:[group,{...group,chat_id:-1002,title:'Fixture 第二群'}]};
   else if(/^\/api\/admin\/groups\/-\d+$/.test(p))data={group:p.endsWith('-1002')?{...group,chat_id:-1002,title:'Fixture 第二群'}:group,merged_policy:policy};
   else if(p.endsWith('/exempt-users'))data={users:[]};

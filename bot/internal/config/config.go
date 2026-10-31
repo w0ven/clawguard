@@ -37,9 +37,21 @@ type Config struct {
 	JWTSecret                string  `env:"JWT_SECRET,required"`
 	TurnstileSiteKey         string  `env:"TURNSTILE_SITE_KEY"`
 	TurnstileSecret          string  `env:"TURNSTILE_SECRET_KEY"`
+	HCaptchaSiteKey          string  `env:"HCAPTCHA_SITE_KEY"`
+	HCaptchaSecret           string  `env:"HCAPTCHA_SECRET_KEY"`
 	EncryptionKey            string  `env:"ENCRYPTION_KEY"`
 	LLMProviders             string  `env:"LLM_PROVIDERS"`
 	Retention                RetentionConfig
+}
+
+func (c Config) DualCaptchaConfigured() bool {
+	for _, value := range []string{c.TurnstileSiteKey, c.TurnstileSecret, c.HCaptchaSiteKey, c.HCaptchaSecret} {
+		value = strings.TrimSpace(value)
+		if value == "" || (strings.HasPrefix(value, "__") && strings.HasSuffix(value, "__")) {
+			return false
+		}
+	}
+	return true
 }
 
 type RetentionConfig struct {

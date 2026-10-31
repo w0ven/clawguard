@@ -319,7 +319,7 @@ func (s *Server) handlePutGlobalConfig(c echo.Context) error {
 		if err != nil {
 			return err
 		}
-		if err := validateGlobalPolicyUpdate(c.Request().Context(), tx, next); err != nil {
+		if err := validateGlobalPolicyUpdate(c.Request().Context(), tx, next, current.Config, s.cfg); err != nil {
 			return globalConfigValidationError{err: err}
 		}
 		updated, err = tx.UpdateGlobalConfig(c.Request().Context(), store.UpdateGlobalConfigParams{Config: next})

@@ -78,6 +78,11 @@ WITH ranked AS MATERIALIZED (
     WHERE expires_at < NOW()
       AND next_attempt_at <= NOW()
       AND (lease_until IS NULL OR lease_until < NOW())
+      AND NOT EXISTS (
+          SELECT 1 FROM dual_captcha_claims AS dual
+          WHERE dual.pending_id = pending_verifications.id
+            AND dual.state IN ('verified', 'applying', 'conflict')
+      )
 ), candidates AS (
     SELECT pending.id
     FROM pending_verifications AS pending

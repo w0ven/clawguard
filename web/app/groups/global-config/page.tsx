@@ -37,6 +37,7 @@ import type { GuardPolicy, KeywordReplyRule } from "@/lib/types";
 import { useToast } from "@/components/providers";
 import { useDirtyGuard } from "@/components/dirty-guard";
 import { Badge } from "@/components/ui/badge";
+import { DualCaptchaAvailability } from "@/components/dual-captcha-availability";
 import { Save } from "lucide-react";
 
 const tabs = [
@@ -232,6 +233,7 @@ export default function GlobalConfigPage() {
                       {field.description}
                     </p>
                   )}
+                  {field.path.join(".") === "verify.method" && <DualCaptchaAvailability />}
                   <p className="mt-2 text-[11px] text-[var(--text-muted)]">当前有效值：<strong className="font-medium text-[var(--text)]">{formatValue(value)}</strong></p>
                 </div>
                 {field.kind === "switch" && (

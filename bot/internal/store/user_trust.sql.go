@@ -74,6 +74,13 @@ RETURNING chat_id, user_id, username, first_name, last_name, joined_at, updated_
 `
 
 const updateUserTrustStatus = `-- name: UpdateUserTrustStatus :one
+WITH invalidated AS (
+    UPDATE dual_captcha_claims AS claim SET state='conflict',updated_at=now()
+    FROM pending_verifications AS pending
+    WHERE $3::text='banned' AND claim.pending_id=pending.id
+      AND pending.chat_id=$1 AND pending.user_id=$2
+      AND claim.state IN ('validating','verified','applying')
+)
 UPDATE user_trust
 SET status = $3,
     score = $4,
