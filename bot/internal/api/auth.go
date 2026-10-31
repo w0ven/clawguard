@@ -18,6 +18,7 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/labstack/echo/v4"
+	"github.com/labstack/echo/v4/middleware"
 	"go.uber.org/zap"
 
 	"github.com/openclaw/clawguard/internal/redact"
@@ -59,8 +60,8 @@ type telegramMiniAppUser struct {
 
 func (s *Server) registerAuthRoutes() {
 	s.echo.GET("/api/auth/telegram-login", s.handleTelegramLogin, s.apiRateLimit(s.ipRateLimitKey("auth:telegram_login_ip"), telegramLoginIPLimit, apiRateLimitWindow), s.apiRateLimit(s.telegramLoginUserRateLimitKey, telegramLoginUserLimit, apiRateLimitWindow))
-	s.echo.POST("/api/auth/telegram-login", s.handleTelegramLogin, s.apiRateLimit(s.ipRateLimitKey("auth:telegram_login_ip"), telegramLoginIPLimit, apiRateLimitWindow), s.apiRateLimit(s.telegramLoginUserRateLimitKey, telegramLoginUserLimit, apiRateLimitWindow))
-	s.echo.POST("/api/auth/miniapp", s.handleTelegramMiniApp, s.apiRateLimit(s.ipRateLimitKey("auth:miniapp_ip"), telegramLoginIPLimit, apiRateLimitWindow))
+	s.echo.POST("/api/auth/telegram-login", s.handleTelegramLogin, middleware.BodyLimit("64K"), s.apiRateLimit(s.ipRateLimitKey("auth:telegram_login_ip"), telegramLoginIPLimit, apiRateLimitWindow), s.apiRateLimit(s.telegramLoginUserRateLimitKey, telegramLoginUserLimit, apiRateLimitWindow))
+	s.echo.POST("/api/auth/miniapp", s.handleTelegramMiniApp, middleware.BodyLimit("64K"), s.apiRateLimit(s.ipRateLimitKey("auth:miniapp_ip"), telegramLoginIPLimit, apiRateLimitWindow))
 	s.echo.POST("/api/auth/logout", s.handleLogout, s.apiRateLimit(s.ipRateLimitKey("auth:logout_ip"), logoutIPLimit, apiRateLimitWindow))
 	s.echo.GET("/api/auth/me", s.requireAdminJWT(s.handleMe))
 }
@@ -185,6 +186,11 @@ func (s *Server) requireAdminJWT(next echo.HandlerFunc) echo.HandlerFunc {
 		admin, err := s.botService.Queries().GetAdminByID(c.Request().Context(), adminID)
 		if err != nil {
 			return c.JSON(http.StatusUnauthorized, map[string]string{"error": "admin not found"})
+		}
+		// Invalid stored scope must never be interpreted as the legacy empty,
+		// unrestricted scope, including by list queries that use an empty array.
+		if !validAdminGroupScope(admin) {
+			return c.JSON(http.StatusForbidden, map[string]string{"error": "invalid administrator group scope"})
 		}
 
 		c.Set(adminContextKey, admin)

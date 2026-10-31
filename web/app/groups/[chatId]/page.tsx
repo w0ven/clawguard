@@ -7,6 +7,7 @@ import { GroupConfigEditor } from "@/components/group-config-editor";
 import { Card, CardBody } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { apiFetch } from "@/lib/api";
+import { isGroupConfigRevision, type GroupConfigRevision } from "@/lib/group-config";
 import type { GuardPolicy, Group } from "@/lib/types";
 import { useToast } from "@/components/providers";
 
@@ -15,6 +16,7 @@ export default function GroupDetailPage() {
   const { pushToast } = useToast();
   const [group, setGroup] = useState<Group | null>(null);
   const [mergedPolicy, setMergedPolicy] = useState<GuardPolicy | null>(null);
+  const [revision, setRevision] = useState<GroupConfigRevision | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
 
@@ -23,11 +25,14 @@ export default function GroupDetailPage() {
     setLoading(true);
     setGroup(null);
     setMergedPolicy(null);
+    setRevision(null);
     setLoadError(null);
 
-    apiFetch<{ group: Group; merged_policy: GuardPolicy }>(`/api/admin/groups/${params.chatId}`)
+    apiFetch<{ group: Group; merged_policy: GuardPolicy; config_revision?: unknown }>(`/api/admin/groups/${params.chatId}`)
       .then((payload) => {
         if (!alive) return;
+        if (!isGroupConfigRevision(payload.config_revision)) throw new Error("缺少群配置版本，请刷新后重试");
+        setRevision(payload.config_revision);
         setGroup(payload.group);
         setMergedPolicy(payload.merged_policy);
       })
@@ -57,7 +62,7 @@ export default function GroupDetailPage() {
       {loadError && !loading && (
         <Card><CardBody className="flex flex-col gap-2 py-10 text-sm text-[var(--danger)]"><Badge tone="danger">加载失败</Badge><span>{loadError}</span></CardBody></Card>
       )}
-      {group && mergedPolicy && !loadError ? <GroupConfigEditor key={group.chat_id} group={group} mergedPolicy={mergedPolicy} /> : null}
+      {group && mergedPolicy && revision !== null && !loadError ? <GroupConfigEditor key={group.chat_id} group={group} mergedPolicy={mergedPolicy} configRevision={revision} /> : null}
     </AdminShell>
   );
 }

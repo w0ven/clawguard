@@ -45,11 +45,15 @@ func (s *Server) handleVerifyTurnstile(c echo.Context) error {
 	var payload struct {
 		CFResponse string `json:"cf_response"`
 	}
+	c.Request().Body = http.MaxBytesReader(c.Response(), c.Request().Body, 16384)
 	if err := c.Bind(&payload); err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid json body"})
 	}
 	if payload.CFResponse == "" {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "missing cf_response"})
+	}
+	if len(payload.CFResponse) > 8192 {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid cf_response"})
 	}
 
 	if err := s.botService.VerifyTurnstileToken(c.Request().Context(), token, payload.CFResponse, c.RealIP()); err != nil {

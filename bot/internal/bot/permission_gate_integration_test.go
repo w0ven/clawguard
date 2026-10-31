@@ -19,6 +19,7 @@ import (
 func TestTurnstileWaitsForModerationGateIntegration(t *testing.T) {
 	ctx := context.Background()
 	_, q, s, tr := settlementFixture(t)
+	tr.memberRole = "restricted"
 	s.cfg.TurnstileSecret = "fixture-secret"
 	verified := make(chan struct{}, 4)
 	cf := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -235,6 +236,7 @@ func TestTrustAndUngraduatedPermissionsRespectGateIntegration(t *testing.T) {
 func TestAlreadyHeldVerificationAndAISyncDoNotReenterIntegration(t *testing.T) {
 	ctx := context.Background()
 	_, q, s, tr := settlementFixture(t)
+	tr.memberRole = "restricted"
 	chat := &tele.Chat{ID: -90001}
 	user := &tele.User{ID: 101}
 	pending, err := q.UpsertPendingVerification(ctx, store.UpsertPendingVerificationParams{ChatID: chat.ID, UserID: user.ID, Method: "button", Payload: []byte(`{}`), ExpiresAt: time.Now().Add(time.Minute)})

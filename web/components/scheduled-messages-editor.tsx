@@ -90,6 +90,10 @@ export function ScheduledMessagesEditor({ group }: { group: Group }) {
   const [limit, setLimit] = useState(20);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [acting, setActing] = useState(false);
+  const [failedKeys, setFailedKeys] = useState<Record<number, string>>({});
+  const actionLock = useRef(false);
+  const historySequence = useRef(0);
   const [form, setForm] = useState<FormState | null>(null);
   const [initialForm, setInitialForm] = useState<FormState | null>(null);
   const [timeInput, setTimeInput] = useState("");
@@ -121,7 +125,17 @@ export function ScheduledMessagesEditor({ group }: { group: Group }) {
         scheduled_messages: ScheduledMessage[];
         limit: number;
       }>(`/api/admin/groups/${group.chat_id}/scheduled-messages`);
-      setItems(payload.scheduled_messages ?? []);
+      const messages = payload.scheduled_messages ?? [];
+      setItems(messages);
+      const failed: Record<number, string> = {};
+      try {
+        for (const item of messages) {
+          const storageKey = `clawguard-scheduled-run:${group.chat_id}:${item.id}`;
+          const key = window.localStorage.getItem(storageKey);
+          if (key && window.localStorage.getItem(`${storageKey}:failed`) === key) failed[item.id] = key;
+        }
+      } catch { /* Dispatch still fails closed if storage is unavailable. */ }
+      setFailedKeys(failed);
       setLimit(payload.limit ?? 20);
     } catch (error) {
       pushToast(error instanceof Error ? error.message : "加载定时消息失败", "error");
@@ -165,12 +179,17 @@ export function ScheduledMessagesEditor({ group }: { group: Group }) {
   }
 
   async function saveForm() {
-    if (!form) return;
+    if (!form || actionLock.current) return;
+    if (form.schedule_type === "daily" && timeInput.trim()) {
+      pushToast("请先添加已填写的时间点", "error");
+      return;
+    }
     const validation = validateForm(form);
     if (validation) {
       pushToast(validation, "error");
       return;
     }
+    actionLock.current = true;
     setSaving(true);
     try {
       const body = JSON.stringify({
@@ -199,12 +218,15 @@ export function ScheduledMessagesEditor({ group }: { group: Group }) {
     } catch (error) {
       pushToast(error instanceof Error ? error.message : "保存失败", "error");
     } finally {
+      actionLock.current = false;
       setSaving(false);
     }
   }
 
   async function deleteItem(item: ScheduledMessage) {
-    if (!window.confirm(`确认删除定时消息「${item.name}」？`)) return;
+    if (actionLock.current || !window.confirm(`确认删除定时消息「${item.name}」？`)) return;
+    actionLock.current = true;
+    setActing(true);
     try {
       await apiFetch<void>(`/api/admin/groups/${group.chat_id}/scheduled-messages/${item.id}`, {
         method: "DELETE",
@@ -213,35 +235,89 @@ export function ScheduledMessagesEditor({ group }: { group: Group }) {
       await loadItems();
     } catch (error) {
       pushToast(error instanceof Error ? error.message : "删除失败", "error");
-    }
+    } finally { actionLock.current = false; setActing(false); }
   }
 
-  async function runNow(item: ScheduledMessage) {
+  async function runNow(item: ScheduledMessage, retryFailed = false) {
+    if (actionLock.current) return;
+    if (retryFailed && !window.confirm("确认重新尝试发送？这会创建一次新的发送请求。")) return;
+    actionLock.current = true;
+    setActing(true);
+    const storageKey = `clawguard-scheduled-run:${group.chat_id}:${item.id}`;
     try {
-      await apiFetch<{ status: string }>(
+      // Persist before dispatch so refresh, navigation and a lost response never
+      // turn a retry into a new Telegram send. Fail closed if storage is blocked.
+      let key: string;
+      try {
+        const existing = window.localStorage.getItem(storageKey);
+        if (existing && !/^[A-Za-z0-9_-]{32,64}$/.test(existing)) throw new Error("invalid key");
+        if (retryFailed) {
+          if (!existing || window.localStorage.getItem(`${storageKey}:failed`) !== existing || failedKeys[item.id] !== existing) {
+            throw new Error("failed operation changed");
+          }
+          key = crypto.randomUUID();
+          window.localStorage.setItem(storageKey, key);
+          setFailedKeys((current) => { const next = { ...current }; delete next[item.id]; return next; });
+        } else {
+          key = existing || crypto.randomUUID();
+          if (!existing) window.localStorage.setItem(storageKey, key);
+        }
+      } catch {
+        throw new Error("无法保存试发操作编号，请检查浏览器存储后再试；未发送");
+      }
+      const result = await apiFetch<{ status?: string; message_id?: number }>(
         `/api/admin/groups/${group.chat_id}/scheduled-messages/${item.id}/run-now`,
-        { method: "POST" },
+        { method: "POST", headers: { "Idempotency-Key": key } },
       );
-      pushToast("试发成功", "success");
+      if (result.status === "sent" && Number.isSafeInteger(result.message_id)) {
+        // Remove only the acknowledged key, never one written by another tab.
+        try {
+          if (window.localStorage.getItem(storageKey) === key) {
+            window.localStorage.removeItem(storageKey);
+            window.localStorage.removeItem(`${storageKey}:failed`);
+          }
+          setFailedKeys((current) => { const next = { ...current }; delete next[item.id]; return next; });
+        } catch {
+          pushToast("试发成功，但无法清理操作编号；请先核对发送历史", "error");
+          return;
+        }
+        pushToast("试发成功", "success");
+      } else if (result.status === "dispatching") {
+        pushToast("试发仍在处理中，请稍后重试查询结果；不会重复发送", "error");
+      } else if (result.status === "failed") {
+        try {
+          if (window.localStorage.getItem(storageKey) === key) {
+            window.localStorage.setItem(`${storageKey}:failed`, key);
+            setFailedKeys((current) => ({ ...current, [item.id]: key }));
+          }
+        } catch { /* No explicit retry without a durable failed acknowledgement. */ }
+        pushToast("试发失败，请查看发送历史核对原因；可明确选择重新尝试", "error");
+      } else {
+        pushToast("试发结果待确认，请查看发送历史；重试会沿用本次操作编号", "error");
+      }
       await loadItems();
     } catch (error) {
-      pushToast(error instanceof Error ? error.message : "试发失败", "error");
-    }
+      pushToast(error instanceof Error ? `${error.message}；请核对发送历史，重试将沿用本次操作编号` : "试发结果待确认，请核对发送历史后重试", "error");
+    } finally { actionLock.current = false; setActing(false); }
   }
 
   async function openHistory(item: ScheduledMessage) {
+    const sequence = ++historySequence.current;
     setHistoryFor(item);
+    setRuns([]);
     setRunsLoading(true);
     try {
       const payload = await apiFetch<{ runs: ScheduledRun[] }>(
         `/api/admin/groups/${group.chat_id}/scheduled-messages/${item.id}/runs`,
       );
-      setRuns(payload.runs ?? []);
+      if (sequence === historySequence.current) setRuns(payload.runs ?? []);
     } catch (error) {
-      setRuns([]);
-      pushToast(error instanceof Error ? error.message : "加载历史失败", "error");
+      if (sequence === historySequence.current) {
+        setRuns([]);
+        pushToast(error instanceof Error ? error.message : "加载历史失败", "error");
+      }
     } finally {
-      setRunsLoading(false);
+      if (sequence === historySequence.current) setRunsLoading(false);
     }
   }
 
@@ -256,7 +332,7 @@ export function ScheduledMessagesEditor({ group }: { group: Group }) {
   function addDailyTime() {
     if (!form) return;
     const value = timeInput.trim();
-    if (!/^\d{2}:\d{2}$/.test(value)) {
+    if (!/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(value)) {
       pushToast("时间格式必须是 HH:MM", "error");
       return;
     }
@@ -280,7 +356,7 @@ export function ScheduledMessagesEditor({ group }: { group: Group }) {
             </div>
             <Button
               onClick={(event) => openCreate(event.currentTarget)}
-              disabled={reachedLimit}
+              disabled={reachedLimit || acting || saving}
               title={reachedLimit ? "每个群最多 20 条" : undefined}
             >
               新建定时消息
@@ -321,13 +397,15 @@ export function ScheduledMessagesEditor({ group }: { group: Group }) {
                         <Button
                           size="sm"
                           variant="secondary"
+                          disabled={acting || saving}
                           onClick={(event) => openEdit(item, event.currentTarget)}
                         >
                           编辑
                         </Button>
-                        <Button size="sm" variant="outline" onClick={() => runNow(item)}>立即试发</Button>
+                        <Button size="sm" variant="outline" disabled={acting || saving} onClick={() => runNow(item)}>立即试发</Button>
+                        {failedKeys[item.id] && <Button size="sm" variant="outline" disabled={acting || saving} onClick={() => runNow(item, true)}>重新尝试</Button>}
                         <Button size="sm" variant="ghost" onClick={() => openHistory(item)}>查看历史</Button>
-                        <Button size="sm" variant="danger" onClick={() => deleteItem(item)}>删除</Button>
+                        <Button size="sm" variant="danger" disabled={acting || saving} onClick={() => deleteItem(item)}>删除</Button>
                       </div>
                     </TableCell>
                   </TableRow>
@@ -358,7 +436,7 @@ export function ScheduledMessagesEditor({ group }: { group: Group }) {
           item={historyFor}
           runs={runs}
           loading={runsLoading}
-          onClose={() => setHistoryFor(null)}
+          onClose={() => { historySequence.current++; setHistoryFor(null); }}
         />
       ) : null}
     </div>
@@ -510,7 +588,7 @@ function EditorDialog({
           )}
           <Field label="消息正文（MarkdownV2）">
             <Textarea rows={8} value={form.content} onChange={(e) => onChange({ ...form, content: e.target.value })} placeholder="欢迎来到 {group_title}，现在是 {date} {time}" />
-            <p className="mt-1 text-xs text-[var(--text-muted)]">支持变量：{"{group_title}"} {"{member_count}"} {"{date}"} {"{time}"} {"{weekday}"}。用户正文保持原样，仅自动转义变量值。</p>
+            <p className="mt-1 text-xs text-[var(--text-muted)]">支持变量：{"{group_title}"} {"{member_count}"} {"{date}"} {"{time}"} {"{weekday}"}。用户正文保持原样，仅自动转义变量值。MarkdownV2 特殊字符需按 Telegram 规则手动转义；格式错误可能导致发送失败。</p>
           </Field>
           <Field label="自动删除秒数">
             <Input type="number" min={0} max={3600} value={form.auto_delete_seconds} onChange={(e) => onChange({ ...form, auto_delete_seconds: Number(e.target.value) })} />

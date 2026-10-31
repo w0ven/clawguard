@@ -6,12 +6,14 @@ BACKUP_DIR="${BACKUP_DIR:-/var/backups/clawguard}"
 BACKUP_RETENTION_DAYS="${BACKUP_RETENTION_DAYS:-14}"
 BACKUP_OFFSITE_DIR="${BACKUP_OFFSITE_DIR:-}"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
-FINAL_PATH="${BACKUP_DIR}/clawguard-${STAMP}.dump"
-TEMP_PATH="${FINAL_PATH}.tmp"
 
 cd "$ROOT_DIR"
 umask 077
 mkdir -p "$BACKUP_DIR"
+# Concurrent invocations in the same second must not share a temporary file
+# or overwrite an existing verified dump.
+TEMP_PATH="$(mktemp "${BACKUP_DIR}/clawguard-${STAMP}-XXXXXX.dump.tmp")"
+FINAL_PATH="${TEMP_PATH%.tmp}"
 trap 'rm -f "$TEMP_PATH"' EXIT
 
 docker compose exec -T postgres sh -ec \
@@ -20,8 +22,11 @@ docker compose exec -T postgres sh -ec \
 
 test -s "$TEMP_PATH"
 docker compose exec -T postgres pg_restore --list <"$TEMP_PATH" >/dev/null
-mv "$TEMP_PATH" "$FINAL_PATH"
-sha256sum "$FINAL_PATH" >"${FINAL_PATH}.sha256"
+# Link is atomic and refuses to overwrite even if a final name already exists.
+ln "$TEMP_PATH" "$FINAL_PATH"
+rm -f "$TEMP_PATH"
+# Store a relative filename so an offsite copy remains independently verifiable.
+(cd "$BACKUP_DIR" && sha256sum "$(basename "$FINAL_PATH")") >"${FINAL_PATH}.sha256"
 
 if [[ -n "$BACKUP_OFFSITE_DIR" ]]; then
   mkdir -p "$BACKUP_OFFSITE_DIR"

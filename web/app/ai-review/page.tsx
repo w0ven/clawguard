@@ -1,6 +1,6 @@
 "use client";
 
-import { Fragment, Suspense, useEffect, useMemo, useState } from "react";
+import { Fragment, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { AdminShell } from "@/components/admin-shell";
 import { Card, CardHeader, CardTitle, CardDescription, CardBody } from "@/components/ui/card";
@@ -70,6 +70,8 @@ function AIReviewPageInner() {
   const [loading, setLoading] = useState(true);
   const [expandedId, setExpandedId] = useState<number | null>(null);
   const [selected, setSelected] = useState<Record<number, AIDecision>>({});
+  const [acting, setActing] = useState(false);
+  const actionLock = useRef(false);
   const [filters, setFilters] = useState<Record<string, string>>({
     range: "7d",
     chat_id: "",
@@ -87,19 +89,26 @@ function AIReviewPageInner() {
     return params.toString();
   }, [filters]);
 
+  const currentQuery = useRef(queryString);
+  currentQuery.current = queryString;
+  const loadSequence = useRef(0);
+
   async function load() {
+    const sequence = ++loadSequence.current;
+    const query = currentQuery.current;
     setLoading(true);
     try {
       const [p, g] = await Promise.all([
-        apiFetch<{ decisions: AIDecision[] }>(`/api/admin/ai-decisions?limit=100&${queryString}`),
+        apiFetch<{ decisions: AIDecision[] }>(`/api/admin/ai-decisions?limit=100&${query}`),
         apiFetch<{ groups: Group[] }>("/api/admin/groups"),
       ]);
+      if (sequence !== loadSequence.current || query !== currentQuery.current) return;
       setItems(p.decisions ?? []);
       setGroups(g.groups ?? []);
     } catch (e) {
-      pushToast(e instanceof Error ? e.message : "加载失败", "error");
+      if (sequence === loadSequence.current && query === currentQuery.current) pushToast(e instanceof Error ? e.message : "加载失败", "error");
     } finally {
-      setLoading(false);
+      if (sequence === loadSequence.current && query === currentQuery.current) setLoading(false);
     }
   }
 
@@ -112,7 +121,11 @@ function AIReviewPageInner() {
   }, [searchParams]);
 
   useEffect(() => {
+    setSelected({});
+    setExpandedId(null);
+    setItems([]);
     void load();
+    return () => { loadSequence.current++; };
   }, [queryString]);
 
   function updateFilter(key: string, value: string) {
@@ -171,8 +184,21 @@ function AIReviewPageInner() {
     }
   }
 
+  async function runDecision(item: AIDecision, override: string) {
+    if (actionLock.current) return;
+    actionLock.current = true;
+    setActing(true);
+    try { await applyDecision(item, override); } catch { /* applyDecision displays the error */ }
+    finally { actionLock.current = false; setActing(false); }
+  }
+
   async function batchOverride(override: string) {
+    if (actionLock.current) return;
     const entries = Object.values(selected);
+    if (!entries.length) return;
+    actionLock.current = true;
+    setActing(true);
+    try {
     const results = await Promise.allSettled(entries.map((item) => applyDecision(item, override, { reload: false, toast: false })));
     const success = results.filter((item) => item.status === "fulfilled" && !item.value?.side_effect_warnings?.length).length;
     const partial = results.filter((item) => item.status === "fulfilled" && !!item.value?.side_effect_warnings?.length).length;
@@ -180,6 +206,7 @@ function AIReviewPageInner() {
     if (results.length > 0) await load();
     const warnings = results.flatMap((result) => result.status === "fulfilled" ? result.value?.side_effect_warnings ?? [] : []);
     pushToast(`批量操作完成：成功 ${success} 条，部分失败 ${partial} 条，失败 ${failed} 条${warnings.length ? `；${warnings.join("；")}` : ""}`, failed === 0 && !warnings.length ? "success" : "error");
+    } finally { actionLock.current = false; setActing(false); }
   }
 
   return (
@@ -192,9 +219,9 @@ function AIReviewPageInner() {
           <FilterBar groups={groups} values={filters} onChange={updateFilter} onApply={applyFilters} onReset={resetFilters} mode="ai" />
           <div className="mt-3 flex flex-wrap items-center gap-2">
             <span className="text-xs text-[var(--text-muted)]">已选 {Object.keys(selected).length} 条</span>
-            <Button size="sm" variant="secondary" onClick={() => void batchOverride("confirm")}>批量正确</Button>
-            <Button size="sm" variant="danger" onClick={() => void batchOverride("false_positive")}>批量误封</Button>
-            <Button size="sm" variant="ghost" onClick={() => void batchOverride("false_negative")}>批量漏判</Button>
+            <Button size="sm" variant="secondary" disabled={acting || !Object.keys(selected).length} onClick={() => void batchOverride("confirm")}>批量正确</Button>
+            <Button size="sm" variant="danger" disabled={acting || !Object.keys(selected).length} onClick={() => void batchOverride("false_positive")}>批量误封</Button>
+            <Button size="sm" variant="ghost" disabled={acting || !Object.keys(selected).length} onClick={() => void batchOverride("false_negative")}>批量漏判</Button>
           </div>
         </CardBody>
       </Card>
@@ -245,6 +272,7 @@ function AIReviewPageInner() {
                       <TableCell>
                         <input
                           type="checkbox"
+                          disabled={acting}
                           checked={Boolean(selected[item.id])}
                           onChange={(e) =>
                             setSelected((current) => {
@@ -311,9 +339,10 @@ function AIReviewPageInner() {
                             <Button
                               size="sm"
                               variant="ghost"
+                              disabled={acting}
                               onClick={(e) => {
                                 e.stopPropagation();
-                                void applyDecision(item, "");
+                                void runDecision(item, "");
                               }}
                               title="清除标注"
                             >
@@ -325,9 +354,10 @@ function AIReviewPageInner() {
                             <Button
                               size="sm"
                               variant="secondary"
+                              disabled={acting}
                               onClick={(e) => {
                                 e.stopPropagation();
-                                void applyDecision(item, "confirm");
+                                void runDecision(item, "confirm");
                               }}
                             >
                               <Check className="h-3.5 w-3.5" />
@@ -336,9 +366,10 @@ function AIReviewPageInner() {
                             <Button
                               size="sm"
                               variant="danger"
+                              disabled={acting}
                               onClick={(e) => {
                                 e.stopPropagation();
-                                void applyDecision(item, "false_positive");
+                                void runDecision(item, "false_positive");
                               }}
                               title="AI 判错了，尝试解封"
                             >
@@ -348,9 +379,10 @@ function AIReviewPageInner() {
                             <Button
                               size="sm"
                               variant="ghost"
+                              disabled={acting}
                               onClick={(e) => {
                                 e.stopPropagation();
-                                void applyDecision(item, "false_negative");
+                                void runDecision(item, "false_negative");
                               }}
                               title="AI 放过了但应该杀"
                             >

@@ -55,7 +55,12 @@ func TestDualCaptchaAPIConfigAndBypass(t *testing.T) {
 		srv.ServeHTTP(w, r)
 		return w
 	}
-	group := request("PUT", "/api/admin/groups/-100/config", `{"verify":{"method":"turnstile_hcaptcha"}}`, true)
+	initialGroup, err := fx.queries.GetGroupByChatID(ctx, -100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	groupBody := fmt.Sprintf(`{"expected_config_revision":%q,"config":{"verify":{"method":"turnstile_hcaptcha"}}}`, groupConfigRevision(initialGroup.Config))
+	group := request("PUT", "/api/admin/groups/-100/config", groupBody, true)
 	if group.Code != 400 || !strings.Contains(group.Body.String(), "不可用") {
 		t.Fatalf("group missing keys: %d %s", group.Code, group.Body.String())
 	}

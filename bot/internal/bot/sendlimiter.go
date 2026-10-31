@@ -19,6 +19,7 @@ const (
 )
 
 type chatLimiterEntry struct {
+	mu       sync.Mutex
 	limiter  *rate.Limiter
 	lastUsed time.Time
 }
@@ -59,10 +60,21 @@ func (l *SendLimiter) chatLimiter(chatID int64) *chatLimiterEntry {
 		limiter:  rate.NewLimiter(sendLimiterChatRate, sendLimiterChatBurst),
 		lastUsed: now,
 	}
-	actual, _ := l.chats.LoadOrStore(chatID, created)
-	entry := actual.(*chatLimiterEntry)
-	entry.lastUsed = now
-	return entry
+	for {
+		actual, _ := l.chats.LoadOrStore(chatID, created)
+		entry := actual.(*chatLimiterEntry)
+		entry.mu.Lock()
+		// A GC may have removed this entry after LoadOrStore; never use a
+		// detached limiter alongside the replacement for the same chat.
+		current, ok := l.chats.Load(chatID)
+		if !ok || current != entry {
+			entry.mu.Unlock()
+			continue
+		}
+		entry.lastUsed = now
+		entry.mu.Unlock()
+		return entry
+	}
 }
 
 func (l *SendLimiter) gcLoop() {
@@ -77,9 +89,11 @@ func (l *SendLimiter) gc() {
 	cutoff := l.now().Add(-sendLimiterChatMaxAge)
 	l.chats.Range(func(key, value any) bool {
 		entry := value.(*chatLimiterEntry)
+		entry.mu.Lock()
 		if entry.lastUsed.Before(cutoff) {
-			l.chats.Delete(key)
+			l.chats.CompareAndDelete(key, entry)
 		}
+		entry.mu.Unlock()
 		return true
 	})
 }

@@ -187,8 +187,10 @@ kelework/clawguard-web:sha-<commit>
 ```bash
 git pull
 bash scripts/deploy-production.sh sha-<commit>
-bash scripts/prod-smoke.sh --url https://your-domain.example --compose docker-compose.yml
+bash scripts/prod-smoke.sh --url https://your-domain.example
 ```
+
+The deploy script requires Python 3 and Compose JSON config support. Both services' effective images must follow `CLAWGUARD_TAG` for both the requested and rollback tags; fixed-image overrides or a conflicting exported tag abort before recreation. The script verifies the running image IDs and attempts rollback on failure. The smoke script uses default Compose discovery (including overrides) unless `--compose` is explicitly supplied.
 
 Restore rehearsal: [docs/restore-rehearsal.md](./docs/restore-rehearsal.md).
 

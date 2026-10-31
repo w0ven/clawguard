@@ -15,17 +15,22 @@ export function isGlobalConfigConflict(error: unknown): boolean {
   return error instanceof ApiError && error.status === 409;
 }
 
+export function validGlobalConfigVersion(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
 export function fetchGlobalConfig() {
   return apiFetch<GlobalConfigPayload>("/api/admin/global-config");
 }
 
 export function saveGlobalConfigSection(
   section: Exclude<GlobalConfigSection, "document">,
+  expectedVersion: number,
   config: Record<string, unknown>,
 ) {
   return apiFetch<GlobalConfigPayload>("/api/admin/global-config", {
     method: "PUT",
-    body: JSON.stringify({ section, config }),
+    body: JSON.stringify({ section, expected_version: expectedVersion, config }),
   });
 }
 

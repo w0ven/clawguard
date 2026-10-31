@@ -36,3 +36,15 @@ test('trust status displays Telegram failure and can retry', async ({page}) => {
   await expect(page.getByText('已更新',{exact:true})).toBeVisible();
   expect(writes).toBe(2);
 });
+
+test('AI review locks all actions while request is unresolved', async ({page}) => {
+ let writes=0;let release!:()=>void;const pending=new Promise<void>(r=>release=r);
+ await page.route('**/api/admin/ai-decisions**',async route=>{if(route.request().method()==='GET')return route.fulfill({json:{decisions}});writes++;await pending;return route.fulfill({status:500,json:{error:'操作失败'}})});
+ await login(page);await page.goto('/ai-review');await page.getByRole('checkbox').first().check();await page.getByRole('button',{name:'批量误封'}).click();await expect(page.getByRole('button',{name:'批量正确'})).toBeDisabled();await expect(page.getByRole('button',{name:'误封',exact:true}).first()).toBeDisabled();expect(writes).toBe(1);release();await expect(page.getByText(/失败 1 条/)).toBeVisible();
+});
+
+test('trust actions cannot overlap while Telegram synchronization is pending', async ({page})=>{
+ let writes=0;let release!:()=>void;const pending=new Promise<void>(r=>release=r);const item={chat_id:-1001,user_id:123,username:'fixture_user',status:'banned',score:0.5,messages_checked:0,messages_clean:0,joined_at:'2026-10-28T00:00:00Z',updated_at:'2026-10-28T00:00:00Z'};
+ await page.route('**/api/admin/user-trust**',async route=>{if(route.request().method()==='GET')return route.fulfill({json:{items:[item],total:1,has_more:false,counts:{all:1,banned:1}}});writes++;await pending;return route.fulfill({json:{telegram_action_error:'无法同步'}})});
+ await login(page);await page.goto('/trust');await page.getByRole('button',{name:'信任',exact:true}).click();await expect(page.getByRole('button',{name:'封禁',exact:true})).toBeDisabled();await expect.poll(()=>writes).toBe(1);release();await expect(page.getByText(/Telegram 同步失败，请重试/)).toBeVisible();await expect(page.getByRole('button',{name:'信任',exact:true})).toBeEnabled();
+});

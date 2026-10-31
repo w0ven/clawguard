@@ -13,6 +13,7 @@ import {
   fetchGlobalConfig,
   isGlobalConfigConflict,
   saveGlobalConfigSection,
+  validGlobalConfigVersion,
 } from "@/lib/global-config";
 import { useToast } from "@/components/providers";
 import { useDirtyGuard } from "@/components/dirty-guard";
@@ -21,6 +22,7 @@ import type { Group } from "@/lib/types";
 type ToastFn = (message: string, tone?: "success" | "error") => void;
 
 type ScoreBand = {
+  [key: string]: unknown;
   min_score: number;
   max_score: number;
   action: string;
@@ -68,6 +70,7 @@ function parseConfig(raw: unknown): AdKillerConfig {
     ? data.score_bands
         .map((item) => asRecord(item))
         .map((item) => ({
+          ...item,
           min_score: asNumber(item.min_score, 0),
           max_score: asNumber(item.max_score, 100),
           action: String(item.action || "none"),
@@ -92,9 +95,12 @@ export function AdKillerPanel({ pushToast }: { pushToast?: ToastFn }) {
   const toast = useToast();
   const notify = pushToast ?? toast.pushToast;
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
+  const [version, setVersion] = useState<number | null>(null);
   const [saving, setSaving] = useState(false);
   const [groups, setGroups] = useState<Group[]>([]);
   const [config, setConfig] = useState<AdKillerConfig>(parseConfig({}));
+  const [rawConfig, setRawConfig] = useState<Record<string, unknown>>({});
   const [initialConfig, setInitialConfig] = useState<AdKillerConfig>(parseConfig({}));
   const [keySet, setKeySet] = useState(false);
   const [keyHint, setKeyHint] = useState("");
@@ -108,6 +114,7 @@ export function AdKillerPanel({ pushToast }: { pushToast?: ToastFn }) {
 
   const load = useCallback(async () => {
     setLoading(true);
+    setLoadError("");
     try {
       const [secret, global, groupPayload] = await Promise.all([
         apiFetch<{ api_key_set?: boolean; api_key_hint?: string }>(
@@ -116,14 +123,20 @@ export function AdKillerPanel({ pushToast }: { pushToast?: ToastFn }) {
         fetchGlobalConfig(),
         apiFetch<{ groups?: Group[] }>("/api/admin/groups"),
       ]);
+      if (!validGlobalConfigVersion(global.version)) throw new Error("缺少配置版本，请刷新后重试");
+      setVersion(global.version);
       setKeySet(Boolean(secret.api_key_set));
       setKeyHint(secret.api_key_hint ?? "");
-      const nextConfig = parseConfig(asRecord(asRecord(global.config).ai).adkiller);
+      const raw = asRecord(asRecord(global.config).ai).adkiller;
+      const nextConfig = parseConfig(raw);
+      setRawConfig(asRecord(raw));
       setConfig(nextConfig);
       setInitialConfig(nextConfig);
       setGroups(groupPayload.groups ?? []);
     } catch (error) {
-      notify(error instanceof Error ? error.message : "加载 AdKiller 失败", "error");
+      const message = error instanceof Error ? error.message : "加载 AdKiller 失败";
+      setLoadError(message);
+      notify(message, "error");
     } finally {
       setLoading(false);
     }
@@ -188,12 +201,14 @@ export function AdKillerPanel({ pushToast }: { pushToast?: ToastFn }) {
   }
 
   async function saveSettings() {
+    if (version == null) { notify("缺少配置版本，请刷新后再保存", "error"); return; }
     const submittedConfig = config;
     setSaving(true);
     try {
-      const payload = await saveGlobalConfigSection("adkiller", {
+      const payload = await saveGlobalConfigSection("adkiller", version, {
         ai: {
           adkiller: {
+            ...rawConfig,
             enabled: config.enabled,
             timeout_ms: config.timeout_ms,
             on_failure: config.on_failure,
@@ -202,7 +217,14 @@ export function AdKillerPanel({ pushToast }: { pushToast?: ToastFn }) {
           },
         },
       });
-      const nextConfig = parseConfig(asRecord(asRecord(payload.config).ai).adkiller);
+      if (!validGlobalConfigVersion(payload.version)) {
+        setVersion(null);
+        throw new Error("保存结果缺少配置版本，请保留草稿并刷新核对");
+      }
+      setVersion(payload.version);
+      const raw = asRecord(asRecord(payload.config).ai).adkiller;
+      const nextConfig = parseConfig(raw);
+      setRawConfig(asRecord(raw));
       const latestDraft = configRef.current;
       const hasNewerDraft =
         JSON.stringify(latestDraft) !== JSON.stringify(submittedConfig);
@@ -327,6 +349,10 @@ export function AdKillerPanel({ pushToast }: { pushToast?: ToastFn }) {
         </CardBody>
       </Card>
     );
+  }
+
+  if (loadError) {
+    return <Card><CardBody><p role="alert" className="text-sm text-[var(--danger)]">{loadError}</p><Button type="button" variant="secondary" onClick={() => void load()}>重试</Button></CardBody></Card>;
   }
 
   return (
@@ -481,7 +507,7 @@ export function AdKillerPanel({ pushToast }: { pushToast?: ToastFn }) {
               })}
             </div>
           )}
-          <Button onClick={() => void saveSettings()} disabled={saving}>
+          <Button onClick={() => void saveSettings()} disabled={saving || version == null}>
             {saving ? "保存中…" : "保存 AdKiller 设置"}
           </Button>
         </CardBody>
@@ -499,6 +525,7 @@ export function AdKillerPanel({ pushToast }: { pushToast?: ToastFn }) {
           </p>
           <Input
             type="password"
+            disabled={keySaving}
             autoComplete="off"
             placeholder={keySet ? "输入新 Key 以轮换" : "粘贴 AdKiller API Key"}
             value={keyDraft}

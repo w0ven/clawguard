@@ -10,12 +10,15 @@ import (
 	"github.com/openclaw/clawguard/internal/store"
 )
 
-func StartProfileCheckLogsRetention(ctx context.Context, q *store.Queries, cfg config.RetentionConfig, logger *zap.Logger) {
+func StartProfileCheckLogsRetention(ctx context.Context, q *store.Queries, cfg config.RetentionConfig, logger *zap.Logger) <-chan struct{} {
+	done := make(chan struct{})
 	if q == nil || logger == nil {
-		return
+		close(done)
+		return done
 	}
 
 	go func() {
+		defer close(done)
 		runProfileCheckLogsRetentionOnce(ctx, q, cfg, logger)
 
 		for {
@@ -30,6 +33,7 @@ func StartProfileCheckLogsRetention(ctx context.Context, q *store.Queries, cfg c
 			}
 		}
 	}()
+	return done
 }
 
 func runProfileCheckLogsRetentionOnce(ctx context.Context, q *store.Queries, cfg config.RetentionConfig, logger *zap.Logger) {

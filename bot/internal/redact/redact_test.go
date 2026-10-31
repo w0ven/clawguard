@@ -60,3 +60,15 @@ func TestZapLoggerRedactsErrorAndFields(t *testing.T) {
 		}
 	}
 }
+
+func TestRedactsURLCredentialsInWrappedNetworkErrors(t *testing.T) {
+	const secret = "fixture-secret-not-real"
+	err := fmt.Errorf("model request: %w", fmt.Errorf("Post \"https://user:%s@example.invalid/v1?api_key=%s&mode=test&access_token=%s\": timeout", secret, secret, secret))
+	safe := ErrorString(err)
+	if strings.Contains(safe, secret) || strings.Contains(safe, "user:") {
+		t.Fatalf("credential leaked: %s", safe)
+	}
+	if !strings.Contains(safe, "mode=test") || !strings.Contains(safe, "timeout") {
+		t.Fatalf("lost diagnostic context: %s", safe)
+	}
+}

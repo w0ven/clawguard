@@ -3,6 +3,7 @@ package bot
 import (
 	"context"
 	"errors"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -25,6 +26,32 @@ func (f *fakeTelegramSender) Send(to tele.Recipient, what interface{}, opts ...i
 }
 
 func (f *fakeTelegramSender) Delete(msg tele.Editable) error { return nil }
+
+func TestSendLimiterConcurrentTouchAndGC(t *testing.T) {
+	l := &SendLimiter{global: rate.NewLimiter(rate.Inf, 0), now: time.Now}
+	var wg sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 2000; j++ {
+				l.chatLimiter(42)
+			}
+		}()
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for j := 0; j < 2000; j++ {
+			l.gc()
+		}
+	}()
+	wg.Wait()
+	first := l.chatLimiter(42)
+	if next := l.chatLimiter(42); next != first {
+		t.Fatal("active chat got a replacement limiter")
+	}
+}
 
 func TestSendLimiterWaitChatBlocksAfterBurst(t *testing.T) {
 	limiter := NewSendLimiter()

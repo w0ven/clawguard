@@ -1,6 +1,11 @@
 package store
 
-import "context"
+import (
+	"context"
+	"errors"
+
+	"github.com/jackc/pgx/v5"
+)
 
 const createScheduledMessage = `-- name: CreateScheduledMessage :one
 INSERT INTO scheduled_messages (
@@ -216,6 +221,29 @@ func (q *Queries) CreateScheduledMessage(ctx context.Context, arg CreateSchedule
 	return scanScheduledMessage(row)
 }
 
+var ErrScheduledMessageLimit = errors.New("scheduled message limit reached")
+
+// Serialize per-chat count and insert so simultaneous API requests cannot
+// exceed the configured cap. It does not lock unrelated chats.
+func (q *Queries) CreateScheduledMessageLimited(ctx context.Context, arg CreateScheduledMessageParams, limit int64) (ScheduledMessage, error) {
+	var result ScheduledMessage
+	err := q.Transact(ctx, func(tx *Queries) error {
+		if _, err := tx.db.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('scheduled-message:' || $1::bigint::text, 0))`, arg.ChatID); err != nil {
+			return err
+		}
+		count, err := tx.CountScheduledMessagesByChat(ctx, arg.ChatID)
+		if err != nil {
+			return err
+		}
+		if count >= limit {
+			return ErrScheduledMessageLimit
+		}
+		result, err = tx.CreateScheduledMessage(ctx, arg)
+		return err
+	})
+	return result, err
+}
+
 func (q *Queries) GetScheduledMessage(ctx context.Context, id int64) (ScheduledMessage, error) {
 	row := q.db.QueryRow(ctx, getScheduledMessage, id)
 	return scanScheduledMessage(row)
@@ -270,8 +298,14 @@ func (q *Queries) UpdateScheduledMessage(ctx context.Context, arg UpdateSchedule
 }
 
 func (q *Queries) DeleteScheduledMessage(ctx context.Context, arg DeleteScheduledMessageParams) error {
-	_, err := q.db.Exec(ctx, deleteScheduledMessage, arg.ID, arg.ChatID)
-	return err
+	tag, err := q.db.Exec(ctx, deleteScheduledMessage, arg.ID, arg.ChatID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return pgx.ErrNoRows
+	}
+	return nil
 }
 
 func (q *Queries) MarkScheduledMessageSent(ctx context.Context, id int64, messageID int64) error {

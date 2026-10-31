@@ -62,6 +62,8 @@ func New(logger *zap.Logger, queries *store.Queries, bot *tele.Bot, sendLimiter 
 }
 
 func (s *Scheduler) Start() {
+	s.wg.Add(1)
+	go func() { defer s.wg.Done(); s.deleteWorker(s.ctx) }()
 	s.cron.Start()
 }
 
@@ -119,9 +121,7 @@ func (s *Scheduler) Add(msg store.ScheduledMessage) error {
 		if msg.IntervalMinutes == nil || *msg.IntervalMinutes < 1 {
 			return fmt.Errorf("invalid interval minutes")
 		}
-		id := s.cron.Schedule(cron.Every(time.Duration(*msg.IntervalMinutes)*time.Minute), cron.FuncJob(func() {
-			_ = s.run(context.Background(), msg.ID, false)
-		}))
+		id := s.scheduleSlot(cron.Every(time.Duration(*msg.IntervalMinutes)*time.Minute), msg.ID)
 		ids = append(ids, id)
 	case "daily":
 		if len(msg.DailyTimes) == 0 {
@@ -134,14 +134,12 @@ func (s *Scheduler) Add(msg store.ScheduledMessage) error {
 				return err
 			}
 			spec := fmt.Sprintf("0 %d %d * * *", minute, hour)
-			id, err := s.cron.AddFunc(spec, func(id int64) func() {
-				return func() { _ = s.run(context.Background(), id, false) }
-			}(msg.ID))
+			parsed, err := cron.NewParser(cron.Second | cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow).Parse(spec)
 			if err != nil {
 				rollback()
 				return err
 			}
-			ids = append(ids, id)
+			ids = append(ids, s.scheduleSlot(parsed, msg.ID))
 		}
 	default:
 		return fmt.Errorf("invalid schedule type")
@@ -189,11 +187,132 @@ func (s *Scheduler) NextRun(id int64) *time.Time {
 	return next
 }
 
-func (s *Scheduler) RunNow(ctx context.Context, id int64) error {
-	return s.run(ctx, id, true)
+// RunClaimedManual executes exactly the immutable snapshot already reserved in
+// the database. No caller may obtain a second dispatch from the same claim.
+func (s *Scheduler) RunClaimedManual(ctx context.Context, claim store.ScheduledManualResult) (string, *int64) {
+	msg := claim.Message
+	started := time.Now()
+	ctx, cancel := context.WithTimeout(ctx, time.Minute)
+	defer cancel()
+	if s.ctx != nil {
+		stop := context.AfterFunc(s.ctx, cancel)
+		defer stop()
+	}
+	settle := func(state string, id *int64, detail string) bool {
+		settleCtx, done := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer done()
+		if err := s.queries.FinishScheduledDispatch(settleCtx, claim.AttemptID, msg.ChatID, id, msg.AutoDeleteSeconds, state, detail); err != nil {
+			s.logger.Error("settle manual scheduled dispatch failed", zap.Int64("attempt_id", claim.AttemptID), zap.Error(err))
+			return false
+		}
+		return true
+	}
+	if !s.acquireRun(msg.ID) {
+		if !settle("failed", nil, "scheduled message is already running") {
+			return "unknown", nil
+		}
+		return "failed", nil
+	}
+	defer s.releaseRun(msg.ID)
+	if ctx.Err() != nil {
+		if !settle("failed", nil, "request canceled before sending") {
+			return "unknown", nil
+		}
+		return "failed", nil
+	}
+	rendered := RenderScheduledMessage(msg.Content, s.renderVars(ctx, msg)).Text
+	if ctx.Err() != nil {
+		if !settle("failed", nil, "request canceled before sending") {
+			return "unknown", nil
+		}
+		return "failed", nil
+	}
+	messageID, rejected, err := s.sendManualSnapshot(ctx, msg, rendered)
+	if err != nil || messageID <= 0 {
+		state := "uncertain"
+		if rejected {
+			state = "failed"
+		}
+		detail := "send result unknown; verify Telegram"
+		if err != nil {
+			detail = "send failed or result unknown; verify Telegram: " + redact.ErrorString(err)
+		}
+		if !settle(state, nil, detail) {
+			return "unknown", nil
+		}
+		settleCtx, done := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		s.insertRun(settleCtx, msg.ID, false, nil, &rendered, &detail, started)
+		done()
+		if state == "failed" {
+			return "failed", nil
+		}
+		return "unknown", nil
+	}
+	if !settle("sent", &messageID, "") {
+		return "unknown", nil
+	}
+	settleCtx, done := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	s.insertRun(settleCtx, msg.ID, true, &messageID, &rendered, nil, started)
+	done()
+	return "sent", &messageID
+}
+
+// sendManualSnapshot uses Raw so that a syntactically valid Telegram 4xx
+// remains distinguishable from an unknown transport result even when Telebot
+// maps an unfamiliar description to an untyped error. It deliberately never
+// retries a request, including a rejected rate limit.
+func (s *Scheduler) sendManualSnapshot(ctx context.Context, msg store.ScheduledMessage, rendered string) (int64, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, true, err
+	}
+	if s.sendLimiter != nil {
+		if err := s.sendLimiter.WaitChat(ctx, msg.ChatID); err != nil {
+			return 0, true, err
+		}
+		if err := s.sendLimiter.WaitGlobal(ctx); err != nil {
+			return 0, true, err
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return 0, true, err
+	}
+	payload := map[string]any{"chat_id": msg.ChatID, "text": rendered, "parse_mode": tele.ModeMarkdownV2, "disable_web_page_preview": true}
+	if markup := buildReplyMarkup(msg.Buttons); markup != nil {
+		payload["reply_markup"] = markup
+	}
+	raw, err := s.bot.Raw("sendMessage", payload)
+	var response struct {
+		OK     *bool `json:"ok"`
+		Code   int   `json:"error_code"`
+		Result *struct {
+			ID int64 `json:"message_id"`
+		} `json:"result"`
+	}
+	if json.Unmarshal(raw, &response) == nil && response.OK != nil {
+		if !*response.OK && response.Code >= 400 && response.Code < 500 {
+			return 0, true, fmt.Errorf("Telegram rejected send (%d)", response.Code)
+		}
+		if *response.OK && response.Result != nil && response.Result.ID > 0 && err == nil {
+			return response.Result.ID, false, nil
+		}
+	}
+	if err == nil {
+		err = errors.New("invalid Telegram send response")
+	}
+	return 0, false, err
 }
 
 func (s *Scheduler) run(ctx context.Context, id int64, manual bool) error {
+	return s.runSlot(ctx, id, manual, nil)
+}
+
+func (s *Scheduler) runSlot(ctx context.Context, id int64, manual bool, slot *time.Time) error {
+	ctx, cancel := context.WithTimeout(ctx, time.Minute)
+	defer cancel()
+	if s.ctx != nil {
+		stop := context.AfterFunc(s.ctx, cancel)
+		defer stop()
+	}
 	started := time.Now()
 	if !s.acquireRun(id) {
 		if manual {
@@ -228,56 +347,61 @@ func (s *Scheduler) run(ctx context.Context, id int64, manual bool) error {
 		}
 	}
 
-	rendered := s.Render(msg)
+	rendered := RenderScheduledMessage(msg.Content, s.renderVars(ctx, msg)).Text
+	if err := ctx.Err(); err != nil {
+		return err // no send was attempted
+	}
 	options := scheduledSendOptions(msg.Buttons)
 
-	chat := &tele.Chat{ID: msg.ChatID}
-	var sent *tele.Message
-	var sendErr error
-	for attempt, delay := range []time.Duration{0, 10 * time.Second, 30 * time.Second} {
-		if delay > 0 {
-			timer := time.NewTimer(delay)
-			select {
-			case <-ctx.Done():
-				timer.Stop()
-				return ctx.Err()
-			case <-timer.C:
-			}
-		}
-		sent, sendErr = s.sendThrottled(ctx, chat, rendered, options)
-		if sendErr == nil {
-			break
-		}
-		s.logger.Warn("send scheduled message failed", zap.Error(sendErr), zap.Int64("scheduled_message_id", msg.ID), zap.Int("attempt", attempt+1))
+	attempt, claimed, err := s.queries.ClaimScheduledDispatch(ctx, msg.ID, msg.ChatID, slot)
+	if err != nil {
+		return err
 	}
+	if !claimed {
+		return nil
+	}
+	chat := &tele.Chat{ID: msg.ChatID}
+	// A timeout or transport error can mean Telegram sent the message but the
+	// response was lost. Only an explicit flood rejection is retried inside
+	// sendThrottled; blindly retrying other errors can duplicate messages.
+	sent, sendErr := s.sendThrottled(ctx, chat, rendered, options)
+	// The send may finish after the caller's deadline or shutdown. Settlement
+	// still needs a short independent window to record the result and prevent
+	// an unknown send from remaining active solely because ctx was cancelled.
+	settleCtx, settleCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer settleCancel()
 
 	if sendErr != nil {
-		errText := redact.ErrorString(sendErr)
-		if !manual {
-			if markErr := s.queries.MarkScheduledMessageFailed(ctx, msg.ID, errText); markErr != nil {
-				s.logger.Warn("mark scheduled message failed state failed", zap.Error(markErr), zap.Int64("scheduled_message_id", msg.ID), zap.Int64("chat_id", msg.ChatID))
-			} else {
-				s.Remove(msg.ID)
-				s.logger.Warn("scheduled message disabled after send failures", zap.Error(sendErr), zap.Int64("scheduled_message_id", msg.ID), zap.Int64("chat_id", msg.ChatID))
-			}
+		state := "uncertain"
+		var te *tele.Error
+		if errors.As(sendErr, &te) && te.Code >= 400 && te.Code < 500 {
+			state = "failed"
 		}
-		s.insertRun(ctx, msg.ID, false, nil, &rendered, &errText, started)
+		errText := "send failed or result unknown; verify Telegram: " + redact.ErrorString(sendErr)
+		if finishErr := s.queries.FinishScheduledDispatch(settleCtx, attempt, msg.ChatID, nil, 0, state, errText); finishErr != nil {
+			s.logger.Error("settle scheduled dispatch failed; result unknown", zap.Int64("attempt_id", attempt), zap.Error(finishErr))
+		}
+		s.insertRun(settleCtx, msg.ID, false, nil, &rendered, &errText, started)
 		return sendErr
 	}
 
+	if sent == nil || sent.ID <= 0 {
+		return errors.New("Telegram returned invalid message ID; dispatch remains uncertain")
+	}
 	messageID := int64(sent.ID)
+	if err := s.queries.FinishScheduledDispatch(settleCtx, attempt, msg.ChatID, &messageID, msg.AutoDeleteSeconds, "sent", ""); err != nil {
+		s.logger.Error("settle scheduled dispatch failed; inspect Telegram and attempt", zap.Int64("attempt_id", attempt), zap.Error(err))
+		return err
+	}
 	if !manual {
-		if err := s.persistScheduledMessageSent(ctx, msg.ID, messageID, rendered, started); err != nil {
+		if err := s.persistScheduledMessageSent(settleCtx, msg.ID, messageID, rendered, started); err != nil {
 			s.logger.Warn("persist scheduled message success failed", zap.Error(err), zap.Int64("scheduled_message_id", msg.ID))
 			return err
 		}
 	} else {
-		s.insertRun(ctx, msg.ID, true, &messageID, &rendered, nil, started)
+		s.insertRun(settleCtx, msg.ID, true, &messageID, &rendered, nil, started)
 	}
 
-	if msg.AutoDeleteSeconds > 0 {
-		s.deleteLater(msg.ChatID, sent.ID, time.Duration(msg.AutoDeleteSeconds)*time.Second)
-	}
 	return nil
 }
 
@@ -301,28 +425,30 @@ func (s *Scheduler) releaseRun(id int64) {
 }
 
 func (s *Scheduler) Render(msg store.ScheduledMessage) string {
-	return RenderScheduledMessage(msg.Content, s.renderVars(msg)).Text
+	return RenderScheduledMessage(msg.Content, s.renderVars(context.Background(), msg)).Text
 }
 
 func RenderScheduledMessage(template string, plainVars map[string]string) messagefmt.RenderedTemplate {
 	return messagefmt.RenderMessageTemplate(template, tele.ModeMarkdownV2, nil, plainVars)
 }
 
-func (s *Scheduler) renderVars(msg store.ScheduledMessage) map[string]string {
+func (s *Scheduler) renderVars(ctx context.Context, msg store.ScheduledMessage) map[string]string {
 	loc, err := time.LoadLocation(shanghaiTimezone)
 	if err != nil {
 		loc = time.FixedZone("CST", 8*3600)
 	}
 	now := time.Now().In(loc)
 	groupTitle := fmt.Sprintf("%d", msg.ChatID)
-	if group, err := s.queries.GetGroupByChatID(context.Background(), msg.ChatID); err == nil && strings.TrimSpace(group.Title) != "" {
+	if group, err := s.queries.GetGroupByChatID(ctx, msg.ChatID); err == nil && strings.TrimSpace(group.Title) != "" {
 		groupTitle = group.Title
 	}
 	memberCount := "?"
-	if count, err := s.bot.Len(&tele.Chat{ID: msg.ChatID}); err == nil {
-		memberCount = fmt.Sprintf("%d", count)
-	} else {
-		s.logger.Warn("load chat member count failed", zap.Error(err), zap.Int64("chat_id", msg.ChatID), zap.Int64("scheduled_message_id", msg.ID))
+	if ctx.Err() == nil {
+		if count, err := s.bot.Len(&tele.Chat{ID: msg.ChatID}); err == nil {
+			memberCount = fmt.Sprintf("%d", count)
+		} else {
+			s.logger.Warn("load chat member count failed", zap.Error(err), zap.Int64("chat_id", msg.ChatID), zap.Int64("scheduled_message_id", msg.ID))
+		}
 	}
 	return map[string]string{
 		"{group_title}":  groupTitle,
@@ -410,31 +536,10 @@ func (s *Scheduler) insertRun(ctx context.Context, id int64, success bool, messa
 	}
 }
 
-func (s *Scheduler) deleteLater(chatID int64, messageID int, delay time.Duration) {
-	ctx := s.ctx
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	s.wg.Add(1)
-	go func() {
-		defer s.wg.Done()
-		timer := time.NewTimer(delay)
-		defer timer.Stop()
-		select {
-		case <-timer.C:
-			if ctx.Err() != nil {
-				return
-			}
-		case <-ctx.Done():
-			return
-		}
-		if err := s.bot.Delete(&tele.Message{ID: messageID, Chat: &tele.Chat{ID: chatID}}); err != nil {
-			s.logger.Warn("auto delete scheduled message failed", zap.Error(err), zap.Int64("chat_id", chatID), zap.Int("message_id", messageID))
-		}
-	}()
-}
-
 func (s *Scheduler) sendThrottled(ctx context.Context, chat *tele.Chat, what interface{}, opts ...interface{}) (*tele.Message, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if s.sendLimiter != nil {
 		if err := s.sendLimiter.WaitChat(ctx, chat.ID); err != nil {
 			return nil, err
@@ -442,6 +547,9 @@ func (s *Scheduler) sendThrottled(ctx context.Context, chat *tele.Chat, what int
 		if err := s.sendLimiter.WaitGlobal(ctx); err != nil {
 			return nil, err
 		}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	sent, err := s.bot.Send(chat, what, opts...)
 	if err == nil {
@@ -458,9 +566,15 @@ func (s *Scheduler) sendThrottled(ctx context.Context, chat *tele.Chat, what int
 }
 
 func floodRetryAfter(err error) (int, bool) {
-	var flood *tele.FloodError
-	if errors.As(err, &flood) && flood != nil {
+	// Telebot returns FloodError by value (and external implementations may
+	// return a pointer); preserve the bounded retry_after for either form.
+	var flood tele.FloodError
+	if errors.As(err, &flood) {
 		return flood.RetryAfter, true
+	}
+	var floodPtr *tele.FloodError
+	if errors.As(err, &floodPtr) && floodPtr != nil {
+		return floodPtr.RetryAfter, true
 	}
 	var teleErr *tele.Error
 	if errors.As(err, &teleErr) && teleErr != nil && teleErr.Code == 429 {

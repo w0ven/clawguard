@@ -82,6 +82,9 @@ func (w *VerificationExpiry) processExpired(ctx context.Context) {
 	}
 
 	for _, pending := range pendingList {
+		if ctx.Err() != nil {
+			return // unprocessed claims remain leased and recover on expiry
+		}
 		result, handleErr := w.botService.HandleVerificationExpiry(ctx, pending)
 		if handleErr != nil {
 			w.logger.Error(

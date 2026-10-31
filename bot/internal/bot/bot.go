@@ -230,7 +230,7 @@ func New(ctx context.Context, cfg config.Config, logger *zap.Logger, queries *st
 		logger:          logger,
 		queries:         queries,
 		redis:           rdb,
-		casClient:       casclient.New(nil, rdb),
+		casClient:       casclient.New(nil, rdb, cfg.CASAPIKey),
 		bot:             b,
 		sender:          b,
 		sendLimiter:     NewSendLimiter(),
@@ -1132,17 +1132,19 @@ func (s *Service) startVerificationAt(chat *tele.Chat, user *tele.User, joinEven
 		s.joinProtector.ReleasePending(chat.ID)
 		return lockErr
 	}
-	restrictErr := restrictVerificationWithRecovery(ctx,
-		func() error { return s.bot.Restrict(chat, &member) },
-		func() (*tele.ChatMember, error) { return s.bot.ChatMemberOf(chat, user) },
-		waitVerificationRetry,
-	)
-	release()
+	defer release() // release is idempotent; also protect panic/early-return paths.
+	_, restrictErr := s.guardedCleanup(ctx, membershipCleanupKey("verification_start", chat.ID, user.ID, membershipGeneration), chat.ID, user.ID, "verification_start", func() (string, error) {
+		return "restricted", telegramConfirmedRestrict(s.bot, chat, &member)
+	})
 	if err := restrictErr; err != nil {
+		release()
 		s.joinProtector.ReleasePending(chat.ID)
 		readable := normalizeTelegramActionError("restrict", err)
 		s.logger.Error("restrict new member", zap.Error(readable), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
 		s.sendBotPermissionWarningToChat(chat, verificationStartFailureNotice(readable))
+		if errors.Is(err, errCleanupManualReview) {
+			return readable
+		}
 		if cleanupErr := s.handleVerificationPromptFailure(ctx, chat, user, policy, readable, membershipGeneration); cleanupErr != nil {
 			s.releaseVerificationJoinLock(ctx, chat.ID, user.ID)
 			return errors.Join(readable, cleanupErr)
@@ -1167,7 +1169,9 @@ func (s *Service) startVerificationAt(chat *tele.Chat, user *tele.User, joinEven
 		deadlineStart = joinedAt
 	}
 	promptCtx = context.WithValue(promptCtx, dualCaptchaStartTimeKey{}, deadlineStart)
-	if err := s.startVerificationPrompt(promptCtx, chat, user, policy); err != nil {
+	promptErr := s.startVerificationPrompt(promptCtx, chat, user, policy)
+	release()
+	if err := promptErr; err != nil {
 		s.joinProtector.ReleasePending(chat.ID)
 		if cleanupErr := s.handleVerificationPromptFailure(ctx, chat, user, policy, err, membershipGeneration); cleanupErr != nil {
 			s.releaseVerificationJoinLock(ctx, chat.ID, user.ID)
@@ -1247,7 +1251,7 @@ func (s *Service) startAsyncVerificationChecks(chat *tele.Chat, user *tele.User,
 				zap.Duration("elapsed", time.Since(casStartedAt)),
 			)
 			if err != nil {
-				s.logger.Warn("cas lookup failed, skip", zap.Error(err), zap.Int64("user_id", user.ID))
+				s.logger.Warn("cas lookup failed, status unknown; continue other checks", zap.Error(err), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
 			} else if banned {
 				if err := s.handleAsyncVerificationMatch(ctx, asyncVerificationMatch{
 					chat:                 chat,
@@ -1697,6 +1701,7 @@ func (s *Service) storePendingVerification(ctx context.Context, chatID int64, us
 		return fmt.Errorf("snapshot verification fail action: %w", err)
 	}
 
+	previousMessageID := s.existingVerificationMessageID(ctx, chatID, user.ID)
 	if _, err := s.queries.UpsertPendingVerification(ctx, store.UpsertPendingVerificationParams{
 		ChatID:        chatID,
 		UserID:        user.ID,
@@ -1711,6 +1716,9 @@ func (s *Service) storePendingVerification(ctx context.Context, chatID int64, us
 		return err
 	}
 
+	if previousMessageID > 0 && previousMessageID != messageID {
+		s.deleteVerificationMessage(&tele.Chat{ID: chatID}, int64Ptr(int64(previousMessageID)))
+	}
 	s.logger.Info(
 		"pending verification created",
 		zap.Int64("chat_id", chatID),
@@ -1959,6 +1967,9 @@ func (s *Service) handleVerifyMath(c tele.Context) error {
 	if pending.Method != "math" && pending.Method != "math_image" {
 		return c.Respond(&tele.CallbackResponse{Text: "当前验证方式不是数学题", ShowAlert: true})
 	}
+	if !pendingVerificationMessageMatches(callback.Message, pending) {
+		return c.Respond(&tele.CallbackResponse{Text: "验证按钮已失效，请使用最新验证卡", ShowAlert: true})
+	}
 
 	policy, err := s.LoadGuardPolicy(context.Background(), chat.ID)
 	if err != nil {
@@ -2027,6 +2038,9 @@ func (s *Service) handleVerifyRandom(c tele.Context) error {
 	if pending.Method != "random" {
 		return c.Respond(&tele.CallbackResponse{Text: "当前验证方式不是随机题", ShowAlert: true})
 	}
+	if !pendingVerificationMessageMatches(callback.Message, pending) {
+		return c.Respond(&tele.CallbackResponse{Text: "验证按钮已失效，请使用最新验证卡", ShowAlert: true})
+	}
 
 	policy, err := s.LoadGuardPolicy(context.Background(), chat.ID)
 	if err != nil {
@@ -2072,10 +2086,20 @@ func (s *Service) completeVerification(ctx context.Context, chat *tele.Chat, use
 	if !manual && s.exemptUser(ctx, chat, user) {
 		return errExemptPending
 	}
-	deleted, err := s.queries.DeletePendingVerification(ctx, store.DeletePendingVerificationParams{
-		ChatID: chat.ID,
-		UserID: user.ID,
-	})
+	if pending.ChatID != chat.ID || pending.UserID != user.ID || pending.ID <= 0 {
+		return pgx.ErrNoRows
+	}
+	active, err := s.queries.GetActivePendingVerification(ctx, store.GetPendingVerificationParams{ChatID: chat.ID, UserID: user.ID})
+	if err != nil {
+		return err
+	}
+	if active.ID != pending.ID {
+		return pgx.ErrNoRows
+	}
+	if err := s.ensureLegacyVerificationSafe(ctx, chat, user); err != nil {
+		return err
+	}
+	deleted, err := s.queries.DeletePendingVerificationInstance(ctx, pending)
 	if err != nil {
 		return fmt.Errorf("delete pending verification: %w", err)
 	}
@@ -2245,21 +2269,26 @@ func (s *Service) HandleVerificationExpiry(ctx context.Context, pending store.Pe
 		return verificationExpiryRetry(time.Now().Add(time.Hour), "verification action requires administrator review"), nil
 	}
 	failAction := verificationFailActionSnapshot(pending.Payload, policy.Verify.FailAction)
-	action, err := s.applyVerificationFailActionLocked(chat, user, failAction)
+	dispatchKey, dispatchKind := verificationCleanupKey(pending), "verification:verify_timeout"
+	if pending.Method == "cleanup" && cleanupMeta.MembershipGeneration != "" {
+		dispatchKey = membershipCleanupKey("prompt_failure", pending.ChatID, pending.UserID, cleanupMeta.MembershipGeneration)
+		dispatchKind = "prompt_failure"
+	}
+	action, err := s.guardedCleanup(ctx, dispatchKey, pending.ChatID, pending.UserID, dispatchKind, func() (string, error) {
+		return s.applyVerificationFailActionLocked(chat, user, failAction)
+	})
 	if err != nil {
-		var applied *actionAppliedError
-		if errors.As(err, &applied) {
-			if recordErr := s.recordVerificationCase(ctx, pending, user, "kick", "verify_timeout", "partial"); recordErr != nil {
-				return VerificationExpiryResult{}, errors.Join(err, recordErr)
-			}
+		if errors.Is(err, errCleanupManualReview) {
 			return verificationExpiryRetry(time.Now().Add(time.Hour), "verification action requires administrator review"), nil
 		}
-		if isTerminalTelegramCleanupError(err) {
-			action = "already_absent"
-		} else {
-			retryAt = s.openTelegramCleanupCooldown(ctx, chat, policy.JoinProtection, err)
-			return verificationExpiryRetry(retryAt, redact.ErrorString(err)), nil
+		retryAt = s.openTelegramCleanupCooldown(ctx, chat, policy.JoinProtection, err)
+		return verificationExpiryRetry(retryAt, redact.ErrorString(err)), nil
+	}
+	if action == "partial_kick" {
+		if err := s.recordVerificationCase(ctx, pending, user, "kick", "verify_timeout", "partial"); err != nil {
+			return VerificationExpiryResult{}, err
 		}
+		return verificationExpiryRetry(time.Now().Add(time.Hour), "verification action requires administrator review"), nil
 	}
 	inserted, err := s.queries.RecordVerificationCleanup(ctx, store.VerificationCleanupSettlement{
 		Key: key, PendingID: &pending.ID, ChatID: pending.ChatID, UserID: pending.UserID,
@@ -2329,6 +2358,16 @@ func (s *Service) failVerificationImmediately(ctx context.Context, chat *tele.Ch
 	if rule != "verify_admin_reject" && s.exemptUser(ctx, chat, user) {
 		return errExemptPending
 	}
+	if pending.ChatID != chat.ID || pending.UserID != user.ID || pending.ID <= 0 {
+		return pgx.ErrNoRows
+	}
+	active, err := s.queries.GetActivePendingVerification(ctx, store.GetPendingVerificationParams{ChatID: chat.ID, UserID: user.ID})
+	if err != nil {
+		return err
+	}
+	if active.ID != pending.ID {
+		return pgx.ErrNoRows
+	}
 	review, err := s.queries.VerificationPartialRequiresReview(ctx, pending.ID)
 	if err != nil {
 		return err
@@ -2336,15 +2375,17 @@ func (s *Service) failVerificationImmediately(ctx context.Context, chat *tele.Ch
 	if review {
 		return fmt.Errorf("验证处理部分完成，请联系管理员核查")
 	}
-	action, err := s.applyVerificationFailActionLocked(chat, user, failAction)
+	action, err := s.guardedCleanup(ctx, verificationCleanupKey(pending), pending.ChatID, pending.UserID, "verification:"+rule, func() (string, error) {
+		return s.applyVerificationFailActionLocked(chat, user, failAction)
+	})
 	if err != nil {
-		var applied *actionAppliedError
-		if errors.As(err, &applied) {
-			if recordErr := s.recordVerificationCase(ctx, pending, user, "kick", rule, "partial"); recordErr != nil {
-				return errors.Join(err, recordErr)
-			}
-		}
 		return err
+	}
+	if action == "partial_kick" {
+		if err := s.recordVerificationCase(ctx, pending, user, "kick", rule, "partial"); err != nil {
+			return err
+		}
+		return errCleanupManualReview
 	}
 	if err := s.recordVerificationCase(ctx, pending, user, action, rule); err != nil {
 		return fmt.Errorf("record verification case: %w", err)
@@ -2352,10 +2393,7 @@ func (s *Service) failVerificationImmediately(ctx context.Context, chat *tele.Ch
 
 	s.finalizeVerificationPrompt(chat, pending, verificationResultHTML(user, verificationFailKind(rule)))
 
-	deleted, err := s.queries.DeletePendingVerification(ctx, store.DeletePendingVerificationParams{
-		ChatID: pending.ChatID,
-		UserID: pending.UserID,
-	})
+	deleted, err := s.queries.DeletePendingVerificationInstance(ctx, pending)
 	if err != nil {
 		return fmt.Errorf("delete failed pending verification: %w", err)
 	}
@@ -2395,19 +2433,19 @@ func (s *Service) applyVerificationFailActionLocked(chat *tele.Chat, user *tele.
 	switch failAction {
 	case "", "kick":
 		if err := runVerificationKick(
-			func() error { return s.bot.Ban(chat, member) },
-			func() error { return s.bot.Unban(chat, user) },
+			func() error { return telegramConfirmedBan(s.bot, chat, member) },
+			func() error { return telegramConfirmedUnban(s.bot, chat, user) },
 		); err != nil {
 			return "", err
 		}
 		return "kick", nil
 	case "ban":
-		if err := s.bot.Ban(chat, member); err != nil {
+		if err := telegramConfirmedBan(s.bot, chat, member); err != nil {
 			return "", fmt.Errorf("ban user: %w", err)
 		}
 		return "ban", nil
 	case "mute_permanent":
-		if err := s.bot.Restrict(chat, &tele.ChatMember{
+		if err := telegramConfirmedRestrict(s.bot, chat, &tele.ChatMember{
 			User:            user,
 			Rights:          tele.NoRights(),
 			RestrictedUntil: 0,
@@ -2418,8 +2456,8 @@ func (s *Service) applyVerificationFailActionLocked(chat *tele.Chat, user *tele.
 	default:
 		s.logger.Warn("unknown verify fail action, fallback to kick", zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID), zap.String("fail_action", failAction))
 		if err := runVerificationKick(
-			func() error { return s.bot.Ban(chat, member) },
-			func() error { return s.bot.Unban(chat, user) },
+			func() error { return telegramConfirmedBan(s.bot, chat, member) },
+			func() error { return telegramConfirmedUnban(s.bot, chat, user) },
 		); err != nil {
 			return "", err
 		}
@@ -2429,11 +2467,13 @@ func (s *Service) applyVerificationFailActionLocked(chat *tele.Chat, user *tele.
 
 func runVerificationKick(ban, unban func() error) error {
 	banErr := ban()
-	if banErr != nil && !isAlreadyBannedTelegramError(banErr) {
+	if banErr != nil {
+		// An existing ban is not proof this operation created it. Never
+		// unban an independent punishment on that basis.
 		return fmt.Errorf("kick user via ban: %w", banErr)
 	}
 	if err := unban(); err != nil {
-		if !isTerminalTelegramCleanupError(err) || isAlreadyBannedTelegramError(err) {
+		if !isExplicitTelegramRejection(err) || !isTerminalTelegramCleanupError(err) || isAlreadyBannedTelegramError(err) {
 			wrapped := fmt.Errorf("unban kicked user: %w", err)
 			if banErr == nil {
 				return &actionAppliedError{action: "ban", err: wrapped}

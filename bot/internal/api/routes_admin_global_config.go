@@ -106,11 +106,15 @@ func parseGlobalConfigPutBody(raw []byte) (globalConfigPutRequest, error) {
 		return globalConfigPutRequest{}, fmt.Errorf("%w: %s", errGlobalConfigSectionUnknown, section)
 	}
 
-	version, err := parseOptionalGlobalConfigVersion(obj["version"])
+	versionField := "expected_version"
+	if section == globalConfigSectionDocument {
+		versionField = "version"
+	}
+	version, err := parseOptionalGlobalConfigVersion(obj[versionField])
 	if err != nil {
 		return globalConfigPutRequest{}, err
 	}
-	if section == globalConfigSectionDocument && version == nil {
+	if version == nil {
 		return globalConfigPutRequest{}, errGlobalConfigVersionRequired
 	}
 
@@ -151,6 +155,12 @@ func normalizeGlobalConfigJSON(raw json.RawMessage) ([]byte, error) {
 }
 
 func applyGlobalConfigPut(current store.GlobalConfig, req globalConfigPutRequest) ([]byte, error) {
+	if req.Version == nil {
+		return nil, errGlobalConfigVersionRequired
+	}
+	if *req.Version != current.Version {
+		return nil, &globalConfigVersionConflictError{Current: current}
+	}
 	switch req.Section {
 	case globalConfigSectionDocument:
 		return applyGlobalConfigDocument(current, req)

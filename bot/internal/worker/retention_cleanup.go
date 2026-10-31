@@ -10,12 +10,15 @@ import (
 	"github.com/openclaw/clawguard/internal/store"
 )
 
-func StartRetentionCleanup(ctx context.Context, q *store.Queries, cfg config.RetentionConfig, logger *zap.Logger) {
+func StartRetentionCleanup(ctx context.Context, q *store.Queries, cfg config.RetentionConfig, logger *zap.Logger) <-chan struct{} {
+	done := make(chan struct{})
 	if q == nil || logger == nil {
-		return
+		close(done)
+		return done
 	}
 
 	go func() {
+		defer close(done)
 		runRetentionOnce(ctx, q, cfg, logger)
 
 		for {
@@ -30,6 +33,7 @@ func StartRetentionCleanup(ctx context.Context, q *store.Queries, cfg config.Ret
 			}
 		}
 	}()
+	return done
 }
 
 func nextRun3AM(now time.Time) time.Time {

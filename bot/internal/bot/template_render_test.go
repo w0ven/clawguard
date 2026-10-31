@@ -227,6 +227,12 @@ func TestMentionMarkdownV2UsesUsernameBeforeLinkFallback(t *testing.T) {
 			t.Fatalf("mentionMarkdownV2() = %q", got)
 		}
 	})
+	t.Run("backslash in name cannot escape link delimiter", func(t *testing.T) {
+		got := mentionMarkdownV2(&tele.User{ID: 42, FirstName: `name\`})
+		if got != `[name\\](tg://user?id=42)` {
+			t.Fatalf("mention=%q", got)
+		}
+	})
 }
 
 func TestMentionHTMLUsesUsernameBeforeLinkFallback(t *testing.T) {

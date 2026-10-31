@@ -147,7 +147,7 @@ export function GroupExemptUsers({ chatId }: { chatId: string }) {
               aria-label="Telegram 用户 ID"
               inputMode="numeric"
               value={id}
-              disabled={editing}
+              disabled={editing || busy}
               onChange={(e) => setId(e.target.value)}
               placeholder="正整数 ID"
             />
@@ -159,6 +159,7 @@ export function GroupExemptUsers({ chatId }: { chatId: string }) {
             备注（可选）
             <Input
               aria-label="备注"
+              disabled={busy}
               value={note}
               maxLength={500}
               onChange={(e) => setNote(e.target.value)}
@@ -168,6 +169,7 @@ export function GroupExemptUsers({ chatId }: { chatId: string }) {
             到期时间（留空永久）
             <Input
               aria-label="到期时间"
+              disabled={busy}
               type="datetime-local"
               step="1"
               value={expires}

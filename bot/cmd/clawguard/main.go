@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -25,6 +26,12 @@ import (
 )
 
 func main() {
+	if !run() {
+		os.Exit(1)
+	}
+}
+
+func run() bool {
 	cfg, err := config.Load()
 	if err != nil {
 		panic(err)
@@ -112,33 +119,30 @@ func main() {
 		logger.Fatal("load scheduled messages", zap.Error(err))
 	}
 	scheduledMessages.Start()
-	defer func() {
-		stopCtx := scheduledMessages.Stop()
-		select {
-		case <-stopCtx.Done():
-		case <-time.After(5 * time.Second):
-			logger.Warn("scheduled messages scheduler stop timeout")
-		}
-	}()
+	var workers sync.WaitGroup
+	startWorker := func(run func(context.Context)) {
+		workers.Add(1)
+		go func() { defer workers.Done(); run(workerCtx) }()
+	}
 
 	moderationNotifications := worker.NewModerationNotifications(logger, queries, cfg.BotToken, cfg.PublicBaseURL)
-	go moderationNotifications.Run(workerCtx)
+	startWorker(moderationNotifications.Run)
 	expiryWorker := worker.NewVerificationExpiry(logger, queries, botService)
-	go expiryWorker.Run(workerCtx)
+	startWorker(expiryWorker.Run)
 	joinProtectionRecoveryWorker := worker.NewJoinProtectionRecovery(logger, botService)
-	go joinProtectionRecoveryWorker.Run(workerCtx)
+	startWorker(joinProtectionRecoveryWorker.Run)
 	healthcheckWorker := worker.NewHealthcheck(logger, queries, botService)
-	go healthcheckWorker.Run(workerCtx)
+	startWorker(healthcheckWorker.Run)
 	llmProberNotifier := &worker.OwnerNotifier{Bot: botService, Queries: queries, Logger: logger}
 	llmPolicy := &worker.GlobalPolicyProvider{Queries: queries}
 	llmProber := worker.NewLLMProber(logger, queries, providerRegistry, modelRegistry, resolver, llmPolicy, llmProberNotifier, rdb)
-	go llmProber.Run(workerCtx)
+	startWorker(llmProber.Run)
 	llmStats := worker.NewLLMStatsAggregator(logger, queries)
-	go llmStats.Run(workerCtx)
+	startWorker(llmStats.Run)
 	dailyReportWorker := worker.NewDailyReport(logger, queries, botService, cfg)
-	go dailyReportWorker.Run(workerCtx)
-	worker.StartRetentionCleanup(workerCtx, queries, cfg.Retention, logger)
-	worker.StartProfileCheckLogsRetention(workerCtx, queries, cfg.Retention, logger)
+	startWorker(dailyReportWorker.Run)
+	retentionDone := worker.StartRetentionCleanup(workerCtx, queries, cfg.Retention, logger)
+	profileRetentionDone := worker.StartProfileCheckLogsRetention(workerCtx, queries, cfg.Retention, logger)
 
 	server := api.NewServer(cfg, logger, botService, scheduledMessages)
 
@@ -153,21 +157,42 @@ func main() {
 		zap.String("http_addr", cfg.ListenAddr()),
 	)
 
+	ok := true
 	select {
 	case <-ctx.Done():
-		workerCancel()
-
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-
-		if err := server.Shutdown(shutdownCtx); err != nil {
-			logger.Error("shutdown http server", zap.Error(err))
-		}
 	case err := <-errCh:
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			logger.Fatal("http server exited", zap.Error(err))
+			logger.Error("http server exited", zap.Error(err))
+			ok = false
 		}
 	}
+	workerCancel()
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		logger.Error("shutdown http server", zap.Error(err))
+		ok = false
+	}
+	cancel()
+
+	stopCtx := scheduledMessages.Stop()
+	select {
+	case <-stopCtx.Done():
+	case <-time.After(5 * time.Second):
+		logger.Warn("scheduled messages scheduler stop timeout")
+	}
+	workersDone := make(chan struct{})
+	go func() {
+		workers.Wait()
+		<-retentionDone
+		<-profileRetentionDone
+		close(workersDone)
+	}()
+	select {
+	case <-workersDone:
+	case <-time.After(5 * time.Second):
+		logger.Warn("worker shutdown timed out")
+	}
+	return ok
 }
 
 // seedAdmins ensures the bootstrap accounts exist on startup.

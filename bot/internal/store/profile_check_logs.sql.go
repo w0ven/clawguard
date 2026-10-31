@@ -1,6 +1,9 @@
 package store
 
-import "context"
+import (
+	"context"
+	"fmt"
+)
 
 const insertProfileCheckLog = `-- name: InsertProfileCheckLog :one
 INSERT INTO profile_check_logs (
@@ -118,6 +121,9 @@ func (q *Queries) CountProfileCheckLogs(ctx context.Context, arg CountProfileChe
 }
 
 func (q *Queries) DeleteOldProfileCheckLogs(ctx context.Context, days int32) (int64, error) {
+	if days <= 0 {
+		return 0, fmt.Errorf("invalid retention days")
+	}
 	result, err := q.db.Exec(ctx, deleteOldProfileCheckLogs, days)
 	if err != nil {
 		return 0, err

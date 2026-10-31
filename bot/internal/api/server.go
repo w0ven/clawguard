@@ -58,7 +58,7 @@ func NewServer(cfg config.Config, logger *zap.Logger, botService *bot.Service, s
 
 	e.GET("/healthz", server.healthz)
 	e.GET("/readyz", server.readyz)
-	e.POST("/webhook/:secret", server.handleWebhook)
+	e.POST("/webhook/:secret", server.handleWebhook, middleware.BodyLimit("4M"))
 	server.registerAuthRoutes()
 	server.registerPublicRoutes()
 	server.registerAdminRoutes()
@@ -138,6 +138,9 @@ func (s *Server) handleWebhook(c echo.Context) error {
 		return c.NoContent(http.StatusUnauthorized)
 	}
 
+	// MaxBytesReader caps each read as well as the total; middleware's body
+	// limit alone can over-read a large chunk before reporting its limit.
+	c.Request().Body = http.MaxBytesReader(c.Response(), c.Request().Body, 4<<20)
 	raw, err := io.ReadAll(c.Request().Body)
 	if err != nil {
 		s.logger.Warn("read webhook update", zap.Error(err))

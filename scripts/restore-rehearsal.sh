@@ -356,6 +356,20 @@ fi
 
 BACKUP_PATH="$(abs_path "${BACKUP_PATH}")"
 
+# Old checksum sidecars may contain an absolute source path. Compare the hash
+# to the explicitly selected file, never follow the path in the sidecar.
+if [[ -f "${BACKUP_PATH}.sha256" ]]; then
+  require_command sha256sum
+  read -r expected_hash _ <"${BACKUP_PATH}.sha256" || die "cannot read checksum sidecar"
+  [[ "${expected_hash}" =~ ^[[:xdigit:]]{64}$ ]] || die "invalid checksum sidecar"
+  actual_hash="$(sha256sum <"${BACKUP_PATH}")"
+  actual_hash="${actual_hash%% *}"
+  [[ "${actual_hash,,}" == "${expected_hash,,}" ]] || die "backup checksum mismatch"
+  log "checksum:        OK"
+else
+  log "checksum:        unavailable (legacy backup)"
+fi
+
 case "${DB_NAME}" in
   restore_rehearsal_*) ;;
   *) die "internal safety check failed: temporary database name lacks restore_rehearsal_ prefix" ;;
@@ -371,6 +385,7 @@ print_report_header "${BACKUP_PATH}"
 log "Starting temporary PostgreSQL container..."
 docker rm -f "${CONTAINER_NAME}" >/dev/null 2>&1 || true
 docker run -d \
+  --network none \
   --name "${CONTAINER_NAME}" \
   -e POSTGRES_DB="${DB_NAME}" \
   -e POSTGRES_USER="${PGUSER_REHEARSAL}" \

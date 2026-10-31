@@ -93,6 +93,13 @@ func (w *ModerationNotifications) deliver(ctx context.Context, n store.Moderatio
 		return
 	}
 	state, delay := w.send(ctx, n)
+	if state == "uncertain" {
+		// Store settlement currently accepts only known outcomes. Preserve the
+		// sending lease: recovery converts it to uncertain after expiry without
+		// replaying it. Other users remain eligible in the meantime.
+		w.logger.Warn("notification delivery result uncertain; awaiting lease recovery", zap.Int64("notification_id", n.ID))
+		return
+	}
 	if state == "pending" { // Exponential backoff and provider retry_after, whichever is larger.
 		backoff := time.Duration(1<<min(int(n.Attempts), 5)) * 15 * time.Second
 		if delay < backoff {
@@ -147,10 +154,9 @@ func (w *ModerationNotifications) send(parent context.Context, n store.Moderatio
 	req.Header.Set("Content-Type", "application/json")
 	res, err := w.client.Do(req)
 	if err != nil {
-		if parent.Err() != nil {
-			return "pending", time.Minute
-		}
-		return "pending", 0
+		// The request may have reached Telegram even when the response was lost
+		// or shutdown cancelled the call. Never replay an unknown outcome.
+		return "uncertain", 0
 	}
 	defer res.Body.Close()
 	if res.StatusCode == http.StatusForbidden {
@@ -193,7 +199,7 @@ func (w *ModerationNotifications) send(parent context.Context, n store.Moderatio
 		return "pending", time.Duration(seconds) * time.Second
 	}
 	if res.StatusCode >= 500 || response.ErrorCode >= 500 || readErr != nil || parseErr != nil {
-		return "pending", 0
+		return "uncertain", 0
 	}
 	return "failed", 0
 }

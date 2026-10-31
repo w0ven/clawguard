@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/labstack/echo/v4"
+	"github.com/labstack/echo/v4/middleware"
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
 
@@ -24,7 +25,7 @@ type magicExchangePayload struct {
 }
 
 func (s *Server) registerPublicRoutes() {
-	s.echo.POST("/api/public/magic/exchange", s.handleMagicExchange)
+	s.echo.POST("/api/public/magic/exchange", s.handleMagicExchange, middleware.BodyLimit("64K"))
 }
 
 func (s *Server) handleMagicExchange(c echo.Context) error {

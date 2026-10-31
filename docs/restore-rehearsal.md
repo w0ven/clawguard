@@ -12,7 +12,7 @@ bash scripts/restore-rehearsal.sh
 BACKUP_PATH=/var/backups/clawguard/clawguard-20260521.dump bash scripts/restore-rehearsal.sh
 ```
 
-脚本会启动独立的临时 PostgreSQL 容器，容器名和库名都带 `restore_rehearsal_` 前缀，不连接 Compose 中的生产 `postgres` 服务，也不会 drop/truncate 生产库。
+脚本会启动无网络的独立临时 PostgreSQL 容器，容器名和库名都带 `restore_rehearsal_` 前缀，不连接 Compose 中的生产 `postgres` 服务，也不会 drop/truncate 生产库。若备份旁存在 `.sha256`，会在启动容器前核对选定文件（包括旧版使用绝对路径的校验文件）；不匹配则失败。旧备份没有校验文件时会提示未校验，但仍尝试完整恢复。新备份校验文件使用相对文件名，可随备份复制到异地验证。
 
 演练报告包含：
 

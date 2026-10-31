@@ -1048,13 +1048,17 @@ func assignScanValue(dest any, value any) error {
 }
 
 type telegramMockTransport struct {
-	mu              sync.Mutex
-	bio             string
-	failBanUserID   int64
-	failBanUserBody string
-	failUnban       bool
-	methods         []string
-	bodies          []string
+	mu                 sync.Mutex
+	bio                string
+	failBanUserID      int64
+	failBanUserBody    string
+	failBanNetwork     bool
+	failRestrictUserID int64
+	failRestrictBody   string
+	failUnban          bool
+	memberRole         string
+	methods            []string
+	bodies             []string
 }
 
 func newMockTelegramBot(t *testing.T, bio string) (*tele.Bot, *telegramMockTransport) {
@@ -1090,13 +1094,23 @@ func (t *telegramMockTransport) RoundTrip(req *http.Request) (*http.Response, er
 	}
 	failBan := method == "kickChatMember" && t.failBanUserID != 0 && strings.Contains(requestBody, fmt.Sprintf(`"user_id":"%d"`, t.failBanUserID))
 	failBody := t.failBanUserBody
+	failBanNetwork := t.failBanNetwork
+	failRestrict := method == "restrictChatMember" && t.failRestrictUserID != 0 && strings.Contains(requestBody, fmt.Sprintf(`"user_id":"%d"`, t.failRestrictUserID))
+	failRestrictBody := t.failRestrictBody
 	failUnban := t.failUnban && method == "unbanChatMember"
+	memberRole := t.memberRole
 	t.mu.Unlock()
 
 	if failUnban {
 		return nil, fmt.Errorf("mock unban network failure")
 	}
+	if failRestrict {
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(failRestrictBody))}, nil
+	}
 	if failBan {
+		if failBanNetwork {
+			return nil, context.DeadlineExceeded
+		}
 		if failBody == "" {
 			failBody = `{"ok":false,"description":"mock ban failed"}`
 		}
@@ -1114,7 +1128,10 @@ func (t *telegramMockTransport) RoundTrip(req *http.Request) (*http.Response, er
 	case "getChat":
 		body = fmt.Sprintf(`{"ok":true,"result":{"id":42,"type":"private","bio":%q}}`, t.bio)
 	case "getChatMember":
-		body = `{"ok":true,"result":{"user":{"id":1,"is_bot":false,"first_name":"admin"},"status":"administrator"}}`
+		if memberRole == "" {
+			memberRole = "administrator"
+		}
+		body = fmt.Sprintf(`{"ok":true,"result":{"user":{"id":1,"is_bot":false,"first_name":"fixture"},"status":%q,"is_member":true}}`, memberRole)
 	case "sendMessage":
 		body = `{"ok":true,"result":{"message_id":999,"chat":{"id":-100123,"type":"supergroup"}}}`
 	}

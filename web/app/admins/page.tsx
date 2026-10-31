@@ -36,12 +36,15 @@ const emptyForm: FormState = {
 };
 
 function parseGroupScope(value: string): number[] {
-  return value
-    .split(/[\s,]+/)
-    .map((s) => s.trim())
-    .filter(Boolean)
-    .map(Number)
-    .filter((n) => Number.isFinite(n));
+  const tokens = value.trim().split(/[\s,]+/).filter(Boolean);
+  if (value.trim() && tokens.length === 0) throw new Error("群 ID 格式无效；仅留空表示全部群");
+  return tokens.map((token) => {
+    const id = Number(token);
+    if (!/^-?[1-9]\d*$/.test(token) || !Number.isSafeInteger(id)) {
+      throw new Error("群 ID 格式无效；仅留空表示全部群");
+    }
+    return id;
+  });
 }
 
 function formatTime(ts: string | null): string {
@@ -95,6 +98,13 @@ export default function AdminsPage() {
       pushToast("Telegram ID 不能为空", "error");
       return;
     }
+    let scope: number[];
+    try {
+      scope = parseGroupScope(form.group_scope);
+    } catch (error) {
+      pushToast(error instanceof Error ? error.message : "群 ID 格式无效", "error");
+      return;
+    }
     setSaving(true);
     try {
       await apiFetch("/api/admin/admins", {
@@ -102,7 +112,7 @@ export default function AdminsPage() {
         body: JSON.stringify({
           telegram_id: Number(form.telegram_id),
           role: form.role,
-          group_scope: parseGroupScope(form.group_scope),
+          group_scope: scope,
           notes: form.notes || null,
         }),
       });

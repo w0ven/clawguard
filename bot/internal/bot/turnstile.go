@@ -149,6 +149,9 @@ func (s *Service) VerifyTurnstileToken(ctx context.Context, token, cfResponse, r
 	if current.ID != observed.ID || current.ChatID != observed.ChatID || current.UserID != observed.UserID {
 		return ErrTurnstileTokenNotFound
 	}
+	if err := s.ensureLegacyVerificationSafe(ctx, &tele.Chat{ID: observed.ChatID}, &tele.User{ID: observed.UserID}); err != nil {
+		return err
+	}
 	pending, err := s.queries.DeletePendingVerificationByToken(ctx, token)
 	if err != nil {
 		if err == pgx.ErrNoRows {

@@ -116,8 +116,18 @@ func TestGroupExemptionBotPathsIntegration(t *testing.T) {
 	if err = s.completeVerification(ctx, msg.Chat, msg.Sender, pending); !errors.Is(err, errExemptPending) {
 		t.Fatalf("automatic pass: %v", err)
 	}
+	// Expiry handler above deliberately uses an expired task. A real manual
+	// callback is only issued for the current, unexpired verification.
+	pending, err = q.UpsertPendingVerification(ctx, store.UpsertPendingVerificationParams{ChatID: chatID, UserID: userID, Method: "button", Payload: []byte(`{}`), ExpiresAt: time.Now().Add(time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeReject := countString(transport.Methods(), "kickChatMember")
 	if err = s.failVerificationImmediately(ctx, msg.Chat, msg.Sender, pending, "kick", "verify_admin_reject"); err != nil {
 		t.Fatalf("manual rejection: %v", err)
+	}
+	if countString(transport.Methods(), "kickChatMember") != beforeReject+1 {
+		t.Fatalf("manual rejection did not kick: %v", transport.Methods())
 	}
 	pending, err = q.UpsertPendingVerification(ctx, store.UpsertPendingVerificationParams{ChatID: chatID, UserID: userID, Method: "button", Payload: []byte(`{}`), ExpiresAt: time.Now().Add(-time.Minute)})
 	if err != nil {
@@ -251,7 +261,9 @@ func TestGroupExemptionBotPathsIntegration(t *testing.T) {
 	_, redisClient := newJoinProtectionTestRedis(t)
 	s.redis = redisClient
 	for _, id := range []int64{chatID, groupB} {
-		generation := fmt.Sprintf("fixture-%d", id)
+		// Each invocation represents a fresh membership; the pending identity is
+		// unique in this database, while remaining stable throughout the task.
+		generation := fmt.Sprintf("fixture-%d-%d", id, pendingB.ID)
 		if err = s.rememberMembershipSession(ctx, id, userID, generation); err != nil {
 			t.Fatal(err)
 		}

@@ -5,6 +5,7 @@ package api
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -22,6 +23,8 @@ import (
 type trustSyncTransport struct {
 	mu               sync.Mutex
 	fail             string
+	failTransport    bool
+	malformedBody    string
 	calls            []string
 	started, release chan struct{}
 }
@@ -30,14 +33,20 @@ func (t *trustSyncTransport) RoundTrip(r *http.Request) (*http.Response, error) 
 	t.mu.Lock()
 	t.calls = append(t.calls, r.URL.Path)
 	fail := t.fail != "" && strings.HasSuffix(r.URL.Path, t.fail)
-	started, release := t.started, t.release
+	started, release, failTransport, malformedBody := t.started, t.release, t.failTransport, t.malformedBody
 	t.mu.Unlock()
 	if started != nil && strings.HasSuffix(r.URL.Path, "/unbanChatMember") {
 		close(started)
 		<-release
 	}
 	if fail {
-		return nil, fmt.Errorf("injected telegram failure")
+		if failTransport {
+			return nil, fmt.Errorf("injected telegram transport failure")
+		}
+		if malformedBody != "" {
+			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(malformedBody))}, nil
+		}
+		return &http.Response{StatusCode: 403, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"ok":false,"error_code":403,"description":"Forbidden: insufficient rights"}`))}, nil
 	}
 	return (exemptTelegramTransport{}).RoundTrip(r)
 }
@@ -364,5 +373,136 @@ func TestLegacyAIMuteDoesNotAutoUnmute(t *testing.T) {
 	var score float64
 	if err = fx.pool.QueryRow(ctx, `SELECT score FROM user_trust WHERE chat_id=-100 AND user_id=501`).Scan(&score); err != nil || score < 0.599 || score > 0.601 {
 		t.Fatalf("legacy repeat score %v %v", score, err)
+	}
+}
+
+func TestTrustSyncUncertainNeverAutomaticallyReplays(t *testing.T) {
+	fx := openH1Fixture(t)
+	ctx := context.Background()
+	if _, err := fx.pool.Exec(ctx, `INSERT INTO user_trust(chat_id,user_id,status,score) VALUES(-100,201,'banned',0),(-100,202,'banned',0),(-100,203,'banned',0),(-100,204,'new',0)`); err != nil {
+		t.Fatal(err)
+	}
+	tr := &trustSyncTransport{fail: "/unbanChatMember", failTransport: true}
+	old := http.DefaultTransport
+	http.DefaultTransport = tr
+	t.Cleanup(func() { http.DefaultTransport = old })
+	svc, err := bot.New(ctx, config.Config{BotToken: "123:TEST"}, zap.NewNop(), fx.queries, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(svc.Stop)
+	srv := NewServer(config.Config{}, zap.NewNop(), svc, nil)
+	call := func(user int) *httptest.ResponseRecorder {
+		status := "new"
+		if user == 204 {
+			status = "trusted"
+		}
+		r := httptest.NewRequest("PUT", fmt.Sprintf("/api/admin/user-trust/-100/%d", user), strings.NewReader(fmt.Sprintf(`{"status":%q,"score":0.5}`, status)))
+		r.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		c := echo.New().NewContext(r, w)
+		c.Set(adminContextKey, fx.admin)
+		c.SetParamNames("chat_id", "user_id")
+		c.SetParamValues("-100", fmt.Sprint(user))
+		if e := srv.handleUpdateUserTrust(c); e != nil {
+			t.Fatal(e)
+		}
+		return w
+	}
+	w := call(201)
+	if w.Code != 200 || !strings.Contains(w.Body.String(), "结果不明") {
+		t.Fatalf("timeout result %d %s", w.Code, w.Body)
+	}
+	if _, err = fx.pool.Exec(ctx, `UPDATE user_trust_sync SET lease_until=now()-interval '1 second' WHERE user_id=201`); err != nil {
+		t.Fatal(err)
+	}
+	before := tr.count("/unbanChatMember")
+	w = call(201)
+	if w.Code != 409 || tr.count("/unbanChatMember") != before {
+		t.Fatalf("timeout replay %d %s", w.Code, w.Body)
+	}
+	tr.setFailure("")
+	if _, err = fx.pool.Exec(ctx, `CREATE FUNCTION fail_trust_dispatch_ack() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN IF NEW.action_done AND NOT OLD.action_done THEN RAISE EXCEPTION 'injected'; END IF; RETURN NEW; END$$; CREATE TRIGGER fail_trust_dispatch_ack BEFORE UPDATE ON user_trust_sync FOR EACH ROW EXECUTE FUNCTION fail_trust_dispatch_ack()`); err != nil {
+		t.Fatal(err)
+	}
+	w = call(202)
+	if w.Code != 500 {
+		t.Fatalf("ack failure %d %s", w.Code, w.Body)
+	}
+	if _, err = fx.pool.Exec(ctx, `DROP TRIGGER fail_trust_dispatch_ack ON user_trust_sync; UPDATE user_trust_sync SET lease_until=now()-interval '1 second' WHERE user_id=202`); err != nil {
+		t.Fatal(err)
+	}
+	before = tr.count("/unbanChatMember")
+	w = call(202)
+	if w.Code != 409 || tr.count("/unbanChatMember") != before {
+		t.Fatalf("ack replay %d %s", w.Code, w.Body)
+	}
+	if _, err = fx.pool.Exec(ctx, `INSERT INTO user_trust_sync(chat_id,user_id,token,target_status,base_status,base_changed_at,action,action_done,permission_done,state,lease_until) SELECT chat_id,user_id,'legacy','new',status,status_changed_at,'unban',false,true,'retry',now()-interval '1 second' FROM user_trust WHERE user_id=203`); err != nil {
+		t.Fatal(err)
+	}
+	before = tr.count("/unbanChatMember")
+	w = call(203)
+	if w.Code != 409 || tr.count("/unbanChatMember") != before {
+		t.Fatalf("legacy replay %d %s", w.Code, w.Body)
+	}
+	tr.setFailure("/restrictChatMember")
+	w = call(204)
+	if w.Code != 200 || !strings.Contains(w.Body.String(), "结果不明") {
+		t.Fatalf("permission timeout %d %s", w.Code, w.Body)
+	}
+	if _, err = fx.pool.Exec(ctx, `UPDATE user_trust_sync SET lease_until=now()-interval '1 second' WHERE user_id=204`); err != nil {
+		t.Fatal(err)
+	}
+	before = tr.count("/restrictChatMember")
+	w = call(204)
+	if w.Code != 409 || tr.count("/restrictChatMember") != before {
+		t.Fatalf("permission replay %d %s", w.Code, w.Body)
+	}
+}
+
+func TestTrustSyncMalformedResponsePersistsUnknownIntegration(t *testing.T) {
+	for _, body := range []string{`<html>bad</html>`, `{"ok":true}`, `{"ok":true,"result":false}`} {
+		t.Run(body, func(t *testing.T) {
+			fx := openH1Fixture(t)
+			ctx := context.Background()
+			if _, err := fx.pool.Exec(ctx, `INSERT INTO user_trust(chat_id,user_id,status,score) VALUES(-100,205,'banned',0)`); err != nil {
+				t.Fatal(err)
+			}
+			tr := &trustSyncTransport{fail: "/unbanChatMember", malformedBody: body}
+			old := http.DefaultTransport
+			http.DefaultTransport = tr
+			t.Cleanup(func() { http.DefaultTransport = old })
+			svc, err := bot.New(ctx, config.Config{BotToken: "123:TEST"}, zap.NewNop(), fx.queries, nil, nil, nil, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(svc.Stop)
+			srv := NewServer(config.Config{}, zap.NewNop(), svc, nil)
+			call := func() *httptest.ResponseRecorder {
+				r := httptest.NewRequest("PUT", "/api/admin/user-trust/-100/205", strings.NewReader(`{"status":"new","score":0.5}`))
+				r.Header.Set("Content-Type", "application/json")
+				w := httptest.NewRecorder()
+				c := echo.New().NewContext(r, w)
+				c.Set(adminContextKey, fx.admin)
+				c.SetParamNames("chat_id", "user_id")
+				c.SetParamValues("-100", "205")
+				if err := srv.handleUpdateUserTrust(c); err != nil {
+					t.Fatal(err)
+				}
+				return w
+			}
+			w := call()
+			if w.Code != 200 || !strings.Contains(w.Body.String(), "结果不明") {
+				t.Fatalf("response %d %s", w.Code, w.Body)
+			}
+			if _, err = fx.pool.Exec(ctx, `UPDATE user_trust_sync SET lease_until=now()-interval '1 second' WHERE user_id=205`); err != nil {
+				t.Fatal(err)
+			}
+			before := tr.count("/unbanChatMember")
+			w = call()
+			if w.Code != 409 || tr.count("/unbanChatMember") != before {
+				t.Fatalf("replay %d %s", w.Code, w.Body)
+			}
+		})
 	}
 }

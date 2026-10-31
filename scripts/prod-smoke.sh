@@ -3,7 +3,7 @@ set -u
 
 # Defaults to the repository root this script lives in; override with APP_DIR.
 APP_DIR=${APP_DIR:-$(cd "$(dirname "$0")/.." && pwd)}
-COMPOSE_FILE=docker-compose.yml
+SMOKE_COMPOSE_FILE=
 SINCE=5m
 WEBHOOK_LOG_WINDOW=24h
 PUBLIC_URL=https://your-domain.example
@@ -77,7 +77,7 @@ while [ "$#" -gt 0 ]; do
         usage
         exit 2
       fi
-      COMPOSE_FILE=$2
+      SMOKE_COMPOSE_FILE=$2
       shift 2
       ;;
     -h|--help)
@@ -103,7 +103,7 @@ EXPECTED_DOMAIN=$url_host
 
 log "ClawGuard production smoke"
 log "app_dir=$APP_DIR"
-log "compose=$COMPOSE_FILE"
+log "compose=${SMOKE_COMPOSE_FILE:-default discovery (including overrides)}"
 log "since=$SINCE"
 log "webhook_log_window=$WEBHOOK_LOG_WINDOW"
 log "url=$PUBLIC_URL"
@@ -115,17 +115,25 @@ else
   cd "$APP_DIR" || exit 1
 fi
 
-if [ ! -f "$COMPOSE_FILE" ]; then
-  fail "compose file not found: $COMPOSE_FILE"
+if [ -n "$SMOKE_COMPOSE_FILE" ] && [ ! -f "$SMOKE_COMPOSE_FILE" ]; then
+  fail "compose file not found: $SMOKE_COMPOSE_FILE"
 fi
 
 if docker compose version >/dev/null 2>&1; then
   compose() {
-    docker compose -f "$COMPOSE_FILE" "$@"
+    if [ -n "$SMOKE_COMPOSE_FILE" ]; then
+      docker compose -f "$SMOKE_COMPOSE_FILE" "$@"
+    else
+      docker compose "$@"
+    fi
   }
 elif have docker-compose; then
   compose() {
-    docker-compose -f "$COMPOSE_FILE" "$@"
+    if [ -n "$SMOKE_COMPOSE_FILE" ]; then
+      docker-compose -f "$SMOKE_COMPOSE_FILE" "$@"
+    else
+      docker-compose "$@"
+    fi
   }
 else
   fail "docker compose is not available"
@@ -164,16 +172,17 @@ check_bot_logs() {
   fi
 
   ignored_transient=$(printf '%s\n' "$bot_logs" \
-    | grep -Eai 'llm probe transient failure \(not yet unhealthy\)|cas lookup failed, skip|ai call failed, trying next model|retention cleanup' || true)
+    | grep -Eai 'llm probe transient failure \(not yet unhealthy\)|cas lookup failed, skip|ai call failed, trying next model' || true)
   ignored_transient_count=$(printf '%s\n' "$ignored_transient" | awk 'NF {count++} END {print count + 0}')
 
   errors=$(printf '%s\n' "$bot_logs" \
     | grep -Eai '(^|[^[:alnum:]_])level=error([^[:alnum:]_]|$)|"level"[[:space:]]*:[[:space:]]*"error"|(^|[^[:alnum:]_])panic([^[:alnum:]_]|$)|no rows in result set|telegram handler error|(^|[^[:alnum:]_])fatal([^[:alnum:]_]|$)|clawguard stopped|process exit' \
-    | grep -Eavi 'llm probe transient failure \(not yet unhealthy\)|cas lookup failed, skip|ai call failed, trying next model|retention cleanup' || true)
+    | grep -Eavi 'llm probe transient failure \(not yet unhealthy\)|cas lookup failed, skip|ai call failed, trying next model' || true)
 
   if [ -n "$errors" ]; then
-    fail "bot logs contain fatal/error lines in the last $SINCE"
-    printf '%s\n' "$errors" | tail -n 20
+    fail "bot logs contain fatal/error lines in the last $SINCE; inspect protected logs on the host"
+    # Do not copy potentially sensitive request/provider details into the smoke
+    # report or CI/operator transcript.
   else
     pass "bot logs have no fatal/error lines in the last $SINCE"
     if [ "$ignored_transient_count" -gt 0 ]; then

@@ -47,6 +47,20 @@ func TestVerificationCleanupSettlementMigrationPreservesRecovery(t *testing.T) {
 		return result
 	}
 	before := snapshot()
+	// An uncertain request must survive rollback and a second Up unchanged.
+	claimed, _, err := q.BeginCleanupDispatch(ctx, "migration-unknown", -90001, 203, "verification:verify_timeout")
+	if err != nil || !claimed {
+		t.Fatalf("seed unknown dispatch: %v claimed=%v", err, claimed)
+	}
+	dispatchSnapshot := func() string {
+		t.Helper()
+		var result string
+		if err := pool.QueryRow(ctx, `SELECT jsonb_agg(to_jsonb(d) ORDER BY operation_key)::text FROM verification_cleanup_dispatch d`).Scan(&result); err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+	beforeDispatch := dispatchSnapshot()
 
 	db, err := sql.Open("pgx", pool.Config().ConnString())
 	if err != nil {
@@ -73,6 +87,9 @@ func TestVerificationCleanupSettlementMigrationPreservesRecovery(t *testing.T) {
 	if got := snapshot(); got != before {
 		t.Fatalf("rollback changed settlement records: before=%s after=%s", before, got)
 	}
+	if got := dispatchSnapshot(); got != beforeDispatch {
+		t.Fatalf("rollback changed dispatches: before=%s after=%s", beforeDispatch, got)
+	}
 	if err := goose.UpContext(ctx, db, dir); err != nil {
 		t.Fatalf("goose re-upgrade: %v", err)
 	}
@@ -81,6 +98,17 @@ func TestVerificationCleanupSettlementMigrationPreservesRecovery(t *testing.T) {
 	}
 	if got := snapshot(); got != before {
 		t.Fatalf("re-upgrade changed settlement records: before=%s after=%s", before, got)
+	}
+	if got := dispatchSnapshot(); got != beforeDispatch {
+		t.Fatalf("re-upgrade changed dispatches: before=%s after=%s", beforeDispatch, got)
+	}
+	claimed, result, err := q.BeginCleanupDispatch(ctx, "migration-unknown", -90001, 203, "verification:verify_timeout")
+	if err != nil || claimed || result != "" {
+		t.Fatalf("unknown dispatch replayable: claimed=%v result=%q err=%v", claimed, result, err)
+	}
+	var dispatchIndex bool
+	if err := pool.QueryRow(ctx, `SELECT to_regclass('verification_cleanup_dispatch_review_idx') IS NOT NULL`).Scan(&dispatchIndex); err != nil || !dispatchIndex {
+		t.Fatalf("dispatch index missing: %v %v", dispatchIndex, err)
 	}
 	var indexExists bool
 	if err := pool.QueryRow(ctx, `SELECT to_regclass('verification_cleanup_unsettled_idx') IS NOT NULL`).Scan(&indexExists); err != nil || !indexExists {

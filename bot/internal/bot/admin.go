@@ -56,7 +56,7 @@ func (s *Service) SafeUnbanChatUserNoLock(_ context.Context, chatID, userID int6
 	// Pass only_if_banned=true so Telegram treats this as a pure unban/no-op.
 	// Without it, unbanChatMember can also lift a regular member's kick restriction,
 	// which makes /unban unsafe when the target is not actually banned.
-	err := s.bot.Unban(&tele.Chat{ID: chatID}, &tele.User{ID: userID}, true)
+	err := telegramConfirmedUnban(s.bot, &tele.Chat{ID: chatID}, &tele.User{ID: userID}, true)
 	if err == nil {
 		return "", nil
 	}
@@ -85,7 +85,7 @@ func confirmTelegramBoolean(raw []byte) error {
 		Result *bool `json:"result"`
 	}
 	if json.Unmarshal(raw, &response) != nil || !response.OK || response.Result == nil || !*response.Result {
-		return errors.New("telegram response not confirmed")
+		return ErrTelegramResultUnconfirmed
 	}
 	return nil
 }
@@ -125,7 +125,7 @@ func (s *Service) UnmuteChatUserNoLock(_ context.Context, chatID, userID int64) 
 		User:   &tele.User{ID: userID},
 		Rights: tele.NoRestrictions(),
 	}
-	return s.bot.Restrict(&tele.Chat{ID: chatID}, member)
+	return telegramConfirmedRestrict(s.bot, &tele.Chat{ID: chatID}, member)
 }
 
 // ReviewUnmuteNoLock is only for a caller already holding the subject gate.

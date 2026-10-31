@@ -73,6 +73,9 @@ func (w *DailyReport) runOnce(ctx context.Context, trigger time.Time) {
 
 	var sent int
 	for _, admin := range admins {
+		if runCtx.Err() != nil {
+			return
+		}
 		if strings.TrimSpace(strings.ToLower(admin.Role)) != "owner" || admin.TelegramID == 0 {
 			continue
 		}

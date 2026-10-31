@@ -124,7 +124,13 @@ func (s *Server) telegramLoginUserRateLimitKey(c echo.Context) string {
 }
 
 func (s *Server) turnstileTokenRateLimitKey(c echo.Context) string {
-	return s.rateLimitKey("verify:turnstile_token", c.Param("token"))
+	token := strings.TrimSpace(c.Param("token"))
+	if token == "" {
+		return ""
+	}
+	// Limiter keys can appear in error logs; never put a live verification
+	// credential there (the dual-captcha limiter uses the same approach).
+	return s.rateLimitKey("verify:turnstile_token", dualCaptchaRateHash(token))
 }
 
 func (s *Server) adminRateLimitKey(prefix string) func(echo.Context) string {

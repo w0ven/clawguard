@@ -15,6 +15,7 @@ import (
 
 var errTrustSyncConflict = errors.New("trust sync conflict")
 var errTrustSyncBusy = errors.New("trust sync in progress")
+var errTrustSyncUncertain = errors.New("trust sync Telegram result uncertain")
 
 type trustSyncPayload struct {
 	Status string  `json:"status"`
@@ -53,6 +54,9 @@ func (s *Server) syncTrustStatus(c echo.Context, chatID, userID int64, p trustSy
 			return e
 		}
 		exists := e == nil
+		if exists && (op.State == "claimed" || op.State == "retry") && (op.DispatchStage != nil || (!op.DispatchGuarded && (!op.ActionDone || !op.PermissionDone))) {
+			return errTrustSyncUncertain
+		}
 		if exists && (op.State == "claimed" || op.State == "retry") && (trust.Status != op.Base || !trust.StatusChangedAt.Equal(op.BaseChanged)) {
 			if e = tx.ConflictTrustSync(ctx, chatID, userID, op.Token); e != nil {
 				return e
@@ -93,6 +97,9 @@ func (s *Server) syncTrustStatus(c echo.Context, chatID, userID int64, p trustSy
 	}
 	if errors.Is(err, pgx.ErrNoRows) {
 		return c.JSON(404, map[string]string{"error": "user trust not found"})
+	}
+	if errors.Is(err, errTrustSyncUncertain) {
+		return c.JSON(http.StatusConflict, map[string]string{"error": "此前 Telegram 操作结果不明，请人工核查，不会自动重试"})
 	}
 	if errors.Is(err, errTrustSyncBusy) || errors.Is(err, errTrustSyncConflict) {
 		return c.JSON(409, map[string]string{"error": "用户状态已变化或同步正在进行，请重新检查后重试"})
@@ -149,6 +156,9 @@ func (s *Server) syncTrustStatus(c echo.Context, chatID, userID int64, p trustSy
 		return nil
 	}
 	fail := func(field string, e error) error {
+		if !telegramDefinitivelyRejected(e) {
+			return c.JSON(http.StatusOK, map[string]any{"trust": serializeUserTrust(trust), field: "Telegram 操作结果不明，请人工核查，系统不会自动重试", "sync_pending": true})
+		}
 		if x := advance("retry"); x != nil {
 			return c.JSON(500, map[string]string{"error": "同步结果无法保存，请重新核查后重试"})
 		}
@@ -158,7 +168,10 @@ func (s *Server) syncTrustStatus(c echo.Context, chatID, userID int64, p trustSy
 		if e := check(); e != nil {
 			return checkFailure(e)
 		}
-		var e error
+		marked, e := q.MarkTrustSyncDispatch(ctx, chatID, userID, token, "action")
+		if e != nil || !marked {
+			return c.JSON(500, map[string]string{"error": "无法记录同步操作，请核查后重试"})
+		}
 		if op.Action == "ban" {
 			e = s.botService.BanChatUserNoLock(ctx, chatID, userID)
 		} else {
@@ -174,6 +187,10 @@ func (s *Server) syncTrustStatus(c echo.Context, chatID, userID int64, p trustSy
 	if !op.PermissionDone {
 		if e := check(); e != nil {
 			return checkFailure(e)
+		}
+		marked, e := q.MarkTrustSyncDispatch(ctx, chatID, userID, token, "permission")
+		if e != nil || !marked {
+			return c.JSON(500, map[string]string{"error": "无法记录权限操作，请核查后重试"})
 		}
 		target := trust
 		target.Status = "trusted"
@@ -228,11 +245,13 @@ func (s *Server) syncTrustStatus(c echo.Context, chatID, userID int64, p trustSy
 		if op.Action != "" && !sameCompleted && op.ModerationOperationID != nil && !current.IsBot && userID > 0 {
 			id := *op.ModerationOperationID
 			ownership, _ := json.Marshal(map[string]any{"base_status": op.Base, "base_changed_at": op.BaseChanged, "target": op.Target, "automatic_reversal": "manual_review"})
-			result := "executed"
+			result, explanation := "executed", "群管理员处理"
 			if op.Action == "unban" {
-				result = "reversed"
+				// only_if_banned may be a successful no-op, not proof that a
+				// previously applied ban was actually reversed.
+				result, explanation = "partial", "管理员已处理解封请求，具体状态请联系管理员确认"
 			}
-			if _, e = tx.RecordModerationCase(ctx, store.ModerationCaseInput{SourceKey: "trust_sync:" + id, SourceKind: "trust_sync", SourceID: id, ChatID: chatID, UserID: userID, Action: op.Action, Result: result, Explanation: "群管理员处理", Ownership: ownership}); e != nil {
+			if _, e = tx.RecordModerationCase(ctx, store.ModerationCaseInput{SourceKey: "trust_sync:" + id, SourceKind: "trust_sync", SourceID: id, ChatID: chatID, UserID: userID, Action: op.Action, Result: result, Explanation: explanation, Ownership: ownership}); e != nil {
 				return e
 			}
 		}

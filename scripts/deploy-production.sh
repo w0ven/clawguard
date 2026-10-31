@@ -13,6 +13,7 @@ STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 ENV_BACKUP="${ENV_FILE}.before-${STAMP}"
 ROLLBACK_TAG="rollback-${STAMP}"
 DEPLOYED=0
+CHANGED_CONTAINERS=0
 
 cd "$ROOT_DIR"
 test -f "$ENV_FILE"
@@ -47,6 +48,39 @@ set_env_tag() {
   set_env_value CLAWGUARD_TAG "$1"
 }
 
+# Compose interpolation can be overridden by the shell or another compose file.
+# Check each service separately without printing the resolved configuration/secrets.
+check_effective_images() {
+  local tag="$1"
+  # config SERVICE includes dependencies; inspect the named service objects,
+  # not the undifferentiated --images list. The JSON may contain secrets and
+  # must remain in the pipe, never a file or log.
+  if ! docker compose config --format json | python3 -c '
+import json, sys
+config = json.load(sys.stdin)
+tag = sys.argv[1]
+for service in ("bot", "web"):
+    expected = "kelework/clawguard-{}:{}".format(service, tag)
+    if config.get("services", {}).get(service, {}).get("image") != expected:
+        print("effective image mismatch for {}: expected {}; check compose overrides and environment".format(service, expected), file=sys.stderr)
+        sys.exit(1)
+' "$tag"; then
+    return 1
+  fi
+}
+
+check_running_image() {
+  local service="$1" tag="$2" container expected actual
+  container="$(docker compose ps -q "$service")"
+  [[ -n "$container" ]] || return 1
+  expected="$(docker image inspect -f '{{.Id}}' "kelework/clawguard-${service}:${tag}")" || return 1
+  actual="$(docker inspect -f '{{.Image}}' "$container")" || return 1
+  [[ -n "$expected" && "$actual" == "$expected" ]] || {
+    echo "running image mismatch for ${service}" >&2
+    return 1
+  }
+}
+
 rollback() {
   local rollback_failed=0
   local bot_ok web_ok _
@@ -63,7 +97,12 @@ rollback() {
     rollback_failed=1
   fi
 
-  if ! docker compose up -d --no-deps bot; then
+  if ! check_effective_images "$ROLLBACK_TAG"; then
+    echo "rollback: effective configuration does not reference rollback images; manual recovery required" >&2
+    return 1
+  fi
+
+  if ! docker compose up -d --no-deps bot || ! check_running_image bot "$ROLLBACK_TAG"; then
     echo "rollback: failed to start bot" >&2
     rollback_failed=1
   else
@@ -81,7 +120,7 @@ rollback() {
     fi
   fi
 
-  if ! docker compose up -d --no-deps web; then
+  if ! docker compose up -d --no-deps web || ! check_running_image web "$ROLLBACK_TAG"; then
     echo "rollback: failed to start web" >&2
     rollback_failed=1
   else
@@ -109,7 +148,11 @@ finish() {
   local status=$?
   trap - EXIT
   if [[ "$status" -ne 0 && "$DEPLOYED" -ne 1 ]]; then
-    if ! rollback; then
+    if [[ "$CHANGED_CONTAINERS" -eq 0 ]]; then
+      if ! cp -p "$ENV_BACKUP" "$ENV_FILE"; then
+        echo "failed to restore .env from ${ENV_BACKUP}; manual recovery is required" >&2
+      fi
+    elif ! rollback; then
       echo "automatic rollback failed; manual recovery is required" >&2
     fi
   fi
@@ -125,13 +168,23 @@ web_is_healthy() {
 
 trap finish EXIT
 
+# Prove both forward and rollback tags are actually selected before touching
+# containers. A hard-coded override may happen to equal the requested new tag.
+set_env_tag "$ROLLBACK_TAG"
+check_effective_images "$ROLLBACK_TAG"
+set_env_tag "$NEW_TAG"
+check_effective_images "$NEW_TAG"
+
 "${ROOT_DIR}/scripts/backup.sh"
 if [[ "${ROTATE_WEBHOOK_SECRET:-0}" == "1" ]]; then
   set_env_value WEBHOOK_SECRET "$(openssl rand -hex 32)"
 fi
-set_env_tag "$NEW_TAG"
+check_effective_images "$NEW_TAG"
 docker compose pull bot web
+# Mark before invoking up: it can partially recreate a service then fail.
+CHANGED_CONTAINERS=1
 docker compose up -d --no-deps bot
+check_running_image bot "$NEW_TAG"
 
 for _ in $(seq 1 36); do
   if curl --fail --silent http://127.0.0.1:8080/readyz | grep -q '"status":"ready"'; then
@@ -142,6 +195,7 @@ done
 curl --fail --silent http://127.0.0.1:8080/readyz | grep -q '"status":"ready"'
 
 docker compose up -d --no-deps web
+check_running_image web "$NEW_TAG"
 
 for _ in $(seq 1 36); do
   if web_is_healthy; then
@@ -152,6 +206,9 @@ done
 
 curl --fail --silent http://127.0.0.1:8080/readyz | grep -q '"status":"ready"'
 web_is_healthy
+check_effective_images "$NEW_TAG"
+check_running_image bot "$NEW_TAG"
+check_running_image web "$NEW_TAG"
 PUBLIC_URL="$(docker compose exec -T bot sh -ec 'printf %s "$PUBLIC_BASE_URL"')"
 EXPECTED_REVISION="${NEW_TAG#sha-}" "${ROOT_DIR}/scripts/prod-smoke.sh" --url "$PUBLIC_URL"
 

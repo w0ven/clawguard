@@ -288,7 +288,7 @@ Fork 或离线构建见 [本地开发](./docs/development.md)。
 
 双重验证需在两家控制台为 `PUBLIC_BASE_URL` 的主机名配置站点，填入上述四个密钥后重启 Bot，再按群选择该方式；站点密钥通过运行时接口提供，服务端密钥不发往浏览器，不需要重建 Web。未配置时无法保存该方式；若运行时密钥缺失，不会以按钮降级或因缺密钥处罚新成员。原有 Turnstile 单验证仍使用构建时 `NEXT_PUBLIC_TURNSTILE_SITE_KEY`。双验证不改变现有群或正在进行中的验证；调整超时请在群策略中明确设置。验证已通过而 Telegram 权限恢复失败时，可刷新两项并重试，若出现独立封禁或权限归属冲突需管理员核查。两家令牌一次性使用，任一失败后须刷新两项。
 
-可选：入群前跑 CAS、Bio 关键词 / AI。AI 简介审核先走模型链，仅全部失败时由已启用的 AdKiller 兜底；关键词模式不调用 AdKiller。
+可选：入群前跑 CAS、Bio 关键词 / AI。CAS 使用 Combot 账户的 API key：用 Telegram 登录 [Combot](https://combot.org)，在 Settings 的 API key 区域获取，将 `CAS_API_KEY` 写入受保护的 Bot 运行环境并重启 Bot；不要提交密钥。请求只通过 Authorization Bearer 发送，不放入 URL。未配置时保留有效缓存、未缓存的 CAS 结果为未知，不请求上游；401 同样不是未命中，其他检查继续。AI 简介审核先走模型链，仅全部失败时由已启用的 AdKiller 兜底；关键词模式不调用 AdKiller。
 
 ---
 
@@ -389,18 +389,17 @@ git pull
 bash scripts/deploy-production.sh sha-<commit>
 ```
 
-脚本会备份数据库、记下旧镜像、升级 bot/web、核对健康和 OCI revision；失败则回到旧镜像。
+脚本需要 Python 3 和支持 `docker compose config --format json` 的 Compose；会先核对默认发现的所有覆盖文件及环境变量解析后，bot/web 镜像均随 `CLAWGUARD_TAG` 同时切换到新版本和回滚版本。若覆盖文件固定镜像（即使正好是目标版本），应先由运维调整覆盖，使两服务均使用 `${CLAWGUARD_TAG}`；否则脚本在重建前失败，不会声称部署成功。脚本随后备份数据库、保存旧镜像、升级 bot/web，核对运行镜像 ID、健康和 OCI revision；失败时尝试回滚并报告是否需要人工恢复。不要在 shell 中导出与 `.env` 冲突的 `CLAWGUARD_TAG`。
 
 升级后检查：
 
 ```bash
 bash scripts/prod-smoke.sh \
   --since 5m \
-  --url https://your-domain.example \
-  --compose docker-compose.yml
+  --url https://your-domain.example
 ```
 
-备份与恢复演练见 [docs/restore-rehearsal.md](./docs/restore-rehearsal.md)。
+备份与恢复演练见 [docs/restore-rehearsal.md](./docs/restore-rehearsal.md)；定时发送结果不明与自动删除恢复见 [docs/scheduled-dispatch.md](./docs/scheduled-dispatch.md)。
 
 ---
 

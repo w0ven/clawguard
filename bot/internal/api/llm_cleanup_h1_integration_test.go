@@ -431,6 +431,12 @@ func putGlobalConfigSection(ctx context.Context, queries *store.Queries, req glo
 		if err != nil {
 			return err
 		}
+		// These cleanup ordering tests explicitly rebase their synthetic section
+		// patch on the locked version. Stale-baseline conflicts have separate tests.
+		if req.Version == nil {
+			v := current.Version
+			req.Version = &v
+		}
 		next, err := applyGlobalConfigPut(current, req)
 		if err != nil {
 			return err

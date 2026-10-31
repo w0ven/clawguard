@@ -19,6 +19,7 @@ import {
   fetchGlobalConfig,
   isGlobalConfigConflict,
   saveGlobalConfigSection,
+  validGlobalConfigVersion,
 } from "@/lib/global-config";
 import { useToast } from "@/components/providers";
 import { useDirtyGuard } from "@/components/dirty-guard";
@@ -56,6 +57,9 @@ export default function PromptEditorPage() {
   const [bioRules, setBioRules] = useState("");
   const [originalMessage, setOriginalMessage] = useState("");
   const [originalBio, setOriginalBio] = useState("");
+  const [configReady, setConfigReady] = useState(false);
+  const [version, setVersion] = useState<number | null>(null);
+  const [loadError, setLoadError] = useState(false);
 
   const [testScene, setTestScene] = useState<"message" | "bio">("message");
   const [testText, setTestText] = useState("");
@@ -84,6 +88,8 @@ export default function PromptEditorPage() {
           return;
         }
 
+        if (!validGlobalConfigVersion(configPayload.version)) throw new Error("缺少配置版本，请刷新后重试");
+        setVersion(configPayload.version);
         const nextConfig = configPayload.config ?? {};
         const aiConfig = (nextConfig.ai ?? {}) as AIConfigShape;
         const fallbackRules = normalizeRuleValue(aiConfig.custom_rules);
@@ -94,6 +100,7 @@ export default function PromptEditorPage() {
         setBioRules(nextBio);
         setOriginalMessage(nextMessage);
         setOriginalBio(nextBio);
+        setConfigReady(true);
 
         const nextModels =
           providerPayload.providers?.flatMap((provider) =>
@@ -119,6 +126,7 @@ export default function PromptEditorPage() {
         if (!active) {
           return;
         }
+        setLoadError(true);
         pushToast(
           error instanceof Error ? error.message : "加载 Prompt 编辑器失败",
           "error",
@@ -141,13 +149,19 @@ export default function PromptEditorPage() {
   }
 
   async function saveRules(target: "message" | "bio") {
+    if (version == null) { pushToast("缺少配置版本，请刷新后再保存", "error"); return; }
     setSavingTarget(target);
     try {
       const nextAI: Record<string, unknown> =
         target === "message"
           ? { message_rules: messageRules }
           : { bio_rules: bioRules };
-      await saveGlobalConfigSection("prompt", { ai: nextAI });
+      const payload = await saveGlobalConfigSection("prompt", version, { ai: nextAI });
+      if (!validGlobalConfigVersion(payload.version)) {
+        setVersion(null);
+        throw new Error("保存结果缺少配置版本，请保留草稿并刷新核对");
+      }
+      setVersion(payload.version);
       if (target === "message") {
         setOriginalMessage(messageRules);
       } else {
@@ -249,13 +263,14 @@ export default function PromptEditorPage() {
       title="Prompt 编辑器"
       subtitle="将发言审核和简介审核拆成两套独立规则，并支持实时测试与完整 Prompt 预览"
     >
+      {!configReady && <p role="status" className="text-sm text-[var(--text-muted)]">{loadError ? "加载失败，请刷新重试" : "正在加载规则…"}</p>}
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1.15fr)_minmax(360px,0.85fr)]">
         <div className="space-y-4">
           <Card>
             <CardHeader className="flex-row items-start justify-between gap-3">
               <div>
                 <CardTitle>发言规则</CardTitle>
-                <CardDescription>只作用于群聊消息审核。</CardDescription>
+                <CardDescription>只作用于群聊消息审核。规则中写 ban 不会覆盖消息分类动作策略。</CardDescription>
               </div>
               <div className="flex items-center gap-2">
                 {messageDirty && (
@@ -265,7 +280,7 @@ export default function PromptEditorPage() {
                 )}
                 <Button
                   onClick={() => saveRules("message")}
-                  disabled={savingTarget !== null || !messageDirty}
+                  disabled={!configReady || version == null || savingTarget !== null || !messageDirty}
                   size="sm"
                 >
                   <Save className="h-3.5 w-3.5" />
@@ -275,6 +290,7 @@ export default function PromptEditorPage() {
             </CardHeader>
             <CardBody>
               <Textarea
+                disabled={!configReady}
                 value={messageRules}
                 onChange={(event) => setMessageRules(event.target.value)}
                 className="min-h-[240px] font-mono text-xs leading-relaxed"
@@ -287,7 +303,7 @@ export default function PromptEditorPage() {
             <CardHeader className="flex-row items-start justify-between gap-3">
               <div>
                 <CardTitle>简介规则</CardTitle>
-                <CardDescription>只作用于 Telegram 用户资料简介审核。</CardDescription>
+                <CardDescription>只作用于 Telegram 用户资料简介审核。简介危险判定达到 Warn 阈值后直接封禁；消息处罚仍按分类策略。</CardDescription>
               </div>
               <div className="flex items-center gap-2">
                 {bioDirty && (
@@ -297,7 +313,7 @@ export default function PromptEditorPage() {
                 )}
                 <Button
                   onClick={() => saveRules("bio")}
-                  disabled={savingTarget !== null || !bioDirty}
+                  disabled={!configReady || version == null || savingTarget !== null || !bioDirty}
                   size="sm"
                 >
                   <Save className="h-3.5 w-3.5" />
@@ -307,6 +323,7 @@ export default function PromptEditorPage() {
             </CardHeader>
             <CardBody>
               <Textarea
+                disabled={!configReady}
                 value={bioRules}
                 onChange={(event) => setBioRules(event.target.value)}
                 className="min-h-[240px] font-mono text-xs leading-relaxed"

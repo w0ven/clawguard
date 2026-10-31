@@ -68,7 +68,7 @@ func TestSafeUnbanChatUserUsesOnlyIfBanned(t *testing.T) {
 		t.Fatal("isNoUnbanNeededTelegramError marker not found")
 	}
 	body := source[start : start+end]
-	if !strings.Contains(body, "s.bot.Unban(&tele.Chat{ID: chatID}, &tele.User{ID: userID}, true)") {
+	if !strings.Contains(body, "telegramConfirmedUnban(s.bot, &tele.Chat{ID: chatID}, &tele.User{ID: userID}, true)") {
 		t.Fatal("SafeUnbanChatUser must pass only_if_banned=true to Telegram Unban")
 	}
 }

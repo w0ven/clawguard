@@ -41,7 +41,14 @@ export function LiveFeed() {
 
   useEffect(() => {
     let cancelled = false;
+    let inFlight = false;
+    // Results from the previous page/filter must not appear under the new one.
+    setEvents([]);
+    setTotal(0);
+    setHasMore(false);
     const load = async () => {
+      if (inFlight || cancelled) return;
+      inFlight = true;
       if (!cancelled) {
         setLoading(true);
       }
@@ -63,6 +70,7 @@ export function LiveFeed() {
         if (cancelled) return;
         setError(e instanceof Error ? e.message : "加载失败");
       } finally {
+        inFlight = false;
         if (!cancelled) setLoading(false);
       }
     };

@@ -23,6 +23,12 @@ SET title = COALESCE(NULLIF(EXCLUDED.title, ''), authorized_groups.title),
     notes = EXCLUDED.notes
 RETURNING chat_id, title, authorized_at, authorized_by, enabled, notes;
 
+-- name: InsertAuthorizedGroupIfAbsent :one
+INSERT INTO authorized_groups (chat_id, title, authorized_by, enabled, notes)
+VALUES ($1, COALESCE($2, ''), $3, COALESCE($4, TRUE), COALESCE($5, ''))
+ON CONFLICT (chat_id) DO NOTHING
+RETURNING chat_id, title, authorized_at, authorized_by, enabled, notes;
+
 -- name: DeleteAuthorizedGroup :exec
 DELETE FROM authorized_groups
 WHERE chat_id = $1;

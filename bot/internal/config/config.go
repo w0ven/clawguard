@@ -34,6 +34,7 @@ type Config struct {
 	RedisHost                string  `env:"REDIS_HOST,required"`
 	RedisPort                int     `env:"REDIS_PORT" envDefault:"6379"`
 	RedisPassword            string  `env:"REDIS_PASSWORD"`
+	CASAPIKey                string  `env:"CAS_API_KEY"`
 	JWTSecret                string  `env:"JWT_SECRET,required"`
 	TurnstileSiteKey         string  `env:"TURNSTILE_SITE_KEY"`
 	TurnstileSecret          string  `env:"TURNSTILE_SECRET_KEY"`
