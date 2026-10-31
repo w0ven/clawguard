@@ -6,7 +6,7 @@ const publicPrefixes = ["/auth", "/verify", "/miniapp", "/api"];
 export function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
   const isPublic =
-    pathname === "/" ||
+    pathname === "/" || pathname === "/appeal/mini" ||
     publicPrefixes.some(
       (prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`),
     );

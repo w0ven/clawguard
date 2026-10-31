@@ -124,12 +124,40 @@ func (s *Service) VerifyTurnstileToken(ctx context.Context, token, cfResponse, r
 		return fmt.Errorf("%w: %s", ErrTurnstileVerifyFailed, reason)
 	}
 
+	// Resolve the subject first without consuming the task. Recheck under the
+	// same gate used by moderation, then consume and restore permissions while
+	// the gate remains held. Lock timeout/cancellation leaves the task intact.
+	observed, err := s.queries.GetPendingVerificationByToken(ctx, token)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrTurnstileTokenNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("lookup turnstile token: %w", err)
+	}
+	release, err := s.AcquireModerationReview(ctx, observed.ChatID, observed.UserID)
+	if err != nil {
+		return err
+	}
+	defer release()
+	current, err := s.queries.GetPendingVerificationByToken(ctx, token)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrTurnstileTokenNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("recheck turnstile token: %w", err)
+	}
+	if current.ID != observed.ID || current.ChatID != observed.ChatID || current.UserID != observed.UserID {
+		return ErrTurnstileTokenNotFound
+	}
 	pending, err := s.queries.DeletePendingVerificationByToken(ctx, token)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return ErrTurnstileTokenNotFound
 		}
 		return fmt.Errorf("consume turnstile token: %w", err)
+	}
+	if pending.ID != observed.ID || pending.ChatID != observed.ChatID || pending.UserID != observed.UserID {
+		return ErrTurnstileTokenNotFound
 	}
 	chat := &tele.Chat{ID: pending.ChatID}
 	user := &tele.User{
@@ -143,7 +171,7 @@ func (s *Service) VerifyTurnstileToken(ctx context.Context, token, cfResponse, r
 		s.logger.Warn("load guard policy before turnstile permission sync failed, using defaults", zap.Error(polErr), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
 		policy = config.DefaultPolicy
 	}
-	if err := s.applyVerificationPassPermissions(ctx, chat, user, policy); err != nil {
+	if err := s.applyVerificationPassPermissionsLocked(ctx, chat, user, policy); err != nil {
 		restoreErr := s.restorePendingVerification(ctx, pending)
 		if restoreErr != nil {
 			s.logger.Error("restore turnstile pending after restrict failure", zap.Error(restoreErr), zap.Int64("chat_id", pending.ChatID), zap.Int64("user_id", pending.UserID))

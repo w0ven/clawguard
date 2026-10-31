@@ -37,6 +37,9 @@ func (s *Service) handleStartCommand(c tele.Context) error {
 		if strings.HasPrefix(c.Data(), "v_") {
 			return s.sendMiniAppVerificationCard(ctx, c, strings.TrimPrefix(c.Data(), "v_"))
 		}
+		markup := &tele.ReplyMarkup{}
+		markup.Inline(markup.Row(markup.WebApp("我的处理记录", &tele.WebApp{URL: strings.TrimRight(s.cfg.PublicBaseURL, "/") + "/appeal/mini"})))
+		opts.ReplyMarkup = markup
 		return c.Send(privateStartText(), opts)
 	}
 	return c.Send(groupStartText(), opts)

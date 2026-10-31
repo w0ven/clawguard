@@ -1,0 +1,35 @@
+"use client";
+
+import {useEffect,useState} from "react";
+import {AdminShell} from "@/components/admin-shell";
+import {apiFetch} from "@/lib/api";
+
+type Review={id:number;case_id:number;chat_id:number;user_id:number;group_title:string;status:string;decision:string|null;public_note:string;execution_result:string;reason:string;reference_url:string;turnstile_verified:boolean;hcaptcha_verified:boolean;action:string;case_result:string;explanation:string;summary:string;created_at:string;case_notification_state:string;result_notification_state:string};
+type Group={chat_id:number;title:string};
+const status:Record<string,string>={pending:"待审核",upheld:"维持原处理",executing:"处理中",failed:"处理失败，可重试",manual_review:"通过，需人工核查",completed:"处理完成"};
+const actions:Record<string,string>={ban:"封禁",mute:"禁言",mute_5m:"禁言",mute_1h:"禁言",kick:"移出群聊",warn:"警告",delete:"删除消息",delete_warn:"删除消息并警告",delete_and_warn:"删除消息并警告",delete_mute:"删除消息并禁言",delete_ban:"删除消息并封禁",unban:"解封请求",unmute:"解除禁言"};
+const caseResults:Record<string,string>={executed:"已执行",partial:"部分执行或状态待确认",failed:"未确认",reversed:"已撤销"};
+const delivery:Record<string,string>={pending:"待发送",leased:"待发送",sending:"发送中",sent:"已发送",unreachable:"无法送达",failed:"发送失败",expired:"已过期",uncertain:"送达状态待核查"};
+const input="rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-2";
+function safeLink(raw:string){try{const url=new URL(raw);return url.protocol==="http:"||url.protocol==="https:"?url.href:""}catch{return ""}}
+export default function AppealsPage(){
+ const [rows,setRows]=useState<Review[]>([]),[groups,setGroups]=useState<Group[]>([]),[item,setItem]=useState<Review|null>(null);
+ const [chat,setChat]=useState(""),[state,setState]=useState("pending"),[from,setFrom]=useState(""),[to,setTo]=useState(""),[offset,setOffset]=useState(0),[more,setMore]=useState(false),[count,setCount]=useState(0);
+ const [note,setNote]=useState(""),[busy,setBusy]=useState(false),[error,setError]=useState("");
+ async function load(){try{const q=new URLSearchParams({offset:String(offset)});if(chat)q.set("chat_id",chat);if(state)q.set("status",state);if(from)q.set("from",new Date(from+"T00:00:00").toISOString());if(to){const d=new Date(to+"T00:00:00");d.setDate(d.getDate()+1);q.set("to",d.toISOString())}const data=await apiFetch<{appeals:Review[];pending_count:number;has_more:boolean}>(`/api/admin/appeals?${q}`);setRows(data.appeals);setCount(data.pending_count);setMore(data.has_more);setError("")}catch(e){setError(e instanceof Error?e.message:"加载失败")}}
+ useEffect(()=>{void load()},[chat,state,from,to,offset]);
+ useEffect(()=>{void apiFetch<{groups:Group[]}>("/api/admin/groups").then(v=>setGroups(v.groups)).catch(()=>{})},[]);
+ async function open(id:number){try{const v=await apiFetch<{appeal:Review}>(`/api/admin/appeals/${id}`);setItem(v.appeal);setNote("");setError("")}catch(e){setError(e instanceof Error?e.message:"加载失败")}}
+ async function act(decision?:"approve"|"uphold"){if(!item)return;setBusy(true);setError("");try{const url=`/api/admin/appeals/${item.id}/${decision?"decision":"retry"}`;const v=await apiFetch<{appeal:Review}>(url,{method:"POST",body:JSON.stringify(decision?{decision,note}: {})});setItem(v.appeal);await load()}catch(e){setError(e instanceof Error?e.message:"处理失败，请刷新后重试")}finally{setBusy(false)}}
+ const link=item?safeLink(item.reference_url):"";
+ return <AdminShell title="申诉管理" subtitle={`待审核 ${count} 件`}><div className="space-y-4">
+  {error&&<p role="alert" className="rounded bg-red-50 p-3 text-red-800">{error}</p>}
+  <div className="flex flex-wrap gap-2"><label>群聊 <select className={input} value={chat} onChange={e=>{setChat(e.target.value);setOffset(0)}}><option value="">全部授权群</option>{groups.map(g=><option key={g.chat_id} value={g.chat_id}>{g.title}</option>)}</select></label><label>状态 <select className={input} value={state} onChange={e=>{setState(e.target.value);setOffset(0)}}><option value="">全部</option>{Object.entries(status).map(([k,v])=><option key={k} value={k}>{v}</option>)}</select></label><label>开始 <input className={input} type="date" value={from} onChange={e=>{setFrom(e.target.value);setOffset(0)}}/></label><label>结束 <input className={input} type="date" value={to} onChange={e=>{setTo(e.target.value);setOffset(0)}}/></label></div>
+  <div className="grid gap-2">{rows.map(r=><button key={r.id} onClick={()=>void open(r.id)} className="rounded-xl border bg-[var(--surface)] p-4 text-left"><strong>APL-{r.id} · {r.group_title||r.chat_id}</strong><p>CASE-{r.case_id} · {status[r.status]||r.status} · {new Date(r.created_at).toLocaleString("zh-CN")}</p><p>处理通知：{delivery[r.case_notification_state]||"无"} · 结果通知：{delivery[r.result_notification_state]||"尚无"}</p></button>)}{!rows.length&&<p>没有符合条件的申诉</p>}</div>
+  <div className="flex gap-2"><button className={input} disabled={offset===0} onClick={()=>setOffset(Math.max(0,offset-20))}>上一页</button><button className={input} disabled={!more} onClick={()=>setOffset(offset+20)}>下一页</button></div>
+  {item&&<section className="space-y-3 rounded-xl border bg-[var(--surface)] p-4"><div className="flex justify-between"><h2 className="font-semibold">申诉 APL-{item.id} · {status[item.status]||item.status}</h2><button onClick={()=>setItem(null)}>关闭</button></div><p>群：{item.group_title} ({item.chat_id}) · 用户：{item.user_id} · CASE-{item.case_id}</p><p>原拟处理：{actions[item.action]||"群规则处理"} · 实际结果：{caseResults[item.case_result]||"待确认"}</p><p>处理说明：{item.explanation||"无"}</p><p className="whitespace-pre-wrap">消息摘要：{item.summary||"无"}</p><p className="whitespace-pre-wrap">用户理由：{item.reason}</p>{link&&<p>参考链接：<a className="underline" href={link} target="_blank" rel="noopener noreferrer">{link}</a></p>}<p>两项安全验证：{item.turnstile_verified&&item.hcaptcha_verified?"均已通过":"未全部通过"}</p><p>处理通知：{delivery[item.case_notification_state]||"无"} · 结果通知：{delivery[item.result_notification_state]||"尚无"}</p>{item.public_note&&<p className="whitespace-pre-wrap">公开说明：{item.public_note}</p>}{item.execution_result&&<p>实际结果：{item.execution_result}</p>}
+   {item.status==="pending"&&<><label htmlFor="review-note">公开处理说明（必填）</label><textarea id="review-note" value={note} onChange={e=>setNote(e.target.value)} maxLength={1000} className={`${input} w-full`} rows={4}/><p>通过后将核对实际归属；无法安全确认时需要人工核查，并非所有限制都能自动解除。</p><div className="flex flex-wrap gap-2"><button className={input} disabled={busy||!note.trim()} onClick={()=>void act("approve")}>通过并核查处理</button><button className={input} disabled={busy||!note.trim()} onClick={()=>void act("uphold")}>维持原处理</button></div></>}
+   {(item.status==="failed"||item.status==="executing")&&<button className={input} disabled={busy} onClick={()=>void act()}>重试处理或恢复结算</button>}
+  </section>}
+ </div></AdminShell>
+}

@@ -4,7 +4,7 @@ import { test, expect } from './ui-fixtures';
 const telegramSDKFixture = `(() => {
  const hash = location.hash.slice(1); const parts = hash.split('?');
  const params = new URLSearchParams(parts.length > 1 ? parts.slice(1).join('?') : parts[0]);
- window.Telegram = { WebApp: { initData: params.get('tgWebAppData') || '', ready(){}, expand(){}, safeAreaInset:{top:20,bottom:4},contentSafeAreaInset:{top:40,bottom:0} } };
+ window.Telegram = { WebApp: { initData: params.get('tgWebAppData') || '', ready(){}, expand(){}, BackButton:{onClick(){},offClick(){},show(){},hide(){}}, safeAreaInset:{top:20,bottom:4},contentSafeAreaInset:{top:40,bottom:0} } };
 })();`;
 const telegramFragment = (value: string, prefix = '') => `#${prefix}tgWebAppData=${encodeURIComponent(value)}&tgWebAppVersion=8.0&tgWebAppPlatform=web`;
 
@@ -17,7 +17,7 @@ test('Mini App identifies the user, tracks original deadline and submits both ch
     w.turnstile = { render: (_node: unknown, options: any) => { w.cf = options; return 'cf'; }, remove: () => {} };
     w.hcaptcha = { render: (_node: unknown, options: any) => { w.h = options; return 'h'; }, remove: () => {} };
   });
-  await page.route('https://telegram.org/js/telegram-web-app.js', route => route.fulfill({ contentType: 'application/javascript', body: telegramSDKFixture }));
+  await page.route('https://telegram.org/js/telegram-web-app.js*', route => route.fulfill({ contentType: 'application/javascript', body: telegramSDKFixture }));
   await page.route('**/api/verify/mini/**', async route => {
     requests.push(route.request().postDataJSON());
     if (route.request().url().endsWith('/config')) return route.fulfill({ json: { turnstile_sitekey: 'cf', hcaptcha_sitekey: 'h', group_title: '测试群', user_id: 123, username: 'alice', remaining_ms: 120000 } });
@@ -48,7 +48,7 @@ test('Mini App stops submission when the original deadline expires', async ({ pa
     w.turnstile = { render: (_node: unknown, opts: any) => { w.cf = opts; return 'cf'; }, remove: () => {} };
     w.hcaptcha = { render: (_node: unknown, opts: any) => { w.h = opts; return 'h'; }, remove: () => {} };
   });
-  await page.route('https://telegram.org/js/telegram-web-app.js', route => route.fulfill({ contentType: 'application/javascript', body: telegramSDKFixture }));
+  await page.route('https://telegram.org/js/telegram-web-app.js*', route => route.fulfill({ contentType: 'application/javascript', body: telegramSDKFixture }));
   await page.route('**/api/verify/mini/config', route => route.fulfill({ json: { turnstile_sitekey: 'cf', hcaptcha_sitekey: 'h', group_title: '测试群', user_id: 123, remaining_ms: 0 } }));
   await page.goto(`/verify/mini?task=${token}${telegramFragment('signed')}`);
   await expect(page.getByText('入群验证已超时，本次验证已关闭。')).toBeVisible();
@@ -58,7 +58,7 @@ test('Mini App stops submission when the original deadline expires', async ({ pa
 });
 
 test('Mini App without Telegram identity refuses verification', async ({ page }) => {
-  await page.route('https://telegram.org/js/telegram-web-app.js', route => route.fulfill({ contentType: 'application/javascript', body: telegramSDKFixture }));
+  await page.route('https://telegram.org/js/telegram-web-app.js*', route => route.fulfill({ contentType: 'application/javascript', body: telegramSDKFixture }));
   await page.goto(`/verify/mini?task=${token}#tgWebAppVersion=8.0`);
   await expect(page.locator('main[role=alert]')).toContainText('请本人从机器人私聊打开');
 });
@@ -75,7 +75,7 @@ test('Mini App frame policy is scoped to the verification page', async ({ reques
 
 test('verified task resumes without loading challenge scripts and ignores device clock offset', async ({ page }) => {
   await page.addInitScript(() => { Date.now = () => 1; });
-  await page.route('https://telegram.org/js/telegram-web-app.js', route => route.fulfill({ contentType: 'application/javascript', body: telegramSDKFixture }));
+  await page.route('https://telegram.org/js/telegram-web-app.js*', route => route.fulfill({ contentType: 'application/javascript', body: telegramSDKFixture }));
   let challengeRequests = 0;
   await page.route(/challenges\.cloudflare\.com|js\.hcaptcha\.com/, route => { challengeRequests++; return route.abort(); });
   await page.route('**/api/verify/mini/**', route => {

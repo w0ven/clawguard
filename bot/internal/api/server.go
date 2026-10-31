@@ -27,11 +27,12 @@ const (
 )
 
 type Server struct {
-	cfg        config.Config
-	logger     *zap.Logger
-	botService *bot.Service
-	echo       *echo.Echo
-	scheduler  *scheduler.Scheduler
+	cfg            config.Config
+	logger         *zap.Logger
+	botService     *bot.Service
+	echo           *echo.Echo
+	scheduler      *scheduler.Scheduler
+	appealVerifier func(context.Context, string, string, string, string) error
 }
 
 func NewServer(cfg config.Config, logger *zap.Logger, botService *bot.Service, scheduled *scheduler.Scheduler) *Server {
@@ -47,11 +48,12 @@ func NewServer(cfg config.Config, logger *zap.Logger, botService *bot.Service, s
 	}))
 
 	server := &Server{
-		cfg:        cfg,
-		logger:     logger,
-		botService: botService,
-		echo:       e,
-		scheduler:  scheduled,
+		cfg:            cfg,
+		logger:         logger,
+		botService:     botService,
+		echo:           e,
+		scheduler:      scheduled,
+		appealVerifier: botService.VerifyAppealProviders,
 	}
 
 	e.GET("/healthz", server.healthz)
@@ -61,6 +63,8 @@ func NewServer(cfg config.Config, logger *zap.Logger, botService *bot.Service, s
 	server.registerPublicRoutes()
 	server.registerAdminRoutes()
 	server.registerVerifyRoutes()
+	server.registerAppealRoutes()
+	server.registerAppealReviewRoutes()
 
 	return server
 }

@@ -48,19 +48,38 @@ func ungraduatedRestrictedRights(policy config.GuardPolicy) tele.Rights {
 	return rights
 }
 
-func (s *Service) applyUngraduatedPermissionRestriction(chat *tele.Chat, user *tele.User, policy config.GuardPolicy, trust store.UserTrust, reason string) {
-	if s.exemptUser(context.Background(), chat, user) {
+func (s *Service) applyUngraduatedPermissionRestriction(ctx context.Context, chat *tele.Chat, user *tele.User, policy config.GuardPolicy, trust store.UserTrust, reason string) {
+	if s.exemptUser(ctx, chat, user) {
 		return
 	}
 	if !ungraduatedPermissionRestrictionEnabled(policy) || !isUngraduatedTrustStatus(trust.Status) {
 		return
 	}
-	if err := s.restrictUngraduatedPermissions(chat, user, policy, reason); err != nil {
+	var err error
+	if held, _ := ctx.Value(moderationHeldKey{}).(moderationKey); chat != nil && user != nil && held == (moderationKey{chat.ID, user.ID}) {
+		err = s.restrictUngraduatedPermissionsLocked(chat, user, policy, reason)
+	} else {
+		err = s.restrictUngraduatedPermissions(ctx, chat, user, policy, reason)
+	}
+	if err != nil {
 		s.logTelegramPermissionWarning("restrict ungraduated permissions failed", err, chat, user, reason)
 	}
 }
 
-func (s *Service) restrictUngraduatedPermissions(chat *tele.Chat, user *tele.User, policy config.GuardPolicy, reason string) error {
+func (s *Service) restrictUngraduatedPermissions(ctx context.Context, chat *tele.Chat, user *tele.User, policy config.GuardPolicy, reason string) error {
+	if s == nil || s.bot == nil || chat == nil || user == nil {
+		return nil
+	}
+	release, err := s.AcquireModerationReview(ctx, chat.ID, user.ID)
+	if err != nil {
+		return err
+	}
+	defer release()
+	return s.restrictUngraduatedPermissionsLocked(chat, user, policy, reason)
+}
+
+// Caller holds the moderation gate for this chat and user.
+func (s *Service) restrictUngraduatedPermissionsLocked(chat *tele.Chat, user *tele.User, policy config.GuardPolicy, reason string) error {
 	if s == nil || s.bot == nil || chat == nil || user == nil {
 		return nil
 	}
@@ -80,7 +99,8 @@ func (s *Service) restrictUngraduatedPermissions(chat *tele.Chat, user *tele.Use
 	return nil
 }
 
-func (s *Service) applyVerificationPassPermissions(ctx context.Context, chat *tele.Chat, user *tele.User, policy config.GuardPolicy, manual ...bool) error {
+// Caller holds the moderation gate through pending verification consumption.
+func (s *Service) applyVerificationPassPermissionsLocked(ctx context.Context, chat *tele.Chat, user *tele.User, policy config.GuardPolicy, manual ...bool) error {
 	if (len(manual) == 0 || !manual[0]) && s.exemptUser(ctx, chat, user) {
 		return errExemptPending
 	}
@@ -92,33 +112,62 @@ func (s *Service) applyVerificationPassPermissions(ctx context.Context, chat *te
 		if err != nil {
 			s.logTelegramPermissionWarning("load user trust before verification permission sync failed", err, chat, user, "verification_pass")
 		} else if isUngraduatedTrustStatus(trust.Status) {
-			if err := s.restrictUngraduatedPermissions(chat, user, policy, "verification_pass"); err == nil {
+			if err := s.restrictUngraduatedPermissionsLocked(chat, user, policy, "verification_pass"); err == nil {
 				return nil
 			} else {
 				s.logTelegramPermissionWarning("restrict permissions after verification pass failed, falling back to normal permissions", err, chat, user, "verification_pass")
 			}
 		}
 	}
-	return s.restoreUserMessagePermissions(chat, user, "verification_pass")
+	return s.restoreUserMessagePermissionsLocked(chat, user, "verification_pass")
 }
 
-func (s *Service) restoreTrustedUserPermissions(trust store.UserTrust, reason string) {
+func (s *Service) restoreTrustedUserPermissions(ctx context.Context, trust store.UserTrust, reason string) {
 	if trust.Status != "trusted" {
 		return
 	}
-	if err := s.restoreUserMessagePermissions(&tele.Chat{ID: trust.ChatID}, userFromTrust(trust), reason); err != nil {
-		s.logTelegramPermissionWarning("restore trusted user permissions failed", err, &tele.Chat{ID: trust.ChatID}, userFromTrust(trust), reason)
+	chat, user := &tele.Chat{ID: trust.ChatID}, userFromTrust(trust)
+	var err error
+	if held, _ := ctx.Value(moderationHeldKey{}).(moderationKey); held == (moderationKey{chat.ID, user.ID}) {
+		err = s.restoreUserMessagePermissionsLocked(chat, user, reason)
+	} else {
+		err = s.restoreUserMessagePermissions(ctx, chat, user, reason)
+	}
+	if err != nil {
+		s.logTelegramPermissionWarning("restore trusted user permissions failed", err, chat, user, reason)
 	}
 }
 
-func (s *Service) RestoreTrustedChatPermissions(_ context.Context, trust store.UserTrust) error {
+func (s *Service) RestoreTrustedChatPermissions(ctx context.Context, trust store.UserTrust) error {
 	if trust.Status != "trusted" {
 		return nil
 	}
-	return s.restoreUserMessagePermissions(&tele.Chat{ID: trust.ChatID}, userFromTrust(trust), "trusted_status")
+	return s.restoreUserMessagePermissions(ctx, &tele.Chat{ID: trust.ChatID}, userFromTrust(trust), "trusted_status")
 }
 
-func (s *Service) restoreUserMessagePermissions(chat *tele.Chat, user *tele.User, reason string) error {
+// RestoreTrustedChatPermissionsLocked requires the caller to hold the subject's
+// moderation gate through the trust-sync check, Telegram call and settlement.
+func (s *Service) RestoreTrustedChatPermissionsLocked(ctx context.Context, trust store.UserTrust) error {
+	if trust.Status != "trusted" {
+		return nil
+	}
+	return s.restoreUserMessagePermissionsLocked(&tele.Chat{ID: trust.ChatID}, userFromTrust(trust), "trusted_status")
+}
+
+func (s *Service) restoreUserMessagePermissions(ctx context.Context, chat *tele.Chat, user *tele.User, reason string) error {
+	if s == nil || s.bot == nil || chat == nil || user == nil {
+		return nil
+	}
+	release, err := s.AcquireModerationReview(ctx, chat.ID, user.ID)
+	if err != nil {
+		return err
+	}
+	defer release()
+	return s.restoreUserMessagePermissionsLocked(chat, user, reason)
+}
+
+// Caller holds the moderation gate for this chat and user.
+func (s *Service) restoreUserMessagePermissionsLocked(chat *tele.Chat, user *tele.User, reason string) error {
 	if s == nil || s.bot == nil || chat == nil || user == nil {
 		return nil
 	}

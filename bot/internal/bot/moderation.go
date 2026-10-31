@@ -434,6 +434,9 @@ func (s *Service) enforceExistingBannedMessage(ctx context.Context, msg *tele.Me
 		defer deleteRelease()
 		if err := s.deleteMessage(msg); err != nil {
 			s.logger.Warn("delete banned user message failed", zap.Error(err))
+		} else if msg.ID > 0 {
+			key := moderationEventKey(msg, "existing_ban_delete", "", "delete")
+			_ = s.recordMessageModerationCase(ctx, msg, "existing_ban_delete", key, "delete", "executed", "已封禁账号的消息已删除", 0)
 		}
 	} else {
 		s.logger.Info("skip duplicate banned user message delete", zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID), zap.Int("message_id", msg.ID))
@@ -716,6 +719,10 @@ func (s *Service) applyAIModerationErrorFallback(ctx context.Context, msg *tele.
 		return err
 	}
 
+	if msg.ID > 0 {
+		key := moderationEventKey(msg, "ai_error_delete", "", "delete")
+		_ = s.recordMessageModerationCase(ctx, msg, "ai_error_delete", key, "delete", "executed", "消息暂时无法审核，已删除并等待管理员复核", 0)
+	}
 	s.dispatchAIActionFeedback(msg, policy, "delete", ai.CheckOutput{
 		Verdict: ai.Verdict{
 			Verdict:  "error",
@@ -807,7 +814,7 @@ func (s *Service) checkStatefulFilter(ctx context.Context, msg *tele.Message, po
 			return FilterResult{}, err
 		} else if result.Hit {
 			if !actionsPaused {
-				s.applyUngraduatedPermissionRestriction(msg.Chat, msg.Sender, policy, trust, result.Reason)
+				s.applyUngraduatedPermissionRestriction(ctx, msg.Chat, msg.Sender, policy, trust, result.Reason)
 			}
 			return result, nil
 		}
@@ -988,7 +995,29 @@ func messageMediaKind(msg *tele.Message) string {
 	}
 }
 
-func (s *Service) applyFilterAction(ctx context.Context, msg *tele.Message, policy config.GuardPolicy, result FilterResult) error {
+func (s *Service) applyFilterAction(ctx context.Context, msg *tele.Message, policy config.GuardPolicy, result FilterResult) (retErr error) {
+	held := false
+	if msg != nil && msg.Chat != nil && msg.Sender != nil && !msg.Sender.IsBot {
+		release, err := s.AcquireModerationReview(ctx, msg.Chat.ID, msg.Sender.ID)
+		if err != nil {
+			return err
+		}
+		defer release()
+		held = true
+		ctx = context.WithValue(ctx, moderationHeldKey{}, moderationKey{msg.Chat.ID, msg.Sender.ID})
+	}
+	ban := func() error {
+		if held {
+			return s.banUserWithOwnershipLocked(msg.Chat, msg.Sender, false)
+		}
+		return s.banUser(msg.Chat, msg.Sender)
+	}
+	mute := func(seconds int) error {
+		if held {
+			return s.muteUserLocked(msg.Chat, msg.Sender, seconds)
+		}
+		return s.muteUser(msg.Chat, msg.Sender, seconds)
+	}
 	action := strings.TrimSpace(strings.ToLower(result.Action))
 	if action == "" {
 		action = config.DefaultPolicy.Filter.Keywords.Action
@@ -1002,6 +1031,7 @@ func (s *Service) applyFilterAction(ctx context.Context, msg *tele.Message, poli
 
 	actionForViolation := config.NormalizeFilterAction(action)
 	eventKey := moderationEventKey(msg, "filter", result.Reason, actionForViolation)
+	caseKey := moderationEventKey(msg, "filter_case", result.Reason+":"+sha256HexString(collectMessageContent(msg)), actionForViolation)
 	eventState := s.moderationEventState(ctx, eventKey)
 	if eventState == "completed" {
 		if s.logger != nil {
@@ -1010,6 +1040,25 @@ func (s *Service) applyFilterAction(ctx context.Context, msg *tele.Message, poli
 		return nil
 	}
 	messageDeleted := eventState == "message_deleted"
+	actionExecuted := eventState == "executed" || eventState == "persisted"
+	defer func() {
+		if retErr == nil {
+			return
+		}
+		outcome := "failed"
+		if messageDeleted {
+			outcome = "partial"
+		}
+		if actionExecuted {
+			outcome = "executed"
+		} else {
+			var applied *actionAppliedError
+			if errors.As(retErr, &applied) {
+				outcome = "partial"
+			}
+		}
+		_ = s.recordMessageModerationCase(ctx, msg, "filter_event", caseKey, actionForViolation, outcome, "群规则处理", 0)
+	}()
 	deleteForEvent := func() error {
 		if messageDeleted {
 			return nil
@@ -1022,7 +1071,6 @@ func (s *Service) applyFilterAction(ctx context.Context, msg *tele.Message, poli
 		return nil
 	}
 
-	actionExecuted := eventState == "executed" || eventState == "persisted"
 	if !actionExecuted {
 		switch action {
 		case "delete":
@@ -1040,14 +1088,14 @@ func (s *Service) applyFilterAction(ctx context.Context, msg *tele.Message, poli
 			if err := deleteForEvent(); err != nil {
 				return err
 			}
-			if err := s.muteUser(msg.Chat, msg.Sender, 600); err != nil {
+			if err := mute(600); err != nil {
 				return err
 			}
 		case "delete_ban":
 			if err := deleteForEvent(); err != nil {
 				return err
 			}
-			if err := s.banUser(msg.Chat, msg.Sender); err != nil {
+			if err := ban(); err != nil {
 				return err
 			}
 		case "warn":
@@ -1065,26 +1113,27 @@ func (s *Service) applyFilterAction(ctx context.Context, msg *tele.Message, poli
 			if err := deleteForEvent(); err != nil {
 				return err
 			}
-			if err := s.muteUser(msg.Chat, msg.Sender, 600); err != nil {
+			if err := mute(600); err != nil {
 				return err
 			}
 		case "mute_5m":
 			if err := deleteForEvent(); err != nil {
 				return err
 			}
-			if err := s.muteUser(msg.Chat, msg.Sender, 300); err != nil {
+			if err := mute(300); err != nil {
 				return err
 			}
 		case "mute_1h":
 			if err := deleteForEvent(); err != nil {
 				return err
 			}
-			if err := s.muteUser(msg.Chat, msg.Sender, 3600); err != nil {
+			if err := mute(3600); err != nil {
 				return err
 			}
 		}
 		s.setModerationEventState(ctx, eventKey, "executed")
 		eventState = "executed"
+		actionExecuted = true
 	}
 
 	if eventState != "persisted" {
@@ -1094,6 +1143,15 @@ func (s *Service) applyFilterAction(ctx context.Context, msg *tele.Message, poli
 		s.setModerationEventState(ctx, eventKey, "persisted")
 	}
 
+	// Bind warning cases to the warning created for this exact event, never by time proximity.
+	warningEvent := ""
+	if action == "warn" || action == "delete_warn" || action == "delete_and_warn" {
+		warningEvent = eventKey
+	}
+	// Replays of this same filter event use the deterministic event identity.
+	if err := s.recordMessageModerationCase(ctx, msg, "filter_event", caseKey, actionForViolation, "executed", "群规则处理", 0, warningEvent); err != nil {
+		return err
+	}
 	s.maybeBanBotInviterAfterViolation(ctx, msg, policy, actionForViolation, result.Reason)
 	trustNote := result.Reason
 	if result.Reason == deletedAccountRule && strings.TrimSpace(result.MatchedRule) != "" {
@@ -2557,6 +2615,35 @@ func (s *Service) applyAIAction(ctx context.Context, msg *tele.Message, policy c
 	if s.exemptMessage(ctx, msg) {
 		return nil
 	}
+	// Hold the same subject gate through Telegram mutation and ownership settlement.
+	held := false
+	if msg != nil && msg.Chat != nil && msg.Sender != nil && !msg.Sender.IsBot {
+		release, err := s.AcquireModerationReview(ctx, msg.Chat.ID, msg.Sender.ID)
+		if err != nil {
+			return err
+		}
+		defer release()
+		held = true
+		ctx = context.WithValue(ctx, moderationHeldKey{}, moderationKey{msg.Chat.ID, msg.Sender.ID})
+	}
+	ban := func() error {
+		if held {
+			return s.banUserWithOwnershipLocked(msg.Chat, msg.Sender, false)
+		}
+		return s.banUser(msg.Chat, msg.Sender)
+	}
+	mute := func() error {
+		if held {
+			return s.muteUserLocked(msg.Chat, msg.Sender, 600, decisionIDs...)
+		}
+		return s.muteUser(msg.Chat, msg.Sender, 600, decisionIDs...)
+	}
+	kick := func() error {
+		if held {
+			return s.kickUserLocked(msg.Chat, msg.Sender)
+		}
+		return s.kickUser(msg.Chat, msg.Sender)
+	}
 	auditOutcome := "success"
 	auditError := ""
 	defer func() {
@@ -2587,6 +2674,35 @@ func (s *Service) applyAIAction(ctx context.Context, msg *tele.Message, policy c
 		}
 	}
 
+	if (action == "mute" || action == "kick") && s.queries != nil && msg != nil && msg.Chat != nil && msg.Sender != nil && !msg.Sender.IsBot && msg.ID > 0 {
+		id := moderationEventKey(msg, "ai", sha256HexString(collectMessageContent(msg)), action)
+		partial, err := s.queries.ModerationCasePartial(ctx, "ai_event:"+id)
+		if err != nil {
+			return err
+		}
+		if partial {
+			return fmt.Errorf("此前处理部分完成，请联系管理员核查")
+		}
+	}
+	caseRecorded, messageDeleted, actionExecuted, actionPartiallyApplied := false, false, false, false
+	defer func() {
+		if caseRecorded || (!messageDeleted && !actionExecuted && !actionPartiallyApplied) {
+			return
+		}
+		decisionID := int64(0)
+		if len(decisionIDs) > 0 {
+			decisionID = decisionIDs[0]
+		}
+		result, explanation := "partial", "部分处理已执行，其他步骤请联系管理员核查"
+		if messageDeleted && !actionPartiallyApplied {
+			explanation = "消息已删除，其他处理步骤未确认，请联系管理员核查"
+		}
+		if actionExecuted || action == "delete" {
+			result, explanation = "executed", "群消息审核处理"
+		}
+		_ = s.recordMessageModerationCase(ctx, msg, "ai_event", moderationEventKey(msg, "ai", sha256HexString(collectMessageContent(msg)), action), action, result, explanation, decisionID)
+	}()
+
 	checkedDelta := int32(1)
 	cleanDelta := int32(0)
 	nextStatus := trust.Status
@@ -2601,12 +2717,13 @@ func (s *Service) applyAIAction(ctx context.Context, msg *tele.Message, policy c
 			if err := s.deleteMessage(msg); err != nil {
 				return err
 			}
+			messageDeleted = true
 		} else {
 			s.logger.Info("skip duplicate ai ban message delete", zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID), zap.Int("message_id", msg.ID))
 		}
 		actionRollback, actionOK := s.acquireUserActionLock(msg.Chat.ID, msg.Sender.ID)
 		if actionOK {
-			if err := s.banUser(msg.Chat, msg.Sender); err != nil {
+			if err := ban(); err != nil {
 				actionRollback()
 				auditOutcome = "failed"
 				auditError = redact.ErrorString(err)
@@ -2617,6 +2734,7 @@ func (s *Service) applyAIAction(ctx context.Context, msg *tele.Message, policy c
 			auditOutcome = "deduped"
 			return nil
 		}
+		actionExecuted = true
 		nextStatus = "banned"
 		score = 0
 	case "mute":
@@ -2626,13 +2744,19 @@ func (s *Service) applyAIAction(ctx context.Context, msg *tele.Message, policy c
 			if err := s.deleteMessage(msg); err != nil {
 				return err
 			}
+			messageDeleted = true
 		} else {
 			s.logger.Info("skip duplicate ai mute message delete", zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID), zap.Int("message_id", msg.ID))
 		}
 		actionRollback, actionOK := s.acquireUserActionLock(msg.Chat.ID, msg.Sender.ID)
 		if actionOK {
-			if err := s.muteUser(msg.Chat, msg.Sender, 600, decisionIDs...); err != nil {
-				actionRollback()
+			if err := mute(); err != nil {
+				var applied *actionAppliedError
+				if errors.As(err, &applied) {
+					actionPartiallyApplied = true
+				} else {
+					actionRollback()
+				}
 				auditOutcome = "failed"
 				auditError = redact.ErrorString(err)
 				return err
@@ -2642,6 +2766,7 @@ func (s *Service) applyAIAction(ctx context.Context, msg *tele.Message, policy c
 			auditOutcome = "deduped"
 			return nil
 		}
+		actionExecuted = true
 		nextStatus = "suspicious"
 		score = 0.2
 	case "warn":
@@ -2650,13 +2775,19 @@ func (s *Service) applyAIAction(ctx context.Context, msg *tele.Message, policy c
 			defer deleteRelease()
 			if err := s.deleteMessage(msg); err != nil {
 				s.logger.Warn("delete message on warn failed", zap.Error(err))
+			} else {
+				messageDeleted = true
 			}
 		} else {
 			s.logger.Info("skip duplicate ai warn message delete", zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID), zap.Int("message_id", msg.ID))
 		}
 		actionRollback, actionOK := s.acquireUserActionLock(msg.Chat.ID, msg.Sender.ID)
 		if actionOK {
-			if _, _, err := s.IncrWarning(ctx, msg.Chat, msg.Sender, "ai_"+output.Verdict.Verdict, policy, true, true); err != nil {
+			if _, _, err := s.incrWarningForEvent(ctx, msg.Chat, msg.Sender, "ai_"+output.Verdict.Verdict, policy, true, true, moderationEventKey(msg, "ai_warning", "", action)); err != nil {
+				var applied *actionAppliedError
+				if errors.As(err, &applied) {
+					actionExecuted = true
+				}
 				actionRollback()
 				auditOutcome = "failed"
 				auditError = redact.ErrorString(err)
@@ -2667,6 +2798,7 @@ func (s *Service) applyAIAction(ctx context.Context, msg *tele.Message, policy c
 			auditOutcome = "deduped"
 			return nil
 		}
+		actionExecuted = true
 		nextStatus = "suspicious"
 		score = 0.3
 	case "flag":
@@ -2679,6 +2811,7 @@ func (s *Service) applyAIAction(ctx context.Context, msg *tele.Message, policy c
 			if err := s.deleteMessage(msg); err != nil {
 				return err
 			}
+			messageDeleted = true
 		} else {
 			s.logger.Info("skip duplicate ai delete message delete", zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID), zap.Int("message_id", msg.ID))
 		}
@@ -2688,6 +2821,7 @@ func (s *Service) applyAIAction(ctx context.Context, msg *tele.Message, policy c
 			auditOutcome = "deduped"
 			return nil
 		}
+		actionExecuted = true
 		nextStatus = "suspicious"
 		score = 0.3
 	case "kick":
@@ -2697,13 +2831,19 @@ func (s *Service) applyAIAction(ctx context.Context, msg *tele.Message, policy c
 			if err := s.deleteMessage(msg); err != nil {
 				return err
 			}
+			messageDeleted = true
 		} else {
 			s.logger.Info("skip duplicate ai kick message delete", zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID), zap.Int("message_id", msg.ID))
 		}
 		actionRollback, actionOK := s.acquireUserActionLock(msg.Chat.ID, msg.Sender.ID)
 		if actionOK {
-			if err := s.kickUser(msg.Chat, msg.Sender); err != nil {
-				actionRollback()
+			if err := kick(); err != nil {
+				var applied *actionAppliedError
+				if errors.As(err, &applied) {
+					actionPartiallyApplied = true
+				} else {
+					actionRollback()
+				}
 				auditOutcome = "failed"
 				auditError = redact.ErrorString(err)
 				return err
@@ -2713,6 +2853,7 @@ func (s *Service) applyAIAction(ctx context.Context, msg *tele.Message, policy c
 			auditOutcome = "deduped"
 			return nil
 		}
+		actionExecuted = true
 		nextStatus = "suspicious"
 		score = 0
 	default:
@@ -2720,6 +2861,16 @@ func (s *Service) applyAIAction(ctx context.Context, msg *tele.Message, policy c
 		score = minFloat64(1, trust.Score+0.05)
 	}
 
+	if len(decisionIDs) > 0 && decisionIDs[0] > 0 && (action == "ban" || action == "mute" || action == "warn" || action == "delete" || action == "kick") {
+		warningEvent := ""
+		if action == "warn" {
+			warningEvent = moderationEventKey(msg, "ai_warning", "", action)
+		}
+		if err := s.recordMessageModerationCase(ctx, msg, "ai_event", moderationEventKey(msg, "ai", sha256HexString(collectMessageContent(msg)), action), action, "executed", "群消息审核处理", decisionIDs[0], warningEvent); err != nil {
+			return err
+		}
+		caseRecorded = true
+	}
 	s.maybeBanBotInviterAfterViolation(ctx, msg, policy, action, output.Verdict.Reason)
 
 	updated := trust
@@ -2767,9 +2918,9 @@ func (s *Service) applyAIAction(ctx context.Context, msg *tele.Message, policy c
 			return err
 		}
 		if updated.Status == "trusted" {
-			s.restoreTrustedUserPermissions(updated, "ai_status_update")
+			s.restoreTrustedUserPermissions(ctx, updated, "ai_status_update")
 		} else if action != "mute" && isUngraduatedTrustStatus(updated.Status) {
-			s.applyUngraduatedPermissionRestriction(msg.Chat, msg.Sender, policy, updated, "ai_status_update")
+			s.applyUngraduatedPermissionRestriction(ctx, msg.Chat, msg.Sender, policy, updated, "ai_status_update")
 		}
 	}
 
@@ -2825,7 +2976,13 @@ func (s *Service) maybeBanBotInviterAfterViolation(ctx context.Context, msg *tel
 		return
 	}
 
-	if err := s.banUser(msg.Chat, inviter); err != nil {
+	release, gateErr := s.AcquireModerationReview(ctx, msg.Chat.ID, inviter.ID)
+	if gateErr != nil {
+		s.writeBotInviterAudit(ctx, msg, inviter, action, "failed", redact.ErrorString(gateErr))
+		return
+	}
+	defer release()
+	if err := s.banUserWithOwnershipLocked(msg.Chat, inviter, false); err != nil {
 		outcome = "failed"
 		auditReason = redact.ErrorString(err)
 		s.logger.Warn("ban bot inviter failed", zap.Error(err), zap.Int64("chat_id", msg.Chat.ID), zap.Int64("bot_user_id", msg.Sender.ID), zap.Int64("inviter_user_id", inviter.ID))
@@ -2834,6 +2991,10 @@ func (s *Service) maybeBanBotInviterAfterViolation(ctx context.Context, msg *tel
 	}
 
 	outcome = "success"
+	if msg.ID > 0 {
+		id := fmt.Sprintf("%d:%d:%d:%d:%s", msg.Chat.ID, msg.ID, msg.Sender.ID, inviter.ID, sha256HexString(collectMessageContent(msg)))
+		_ = s.recordSubjectCase(ctx, msg.Chat, inviter, "bot_inviter", id, "ban", "executed", "邀请的机器人违规，管理员规则已执行封禁", map[string]any{"bot_user_id": msg.Sender.ID, "trigger_message_id": msg.ID, "trigger_action": action})
+	}
 	if auditReason == "" {
 		auditReason = "邀请违规 Bot 连坐"
 	}
@@ -3156,6 +3317,15 @@ func (s *Service) maybeGraduateUser(ctx context.Context, trust store.UserTrust, 
 	if int(trust.MessagesClean) < policy.GraduateAfterMessages {
 		return nil
 	}
+	// Graduation updates trust and restores rights as one subject operation.
+	if held, _ := ctx.Value(moderationHeldKey{}).(moderationKey); held != (moderationKey{trust.ChatID, trust.UserID}) {
+		release, err := s.AcquireModerationReview(ctx, trust.ChatID, trust.UserID)
+		if err != nil {
+			return err
+		}
+		defer release()
+		ctx = context.WithValue(ctx, moderationHeldKey{}, moderationKey{trust.ChatID, trust.UserID})
+	}
 	now := time.Now()
 	updated, err := s.queries.UpdateUserTrustStatus(ctx, store.UpdateUserTrustStatusParams{
 		ChatID:      trust.ChatID,
@@ -3166,7 +3336,7 @@ func (s *Service) maybeGraduateUser(ctx context.Context, trust store.UserTrust, 
 		Notes:       stringPtr("graduated by ai trust policy"),
 	})
 	if err == nil {
-		s.restoreTrustedUserPermissions(updated, "ai_graduation")
+		s.restoreTrustedUserPermissions(ctx, updated, "ai_graduation")
 		if pol, e := s.LoadGuardPolicy(ctx, trust.ChatID); e == nil {
 			chat := &tele.Chat{ID: trust.ChatID}
 			user := userFromTrust(trust)
@@ -3234,15 +3404,19 @@ func (s *Service) incrWarningForEvent(ctx context.Context, chat *tele.Chat, user
 		}
 	}
 
+	var warningID int64
 	if s.moderationEventState(ctx, warningEventKey) != "inserted" {
-		if _, err := s.queries.InsertWarning(ctx, store.InsertWarningParams{
-			ChatID: chat.ID,
-			UserID: user.ID,
-			Reason: stringPtr(truncateString(reason, 200)),
-		}); err != nil {
+		var err error
+		warningID, err = s.queries.InsertWarningForModeration(ctx, warningEventKey, store.InsertWarningParams{
+			ChatID: chat.ID, UserID: user.ID, Reason: stringPtr(truncateString(reason, 200)),
+		})
+		if err != nil {
 			return 0, false, fmt.Errorf("insert warning: %w", err)
 		}
 		s.setModerationEventState(ctx, warningEventKey, "inserted")
+	} else if warningEventKey != "" {
+		// Old Redis events lack a durable binding. Do not infer a warning by time.
+		warningID, _ = s.queries.WarningForModerationEvent(ctx, warningEventKey, chat.ID, user.ID)
 	}
 
 	activeWarnings, err := s.queries.GetActiveWarnings(ctx, store.GetActiveWarningsParams{
@@ -3251,7 +3425,7 @@ func (s *Service) incrWarningForEvent(ctx context.Context, chat *tele.Chat, user
 		DecaySeconds: int64(policy.Warnings.DecayDays * 86400),
 	})
 	if err != nil {
-		return 0, false, fmt.Errorf("list active warnings: %w", err)
+		return 0, false, &actionAppliedError{action: "warn", err: fmt.Errorf("list active warnings: %w", err)}
 	}
 
 	count := len(activeWarnings)
@@ -3271,8 +3445,8 @@ func (s *Service) incrWarningForEvent(ctx context.Context, chat *tele.Chat, user
 		return count, false, nil
 	}
 
-	if err := s.escalateWarnings(ctx, chat, user, policy, userActionLocked, !userActionLocked); err != nil {
-		return count, false, err
+	if err := s.escalateWarnings(ctx, chat, user, policy, userActionLocked, !userActionLocked, warningID); err != nil {
+		return count, false, &actionAppliedError{action: "warn", err: err}
 	}
 
 	if err := s.queries.MarkWarningsConsumed(ctx, store.MarkWarningsConsumedParams{
@@ -3280,14 +3454,14 @@ func (s *Service) incrWarningForEvent(ctx context.Context, chat *tele.Chat, user
 		UserID:       user.ID,
 		DecaySeconds: int64(policy.Warnings.DecayDays * 86400),
 	}); err != nil {
-		return count, false, fmt.Errorf("consume warnings: %w", err)
+		return count, false, &actionAppliedError{action: "warn", err: fmt.Errorf("consume warnings: %w", err)}
 	}
 
 	s.setModerationEventState(ctx, warningEventKey, "completed")
 	return count, true, nil
 }
 
-func (s *Service) escalateWarnings(ctx context.Context, chat *tele.Chat, user *tele.User, policy config.GuardPolicy, userActionLocked bool, sendEscalationFeedback bool) error {
+func (s *Service) escalateWarnings(ctx context.Context, chat *tele.Chat, user *tele.User, policy config.GuardPolicy, userActionLocked bool, sendEscalationFeedback bool, warningID int64) error {
 	auditOutcome := "success"
 	auditError := ""
 	defer func() {
@@ -3316,38 +3490,83 @@ func (s *Service) escalateWarnings(ctx context.Context, chat *tele.Chat, user *t
 	if action == "" {
 		action = config.DefaultPolicy.Warnings.ActionAtMax
 	}
+	gateHeld, _ := ctx.Value(moderationHeldKey{}).(moderationKey)
+	if gateHeld != (moderationKey{chat.ID, user.ID}) {
+		release, err := s.AcquireModerationReview(ctx, chat.ID, user.ID)
+		if err != nil {
+			return err
+		}
+		defer release()
+		ctx = context.WithValue(ctx, moderationHeldKey{}, moderationKey{chat.ID, user.ID})
+	}
+	if warningID > 0 {
+		claimed, err := s.queries.ClaimWarningEscalation(ctx, warningID, action)
+		if err != nil {
+			actionRollback()
+			return fmt.Errorf("claim warning escalation: %w", err)
+		}
+		if !claimed {
+			actionRollback()
+			return fmt.Errorf("警告升级状态待管理员核查")
+		}
+	}
 
+	gateHeld, _ = ctx.Value(moderationHeldKey{}).(moderationKey)
+	isHeld := gateHeld == (moderationKey{chat.ID, user.ID})
+	mute := func(seconds int) error {
+		if isHeld {
+			return s.muteUserLocked(chat, user, seconds)
+		}
+		return s.muteUser(chat, user, seconds)
+	}
+	ban := func() error {
+		if isHeld {
+			return s.banUserWithOwnershipLocked(chat, user, false)
+		}
+		return s.banUser(chat, user)
+	}
+	kick := func() error {
+		if isHeld {
+			return s.kickUserLocked(chat, user)
+		}
+		return s.kickUser(chat, user)
+	}
 	switch action {
 	case "mute":
-		if err := s.muteUser(chat, user, 3600); err != nil {
+		if err := mute(3600); err != nil {
 			actionRollback()
 			auditOutcome = "failed"
 			auditError = redact.ErrorString(err)
 			return fmt.Errorf("mute warned user: %w", err)
 		}
 	case "mute_5m":
-		if err := s.muteUser(chat, user, 300); err != nil {
+		if err := mute(300); err != nil {
 			actionRollback()
 			auditOutcome = "failed"
 			auditError = redact.ErrorString(err)
 			return fmt.Errorf("mute warned user: %w", err)
 		}
 	case "mute_1h":
-		if err := s.muteUser(chat, user, 3600); err != nil {
+		if err := mute(3600); err != nil {
 			actionRollback()
 			auditOutcome = "failed"
 			auditError = redact.ErrorString(err)
 			return fmt.Errorf("mute warned user: %w", err)
 		}
 	case "kick":
-		if err := s.kickUser(chat, user); err != nil {
+		if err := kick(); err != nil {
 			actionRollback()
 			auditOutcome = "failed"
 			auditError = redact.ErrorString(err)
+			var applied *actionAppliedError
+			if warningID > 0 && errors.As(err, &applied) {
+				id := fmt.Sprintf("%d:%d", warningID, user.ID)
+				_ = s.recordSubjectCase(ctx, chat, user, "warning_escalation", id, action, "partial", "已移出群聊，重新入群权限尚待管理员确认", map[string]any{"warning_id": warningID})
+			}
 			return fmt.Errorf("kick warned user: %w", err)
 		}
 	case "ban":
-		if err := s.banUser(chat, user); err != nil {
+		if err := ban(); err != nil {
 			actionRollback()
 			auditOutcome = "failed"
 			auditError = redact.ErrorString(err)
@@ -3358,6 +3577,15 @@ func (s *Service) escalateWarnings(ctx context.Context, chat *tele.Chat, user *t
 		auditOutcome = "failed"
 		auditError = fmt.Sprintf("unknown warnings escalate action %q", action)
 		return fmt.Errorf("unknown warnings escalate action %q", action)
+	}
+	if warningID > 0 {
+		id := fmt.Sprintf("%d:%d", warningID, user.ID)
+		if err := s.recordSubjectCase(ctx, chat, user, "warning_escalation", id, action, "executed", "警告达到上限，已执行群规则处理", map[string]any{"warning_id": warningID}); err != nil {
+			return err
+		}
+		if err := s.queries.CompleteWarningEscalation(ctx, warningID); err != nil {
+			return err
+		}
 	}
 	if action == "ban" {
 		s.resetTrustAfterViolation(ctx, &tele.Message{Chat: chat, Sender: user}, "ban", stringPtr("warnings_threshold"))
@@ -3486,6 +3714,17 @@ func (s *Service) muteUser(chat *tele.Chat, user *tele.User, seconds int, decisi
 	if chat == nil || user == nil {
 		return nil
 	}
+	release, err := s.AcquireModerationReview(context.Background(), chat.ID, user.ID)
+	if err != nil {
+		return err
+	}
+	defer release()
+	return s.muteUserLocked(chat, user, seconds, decisionIDs...)
+}
+func (s *Service) muteUserLocked(chat *tele.Chat, user *tele.User, seconds int, decisionIDs ...int64) error {
+	if chat == nil || user == nil {
+		return nil
+	}
 	if paused, err := s.actionsPaused(context.Background()); err == nil && paused {
 		s.logger.Info("skip mute because actions are paused", zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
 		return errActionsPaused
@@ -3525,16 +3764,27 @@ func (s *Service) muteUser(chat *tele.Chat, user *tele.User, seconds int, decisi
 	if token != "" {
 		ok, err := s.queries.ActivateAIMute(context.Background(), chat.ID, user.ID, token)
 		if err != nil {
-			return fmt.Errorf("activate AI mute ownership: %w", err)
+			return &actionAppliedError{action: "mute", err: fmt.Errorf("activate AI mute ownership: %w", err)}
 		}
 		if !ok {
-			return fmt.Errorf("AI mute ownership changed after action")
+			return &actionAppliedError{action: "mute", err: fmt.Errorf("AI mute ownership changed after action")}
 		}
 	}
 	return nil
 }
 
 func (s *Service) kickUser(chat *tele.Chat, user *tele.User) error {
+	if chat == nil || user == nil {
+		return nil
+	}
+	release, err := s.AcquireModerationReview(context.Background(), chat.ID, user.ID)
+	if err != nil {
+		return err
+	}
+	defer release()
+	return s.kickUserLocked(chat, user)
+}
+func (s *Service) kickUserLocked(chat *tele.Chat, user *tele.User) error {
 	if chat == nil || user == nil {
 		return nil
 	}
@@ -3568,6 +3818,17 @@ func (s *Service) banExistingUser(chat *tele.Chat, user *tele.User) error {
 	return s.banUserWithOwnership(chat, user, true)
 }
 func (s *Service) banUserWithOwnership(chat *tele.Chat, user *tele.User, preserve bool) error {
+	if chat == nil || user == nil {
+		return nil
+	}
+	release, err := s.AcquireModerationReview(context.Background(), chat.ID, user.ID)
+	if err != nil {
+		return err
+	}
+	defer release()
+	return s.banUserWithOwnershipLocked(chat, user, preserve)
+}
+func (s *Service) banUserWithOwnershipLocked(chat *tele.Chat, user *tele.User, preserve bool) error {
 	if chat == nil || user == nil {
 		return nil
 	}
@@ -4034,7 +4295,7 @@ func (s *Service) holdProfileReviewAfterError(chat *tele.Chat, user *tele.User, 
 	} else if !errors.Is(resetErr, pgx.ErrNoRows) {
 		s.logger.Warn("reset clean count after failed profile review", zap.Error(resetErr), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID), zap.String("source", source))
 	}
-	s.applyUngraduatedPermissionRestriction(chat, user, policy, updated, "profile_review_pending")
+	s.applyUngraduatedPermissionRestriction(ctx, chat, user, policy, updated, "profile_review_pending")
 	s.logger.Warn("profile check failed, user held for review",
 		zap.Error(cause),
 		zap.Int64("chat_id", chat.ID),
@@ -4225,9 +4486,14 @@ func (s *Service) handleProfileOnMessageViolation(
 		return nil
 	}
 
+	release, err := s.AcquireModerationReview(ctx, msg.Chat.ID, msg.Sender.ID)
+	if err != nil {
+		return err
+	}
+	defer release()
 	actionRollback, actionOK := s.acquireUserActionLock(msg.Chat.ID, msg.Sender.ID)
 	if actionOK {
-		if err := s.banUser(msg.Chat, msg.Sender); err != nil {
+		if err := s.banUserWithOwnershipLocked(msg.Chat, msg.Sender, false); err != nil {
 			actionRollback()
 			return err
 		}
@@ -4267,6 +4533,9 @@ func (s *Service) handleProfileOnMessageViolation(
 				zap.Int64("chat_id", msg.Chat.ID),
 				zap.Int64("user_id", msg.Sender.ID),
 				zap.Int("message_id", msg.ID))
+		} else if msg.ID > 0 {
+			key := moderationEventKey(msg, "profile", "profile_match_on_message", "delete")
+			_ = s.recordMessageModerationCase(ctx, msg, "profile_event", key, "delete", "executed", "个人资料审核后消息已删除", decisionID)
 		}
 	} else {
 		s.logger.Info("skip duplicate on-message profile message delete", zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID), zap.Int("message_id", msg.ID))
@@ -4289,6 +4558,9 @@ func (s *Service) handleProfileOnMessageViolation(
 		return nil
 	}
 
+	if err := s.recordMessageModerationCase(ctx, msg, "profile_event", moderationEventKey(msg, "profile", "profile_match_on_message", "ban"), "ban", "executed", "个人资料审核处理", decisionID); err != nil {
+		return err
+	}
 	s.resetTrustAfterViolation(ctx, msg, "ban", stringPtr("profile_match_on_message: "+matched), decisionID)
 	s.sendActionFeedback(msg.Chat, nil, policy.Feedback.Ban, map[string]string{
 		"user":         feedbackUserLabel(msg.Sender, policy.Feedback.Ban.ParseMode),

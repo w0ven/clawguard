@@ -8,6 +8,6 @@ func (q *Queries) SetMiniAppNotificationResult(ctx context.Context, pendingID in
 }
 
 func (q *Queries) RecordPrivateStart(ctx context.Context, userID int64) error {
-	_, err := q.db.Exec(ctx, `INSERT INTO telegram_private_sessions(user_id) VALUES($1) ON CONFLICT (user_id) DO UPDATE SET updated_at=now()`, userID)
+	_, err := q.db.Exec(ctx, `INSERT INTO telegram_private_sessions(user_id) VALUES($1) ON CONFLICT (user_id) DO UPDATE SET updated_at=now(),notification_epoch=telegram_private_sessions.notification_epoch+1,is_reachable=true`, userID)
 	return err
 }

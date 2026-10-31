@@ -116,6 +116,13 @@ func (s *Service) verifyDualCaptchaForUser(ctx context.Context, token, cfRespons
 		}
 		state = "verified"
 	}
+	// Serialize the safety checks, Telegram permission change and durable finish
+	// with administrative review and new penalties for this same subject.
+	release, err := s.AcquireModerationReview(ctx, pending.ChatID, pending.UserID)
+	if err != nil {
+		return ErrDualCaptchaUnavailable
+	}
+	defer release()
 	current, err := s.membershipSessionCurrent(ctx, pending.ChatID, pending.UserID, payload.MembershipGeneration)
 	if err != nil {
 		return ErrDualCaptchaUnavailable

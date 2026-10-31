@@ -215,7 +215,8 @@ redis.call('HSET', KEYS[1],
     'rule', ARGV[8],
     'created_at_ms', ARGV[9],
     'action_until_ms', ARGV[10],
-    'membership_generation', ARGV[11])
+    'membership_generation', ARGV[11],
+    'notification_version', '1')
 redis.call('HINCRBY', KEYS[1], 'enqueue_count', 1)
 redis.call('PERSIST', KEYS[1])
 redis.call('ZADD', KEYS[2], ARGV[9], ARGV[12])
@@ -280,6 +281,7 @@ type JoinProtectionRuntimeStatus struct {
 }
 
 type joinProtectionDeferredCleanup struct {
+	NotificationVersion  string
 	Member               string
 	ChatID               int64
 	UserID               int64
@@ -716,6 +718,7 @@ func claimDueJoinProtectionCleanupRedis(ctx context.Context, rdb redis.Cmdable, 
 		return nil
 	})
 	return joinProtectionDeferredCleanup{
+		NotificationVersion:  values["notification_version"],
 		Member:               member,
 		ChatID:               chatID,
 		UserID:               userID,

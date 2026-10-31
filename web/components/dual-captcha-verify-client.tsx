@@ -40,14 +40,14 @@ function loadScript(url: string): Promise<void> {
   });
 }
 
-function loadTurnstile(): Promise<void> {
+export function loadTurnstile(): Promise<void> {
   if (turnstileLoading) return turnstileLoading;
   if (window.turnstile) return Promise.resolve();
   turnstileLoading = loadScript(cfScript).catch((error) => { turnstileLoading = null; throw error; });
   return turnstileLoading;
 }
 
-function loadHCaptcha(): Promise<void> {
+export function loadHCaptcha(): Promise<void> {
   if (hCaptchaLoading) return hCaptchaLoading;
   if (window.hcaptcha) return Promise.resolve();
   hCaptchaLoading = new Promise<void>((resolve, reject) => {

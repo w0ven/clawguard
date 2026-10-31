@@ -3,6 +3,7 @@ package api
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"net/http"
 
@@ -23,6 +24,11 @@ type trustSyncPayload struct {
 
 func (s *Server) syncTrustStatus(c echo.Context, chatID, userID int64, p trustSyncPayload) error {
 	ctx := c.Request().Context()
+	release, lockErr := s.botService.AcquireModerationReview(ctx, chatID, userID)
+	if lockErr != nil {
+		return c.JSON(http.StatusConflict, map[string]string{"error": "用户处理正在进行，请稍后重试"})
+	}
+	defer release()
 	q := s.botService.Queries()
 	random := make([]byte, 16)
 	if _, err := rand.Read(random); err != nil {
@@ -66,7 +72,7 @@ func (s *Server) syncTrustStatus(c echo.Context, chatID, userID int64, p trustSy
 			}
 		} else {
 			sameCompleted = exists && op.State == "completed" && op.Target == p.Status && trust.Status == p.Status && trust.StatusChangedAt.Equal(op.BaseChanged)
-			op = store.TrustSync{Target: p.Status, Base: trust.Status, BaseChanged: trust.StatusChangedAt, ActionDone: true, PermissionDone: true}
+			op = store.TrustSync{Target: p.Status, Base: trust.Status, BaseChanged: trust.StatusChangedAt, ActionDone: true, PermissionDone: true, ModerationOperationID: &token}
 			if !sameCompleted && p.Status == "banned" {
 				op.Action = "ban"
 				op.ActionDone = false
@@ -154,9 +160,9 @@ func (s *Server) syncTrustStatus(c echo.Context, chatID, userID int64, p trustSy
 		}
 		var e error
 		if op.Action == "ban" {
-			e = s.botService.BanChatUser(ctx, chatID, userID)
+			e = s.botService.BanChatUserNoLock(ctx, chatID, userID)
 		} else {
-			e = s.botService.UnbanChatUser(ctx, chatID, userID)
+			_, e = s.botService.SafeUnbanChatUserNoLock(ctx, chatID, userID)
 		}
 		if e != nil {
 			return fail("telegram_action_error", e)
@@ -171,7 +177,7 @@ func (s *Server) syncTrustStatus(c echo.Context, chatID, userID int64, p trustSy
 		}
 		target := trust
 		target.Status = "trusted"
-		if e := s.botService.RestoreTrustedChatPermissions(ctx, target); e != nil {
+		if e := s.botService.RestoreTrustedChatPermissionsLocked(ctx, target); e != nil {
 			return fail("telegram_permission_error", e)
 		}
 		if e := advance("permission"); e != nil {
@@ -218,6 +224,17 @@ func (s *Server) syncTrustStatus(c echo.Context, chatID, userID int64, p trustSy
 		}
 		if !ok {
 			return errTrustSyncConflict
+		}
+		if op.Action != "" && !sameCompleted && op.ModerationOperationID != nil && !current.IsBot && userID > 0 {
+			id := *op.ModerationOperationID
+			ownership, _ := json.Marshal(map[string]any{"base_status": op.Base, "base_changed_at": op.BaseChanged, "target": op.Target, "automatic_reversal": "manual_review"})
+			result := "executed"
+			if op.Action == "unban" {
+				result = "reversed"
+			}
+			if _, e = tx.RecordModerationCase(ctx, store.ModerationCaseInput{SourceKey: "trust_sync:" + id, SourceKind: "trust_sync", SourceID: id, ChatID: chatID, UserID: userID, Action: op.Action, Result: result, Explanation: "群管理员处理", Ownership: ownership}); e != nil {
+				return e
+			}
 		}
 		return nil
 	})

@@ -2,17 +2,23 @@
     header {
         Strict-Transport-Security "max-age=31536000; includeSubDomains"
         X-Content-Type-Options "nosniff"
-        Referrer-Policy "strict-origin-when-cross-origin"
         Permissions-Policy "geolocation=(), microphone=(), camera=()"
         -Server
     }
 
-    @mini_verify path /verify/mini
-    @non_mini_verify not path /verify/mini
-    header @non_mini_verify X-Frame-Options "SAMEORIGIN"
-    header @mini_verify -X-Frame-Options
-    header @mini_verify Content-Security-Policy "frame-ancestors 'self' https://web.telegram.org"
-    header @mini_verify Referrer-Policy "no-referrer"
+    @mini_verify path /verify/mini /appeal/mini
+    @non_mini_verify not path /verify/mini /appeal/mini
+    header @non_mini_verify {
+        X-Frame-Options "SAMEORIGIN"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        defer
+    }
+    header @mini_verify {
+        -X-Frame-Options
+        Content-Security-Policy "frame-ancestors 'self' https://web.telegram.org"
+        Referrer-Policy "no-referrer"
+        defer
+    }
 
     @runtime_health path /healthz /readyz
     handle @runtime_health {
