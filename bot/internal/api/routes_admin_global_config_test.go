@@ -105,7 +105,11 @@ func TestParseGlobalConfigPutBodyRequiresEnvelope(t *testing.T) {
 		t.Fatalf("document without version error = %v, want %v", err, errGlobalConfigVersionRequired)
 	}
 
-	req, err := parseGlobalConfigPutBody([]byte(`{"section":"prompt","config":{"ai":{"message_rules":"hello"}}}`))
+	_, err = parseGlobalConfigPutBody([]byte(`{"section":"prompt","config":{"ai":{"message_rules":"hello"}}}`))
+	if !errors.Is(err, errGlobalConfigVersionRequired) {
+		t.Fatalf("prompt without expected_version: %v", err)
+	}
+	req, err := parseGlobalConfigPutBody([]byte(`{"section":"prompt","expected_version":1,"config":{"ai":{"message_rules":"hello"}}}`))
 	if err != nil {
 		t.Fatalf("prompt section parse: %v", err)
 	}

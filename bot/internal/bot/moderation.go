@@ -25,6 +25,7 @@ import (
 	"github.com/openclaw/clawguard/internal/adkiller"
 	"github.com/openclaw/clawguard/internal/ai"
 	"github.com/openclaw/clawguard/internal/config"
+	"github.com/openclaw/clawguard/internal/messagefmt"
 	"github.com/openclaw/clawguard/internal/redact"
 	"github.com/openclaw/clawguard/internal/store"
 )
@@ -264,9 +265,9 @@ func (s *Service) handleIncomingMessageWithOptions(c tele.Context, isEdited bool
 	ctx = context.WithValue(ctx, adKillerParentContextKey{}, parentCtx)
 
 	isAdmin := false
-	adminStatus, err := s.isChatAdmin(ctx, msg.Chat.ID, msg.Sender.ID)
+	adminStatus, err := s.isChatAdminWithRetry(ctx, msg.Chat.ID, msg.Sender.ID)
 	if err != nil {
-		s.logger.Warn("check chat admin failed, skip moderation", zap.Error(err), zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID))
+		s.logger.Warn("check chat admin failed after bounded retries, skip moderation to protect admins", zap.Error(err), zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID))
 		return nil
 	} else {
 		isAdmin = adminStatus
@@ -3642,6 +3643,32 @@ type chatAdminCacheEntry struct {
 	ExpireAt time.Time
 }
 
+// Retry transient identity lookup failures without treating an unknown role as
+// a non-admin. Persistent failure remains fail-safe and visible in the caller.
+func (s *Service) isChatAdminWithRetry(ctx context.Context, chatID, userID int64) (bool, error) {
+	var err error
+	for attempt := 0; attempt < 3; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		var admin bool
+		admin, err = s.isChatAdmin(ctx, chatID, userID)
+		if err == nil {
+			return admin, nil
+		}
+		if attempt < 2 {
+			timer := time.NewTimer(time.Duration(attempt+1) * 100 * time.Millisecond)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return false, ctx.Err()
+			case <-timer.C:
+			}
+		}
+	}
+	return false, err
+}
+
 func (s *Service) isChatAdmin(ctx context.Context, chatID, userID int64) (bool, error) {
 	cacheKey := "chat_admin:" + strconv.FormatInt(chatID, 10) + ":" + strconv.FormatInt(userID, 10)
 	if cached, ok := s.chatAdmins.Load(cacheKey); ok {
@@ -3673,7 +3700,17 @@ func (s *Service) isChatAdmin(ctx context.Context, chatID, userID int64) (bool, 
 		return false, err
 	}
 
-	isAdmin := member != nil && (member.Role == tele.Creator || member.Role == tele.Administrator)
+	if member == nil {
+		return false, errors.New("telegram returned empty chat member")
+	}
+	var isAdmin bool
+	switch member.Role {
+	case tele.Creator, tele.Administrator:
+		isAdmin = true
+	case tele.Member, tele.Restricted, tele.Left, tele.Kicked:
+	default:
+		return false, fmt.Errorf("telegram returned unknown chat member role %q", member.Role)
+	}
 	s.chatAdmins.Store(cacheKey, chatAdminCacheEntry{IsAdmin: isAdmin, ExpireAt: time.Now().Add(chatAdminCacheTTL)})
 	if s.redis != nil {
 		value := "0"
@@ -3758,7 +3795,7 @@ func (s *Service) muteUserLocked(chat *tele.Chat, user *tele.User, seconds int, 
 			return fmt.Errorf("invalidate AI mute ownership: %w", err)
 		}
 	}
-	if err := s.bot.Restrict(chat, member); err != nil {
+	if err := telegramConfirmedRestrict(s.bot, chat, member); err != nil {
 		return normalizeTelegramActionError("restrict", err)
 	}
 	if token != "" {
@@ -3797,13 +3834,13 @@ func (s *Service) kickUserLocked(chat *tele.Chat, user *tele.User) error {
 	member := &tele.ChatMember{User: user}
 	return runVerificationKick(
 		func() error {
-			if err := s.bot.Ban(chat, member); err != nil {
+			if err := telegramConfirmedBan(s.bot, chat, member); err != nil {
 				return normalizeTelegramActionError("ban", err)
 			}
 			return nil
 		},
 		func() error {
-			if err := s.bot.Unban(chat, user); err != nil {
+			if err := telegramConfirmedUnban(s.bot, chat, user); err != nil {
 				return normalizeTelegramActionError("unban", err)
 			}
 			return nil
@@ -3845,7 +3882,7 @@ func (s *Service) banUserWithOwnershipLocked(chat *tele.Chat, user *tele.User, p
 	}
 	// Telegram Bot API does not expose an official "report spam" method to bots.
 	// We can only ban and ask Telegram to revoke the user's recent chat messages.
-	if err := s.bot.Ban(chat, &tele.ChatMember{User: user}, true); err != nil {
+	if err := telegramConfirmedBan(s.bot, chat, &tele.ChatMember{User: user}, true); err != nil {
 		return normalizeTelegramActionError("ban", err)
 	}
 	return nil
@@ -3861,7 +3898,7 @@ func (s *Service) banSenderChat(chat *tele.Chat, senderChat *tele.Chat) error {
 	} else if err != nil {
 		return fmt.Errorf("load system state before sender_chat ban: %w", err)
 	}
-	if err := s.bot.BanSenderChat(chat, senderChat); err != nil {
+	if err := telegramConfirmedBanSenderChat(s.bot, chat, senderChat); err != nil {
 		return normalizeTelegramActionError("ban_sender_chat", err)
 	}
 	return nil
@@ -4759,9 +4796,9 @@ func mentionMarkdownV2(user *tele.User) string {
 		return "该用户"
 	}
 	if username := strings.TrimSpace(user.Username); username != "" {
-		return mdv2EscapeChars("@" + username)
+		return messagefmt.EscapeMarkdownV2Literal("@" + username)
 	}
-	name := mdv2EscapeChars(displayName(user))
+	name := messagefmt.EscapeMarkdownV2Literal(displayName(user))
 	return fmt.Sprintf("[%s](%s)", name, escapeMarkdownV2LinkTarget("tg://user?id="+itoa64(user.ID)))
 }
 

@@ -1,6 +1,6 @@
 "use client";
 
-import { Fragment, useEffect, useMemo, useState , Suspense} from "react";
+import { Fragment, useEffect, useMemo, useRef, useState , Suspense} from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { AdminShell } from "@/components/admin-shell";
 import { Card, CardHeader, CardTitle, CardBody } from "@/components/ui/card";
@@ -56,6 +56,8 @@ function ViolationsPageInner() {
   const [loading, setLoading] = useState(true);
   const [expandedId, setExpandedId] = useState<number | null>(null);
   const [selected, setSelected] = useState<Record<number, Violation>>({});
+  const [acting, setActing] = useState(false);
+  const actionLock = useRef(false);
 
   const queryString = useMemo(() => {
     const params = new URLSearchParams();
@@ -65,14 +67,23 @@ function ViolationsPageInner() {
     return params.toString();
   }, [filters]);
 
+  const currentFilters = useRef(filters);
+  currentFilters.current = filters;
+  const currentQuery = useRef(queryString);
+  currentQuery.current = queryString;
+  const loadSequence = useRef(0);
+
   async function load() {
+    const sequence = ++loadSequence.current;
+    const query = currentQuery.current;
+    const latestFilters = currentFilters.current;
     setLoading(true);
-    const vSearch = new URLSearchParams(queryString);
+    const vSearch = new URLSearchParams(query);
     vSearch.set("limit", "50");
 
     const wSearch = new URLSearchParams({ limit: "50" });
-    if (filters.chat_id) wSearch.set("chat_id", filters.chat_id);
-    if (filters.user_id) wSearch.set("user_id", filters.user_id);
+    if (latestFilters.chat_id) wSearch.set("chat_id", latestFilters.chat_id);
+    if (latestFilters.user_id) wSearch.set("user_id", latestFilters.user_id);
 
     try {
       const [v, w, g] = await Promise.all([
@@ -84,13 +95,14 @@ function ViolationsPageInner() {
         ),
         apiFetch<{ groups: Group[] }>("/api/admin/groups"),
       ]);
+      if (sequence !== loadSequence.current || query !== currentQuery.current) return;
       setViolations(v.violations ?? []);
       setWarnings(w.warnings ?? []);
       setGroups(g.groups ?? []);
     } catch (e) {
-      pushToast(e instanceof Error ? e.message : "加载失败", "error");
+      if (sequence === loadSequence.current && query === currentQuery.current) pushToast(e instanceof Error ? e.message : "加载失败", "error");
     } finally {
-      setLoading(false);
+      if (sequence === loadSequence.current && query === currentQuery.current) setLoading(false);
     }
   }
 
@@ -103,7 +115,12 @@ function ViolationsPageInner() {
   }, [searchParams]);
 
   useEffect(() => {
+    setSelected({});
+    setExpandedId(null);
+    setViolations([]);
+    setWarnings([]);
     void load();
+    return () => { loadSequence.current++; };
   }, [queryString]);
 
   function updateFilter(key: string, value: string) {
@@ -123,8 +140,17 @@ function ViolationsPageInner() {
     router.replace("/violations");
   }
 
+  function selectedTargets() {
+    return [...new Map(Object.values(selected).map((item) => [`${item.chat_id}:${item.user_id}`, item])).values()];
+  }
+
   async function batchUnban() {
-    const items = Object.values(selected);
+    if (actionLock.current) return;
+    const items = selectedTargets();
+    if (!items.length) return;
+    actionLock.current = true;
+    setActing(true);
+    try {
     const results = await Promise.allSettled(
       items.map((item) =>
         apiFetch<void>(`/api/admin/unban?chat_id=${item.chat_id}&user_id=${item.user_id}`, {
@@ -134,10 +160,16 @@ function ViolationsPageInner() {
     );
     const success = results.filter((item) => item.status === "fulfilled").length;
     pushToast(`成功 ${success} 条，失败 ${results.length - success} 条`, success ? "success" : "error");
+    } finally { actionLock.current = false; setActing(false); }
   }
 
   async function batchClearWarnings() {
-    const items = Object.values(selected);
+    if (actionLock.current) return;
+    const items = selectedTargets();
+    if (!items.length) return;
+    actionLock.current = true;
+    setActing(true);
+    try {
     const results = await Promise.allSettled(
       items.map((item) =>
         apiFetch<{ cleared: number }>("/api/admin/warnings/clear", {
@@ -148,6 +180,7 @@ function ViolationsPageInner() {
     );
     const success = results.filter((item) => item.status === "fulfilled").length;
     pushToast(`成功 ${success} 条，失败 ${results.length - success} 条`, success ? "success" : "error");
+    } finally { actionLock.current = false; setActing(false); }
   }
 
   return (
@@ -157,8 +190,8 @@ function ViolationsPageInner() {
           <FilterBar groups={groups} values={filters} onChange={updateFilter} onApply={applyFilters} onReset={resetFilters} mode="violations" />
           <div className="mt-3 flex flex-wrap items-center gap-2">
             <span className="text-xs text-[var(--text-muted)]">已选 {Object.keys(selected).length} 条</span>
-            <Button size="sm" variant="secondary" onClick={() => void batchUnban()}>批量 unban</Button>
-            <Button size="sm" variant="ghost" onClick={() => void batchClearWarnings()}>清除警告</Button>
+            <Button size="sm" variant="secondary" disabled={acting || !Object.keys(selected).length} onClick={() => void batchUnban()}>批量 unban</Button>
+            <Button size="sm" variant="ghost" disabled={acting || !Object.keys(selected).length} onClick={() => void batchClearWarnings()}>清除警告</Button>
           </div>
         </CardBody>
       </Card>
@@ -199,6 +232,7 @@ function ViolationsPageInner() {
                     <TableCell>
                       <input
                         type="checkbox"
+                        disabled={acting}
                         checked={Boolean(selected[item.id])}
                         onChange={(e) =>
                           setSelected((current) => {

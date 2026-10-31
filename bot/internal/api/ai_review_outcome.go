@@ -19,6 +19,12 @@ func telegramDefinitivelyRejected(err error) bool {
 	if errors.As(err, &flood) {
 		return true
 	}
-	// Telebot formats unrecognised Telegram API responses as plain errors.
-	return err != nil && telegramExplicit4xx.MatchString(err.Error())
+	// Telebot formats unrecognised Telegram API responses as plain errors;
+	// the bot action wrapper may wrap that error with context and redaction.
+	for e := err; e != nil; e = errors.Unwrap(e) {
+		if telegramExplicit4xx.MatchString(e.Error()) {
+			return true
+		}
+	}
+	return false
 }

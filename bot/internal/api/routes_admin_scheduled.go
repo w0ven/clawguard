@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -66,18 +67,11 @@ func (s *Server) handleCreateScheduledMessage(c echo.Context) error {
 	if !ok {
 		return nil
 	}
-	count, err := s.botService.Queries().CountScheduledMessagesByChat(c.Request().Context(), chatID)
-	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "检查定时消息数量失败"})
-	}
-	if count >= maxScheduledMessagesPerChat {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": "每个群最多创建 20 条定时消息"})
-	}
 	params, err := s.parseScheduledMessageRequest(c, chatID, nil)
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": redact.ErrorString(err)})
 	}
-	created, err := s.botService.Queries().CreateScheduledMessage(c.Request().Context(), store.CreateScheduledMessageParams{
+	created, err := s.botService.Queries().CreateScheduledMessageLimited(c.Request().Context(), store.CreateScheduledMessageParams{
 		ChatID:            params.ChatID,
 		Name:              params.Name,
 		ScheduleType:      params.ScheduleType,
@@ -89,7 +83,10 @@ func (s *Server) handleCreateScheduledMessage(c echo.Context) error {
 		AutoDeleteSeconds: params.AutoDeleteSeconds,
 		Enabled:           params.Enabled,
 		Status:            params.Status,
-	})
+	}, maxScheduledMessagesPerChat)
+	if errors.Is(err, store.ErrScheduledMessageLimit) {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "每个群最多创建 20 条定时消息"})
+	}
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "创建定时消息失败"})
 	}
@@ -150,6 +147,9 @@ func (s *Server) handleDeleteScheduledMessage(c echo.Context) error {
 		return nil
 	}
 	if err := s.botService.Queries().DeleteScheduledMessage(c.Request().Context(), store.DeleteScheduledMessageParams{ID: id, ChatID: chatID}); err != nil {
+		if err == pgx.ErrNoRows {
+			return c.JSON(http.StatusNotFound, map[string]string{"error": "定时消息不存在"})
+		}
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "删除定时消息失败"})
 	}
 	if s.scheduler != nil {
@@ -163,17 +163,39 @@ func (s *Server) handleRunScheduledMessageNow(c echo.Context) error {
 	if !ok {
 		return nil
 	}
-	msg, err := s.botService.Queries().GetScheduledMessage(c.Request().Context(), id)
-	if err != nil || msg.ChatID != chatID {
-		return c.JSON(http.StatusNotFound, map[string]string{"error": "定时消息不存在"})
+	key := strings.TrimSpace(c.Request().Header.Get("Idempotency-Key"))
+	if !manualRequestKeyPattern.MatchString(key) {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "无效的操作编号"})
 	}
 	if s.scheduler == nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "定时调度器未启动"})
+		return c.JSON(http.StatusServiceUnavailable, map[string]string{"error": "定时调度器未启动"})
 	}
-	if err := s.scheduler.RunNow(c.Request().Context(), id); err != nil {
-		return c.JSON(http.StatusBadGateway, map[string]string{"error": "立即试发失败: " + redact.ErrorString(err)})
+	admin, _ := currentAdmin(c)
+	claim, err := s.botService.Queries().ClaimScheduledManual(c.Request().Context(), key, admin.TelegramID, chatID, id)
+	if errors.Is(err, store.ErrScheduledManualConflict) {
+		return c.JSON(http.StatusConflict, map[string]string{"error": "操作编号与目标或发送配置不匹配，请重新发起"})
 	}
-	return c.JSON(http.StatusOK, map[string]string{"status": "ok"})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "定时消息不存在"})
+	}
+	if err != nil {
+		return c.JSON(http.StatusServiceUnavailable, map[string]string{"error": "无法保存或查询发送请求"})
+	}
+	state, messageID := claim.State, claim.MessageID
+	if claim.Claimed {
+		if err := s.writeAudit(c.Request().Context(), admin, "group", &chatID, "run_scheduled_message_now", nil, []byte(fmt.Sprintf(`{"scheduled_message_id":%d}`, id))); err != nil {
+			s.logger.Warn("write scheduled send audit failed")
+		}
+		state, messageID = s.scheduler.RunClaimedManual(c.Request().Context(), claim)
+	}
+	if state == "uncertain" {
+		state = "unknown"
+	}
+	result := map[string]any{"status": state}
+	if messageID != nil {
+		result["message_id"] = *messageID
+	}
+	return c.JSON(http.StatusOK, result)
 }
 
 func (s *Server) handleListScheduledMessageRuns(c echo.Context) error {

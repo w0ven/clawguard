@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/labstack/echo/v4"
 	"github.com/openclaw/clawguard/internal/bot"
@@ -132,5 +133,98 @@ func TestManualModerationIdempotentRetry(t *testing.T) {
 	const failed = "failed-request-1234567890123456789"
 	if call(failed, 101, handler) != 500 || call(failed, 101, handler) != 500 || calls != 1 {
 		t.Fatal("failed outcome was not replayed safely")
+	}
+}
+
+// A manual change must retain the subject gate while its post-Telegram DB
+// settlement is blocked, or a later action may be overwritten by stale state.
+func TestManualModerationGateCoversSettlement(t *testing.T) {
+	fx := openH1Fixture(t)
+	ctx := context.Background()
+	tr := &trustSyncTransport{}
+	old := http.DefaultTransport
+	http.DefaultTransport = tr
+	t.Cleanup(func() { http.DefaultTransport = old })
+	svc, err := bot.New(ctx, config.Config{BotToken: "123:TEST"}, zap.NewNop(), fx.queries, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(svc.Stop)
+	srv := NewServer(config.Config{}, zap.NewNop(), svc, nil)
+	_, err = fx.pool.Exec(ctx, `CREATE FUNCTION block_manual_settlement() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_advisory_xact_lock(739187); RETURN COALESCE(NEW,OLD); END $$; CREATE TRIGGER block_manual_insert BEFORE INSERT ON group_ban_records FOR EACH ROW EXECUTE FUNCTION block_manual_settlement(); CREATE TRIGGER block_manual_delete BEFORE DELETE ON group_ban_records FOR EACH ROW EXECUTE FUNCTION block_manual_settlement()`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, action := range []string{"ban", "unban"} {
+		t.Run(action, func(t *testing.T) {
+			conn, e := fx.pool.Acquire(ctx)
+			if e != nil {
+				t.Fatal(e)
+			}
+			defer conn.Release()
+			if _, e = conn.Exec(ctx, `SELECT pg_advisory_lock(739187)`); e != nil {
+				t.Fatal(e)
+			}
+			defer conn.Exec(ctx, `SELECT pg_advisory_unlock(739187)`)
+			path := "/kickChatMember"
+			if action == "unban" {
+				path = "/unbanChatMember"
+			}
+			before := tr.count(path)
+			done := make(chan int, 1)
+			go func() {
+				r := httptest.NewRequest("POST", fmt.Sprintf("/api/admin/%s?chat_id=-100&user_id=101", action), nil)
+				w := httptest.NewRecorder()
+				c := echo.New().NewContext(r, w)
+				c.Set(adminContextKey, fx.admin)
+				var e error
+				if action == "ban" {
+					e = srv.handleBan(c)
+				} else {
+					e = srv.handleUnban(c)
+				}
+				if e != nil {
+					done <- 0
+				} else {
+					done <- w.Code
+				}
+			}()
+			deadline := time.Now().Add(3 * time.Second)
+			for tr.count(path) == before && time.Now().Before(deadline) {
+				time.Sleep(5 * time.Millisecond)
+			}
+			if tr.count(path) == before {
+				t.Fatal("telegram action not reached")
+			}
+			// The handler cannot finish before the advisory lock is released.
+			select {
+			case code := <-done:
+				t.Fatalf("settled unexpectedly: %d", code)
+			default:
+			}
+			wait, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+			defer cancel()
+			unlock, e := svc.AcquireModerationReview(wait, -100, 101)
+			if e == nil {
+				unlock()
+				t.Fatal("subject gate released before settlement")
+			}
+			other, e := svc.AcquireModerationReview(ctx, -100, 102)
+			if e != nil {
+				t.Fatal(e)
+			}
+			other()
+			if _, e = conn.Exec(ctx, `SELECT pg_advisory_unlock(739187)`); e != nil {
+				t.Fatal(e)
+			}
+			select {
+			case code := <-done:
+				if code != 204 {
+					t.Fatalf("code=%d", code)
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatal("settlement timed out")
+			}
+		})
 	}
 }

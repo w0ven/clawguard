@@ -92,6 +92,8 @@ services:
   bot:
     image: kelework/clawguard-bot:${CLAWGUARD_TAG:?set CLAWGUARD_TAG in .env, e.g. sha-fe27a05}
     restart: unless-stopped
+    # HTTP, scheduler, workers and bot each have bounded shutdown waits.
+    stop_grace_period: 30s
     env_file:
       - .env
     environment:

@@ -52,6 +52,13 @@ var (
 			if len(via) >= 3 {
 				return http.ErrUseLastResponse
 			}
+			// Only follow redirects on the original configured Telegram origin.
+			// An externally controlled redirect must not reach a local service or
+			// disclose this server's network access to a third-party host.
+			base, err := url.Parse(tmePreviewBaseURL)
+			if err != nil || req.URL.User != nil || !strings.EqualFold(req.URL.Scheme, base.Scheme) || !strings.EqualFold(req.URL.Host, base.Host) {
+				return http.ErrUseLastResponse
+			}
 			return nil
 		},
 	}

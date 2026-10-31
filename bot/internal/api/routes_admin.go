@@ -2,9 +2,12 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"sort"
 	"strconv"
@@ -143,9 +146,10 @@ func (s *Server) handleGetGroup(c echo.Context) error {
 	policy.Messages.KeywordReplies = s.botService.MergeKeywordReplyStats(c.Request().Context(), chatID, policy.Messages.KeywordReplies)
 
 	return c.JSON(http.StatusOK, map[string]any{
-		"group":          serializeGroup(group),
-		"merged_policy":  policy,
-		"effective_json": mustRawJSON(policy),
+		"group":           serializeGroup(group),
+		"config_revision": groupConfigRevision(group.Config),
+		"merged_policy":   policy,
+		"effective_json":  mustRawJSON(policy),
 	})
 }
 
@@ -170,33 +174,60 @@ func (s *Server) handlePutGroupConfig(c echo.Context) error {
 		return c.JSON(http.StatusNotFound, map[string]string{"error": "group not found"})
 	}
 
-	group, err := s.botService.Queries().GetGroupByChatID(c.Request().Context(), chatID)
+	var input struct {
+		ExpectedRevision string          `json:"expected_config_revision"`
+		Config           json.RawMessage `json:"config"`
+	}
+	if err := json.NewDecoder(c.Request().Body).Decode(&input); err != nil || len(input.ExpectedRevision) != 64 || len(input.Config) == 0 {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "expected_config_revision and config are required"})
+	}
+	if _, err := hex.DecodeString(input.ExpectedRevision); err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid config revision"})
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(input.Config, &payload); err != nil || payload == nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid json body"})
+	}
+	sanitizeKeywordReplyRuntimeFields(payload)
+	nextConfig, err := json.Marshal(payload)
 	if err != nil {
-		if err == pgx.ErrNoRows {
-			return c.JSON(http.StatusNotFound, map[string]string{"error": "group not found"})
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid json body"})
+	}
+	var group, updated store.Group
+	conflict := errors.New("group config revision conflict")
+	invalid := errors.New("invalid group config")
+	ctx := c.Request().Context()
+	err = s.botService.Queries().Transact(ctx, func(tx *store.Queries) error {
+		var e error
+		group, e = tx.GetGroupByChatIDForUpdate(ctx, chatID)
+		if e != nil {
+			return e
 		}
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "load group failed"})
-	}
-
-	nextConfig, err := normalizeJSONBody(c)
-	if err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": redact.ErrorString(err)})
-	}
-	nextConfig, err = preserveCurrentJoinProtection(group.Config, nextConfig)
-	if err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": redact.ErrorString(err)})
-	}
-	if err := validateJoinProtectionConfigDocument(nextConfig); err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": redact.ErrorString(err)})
-	}
-	if err := validateGroupPolicyUpdate(c.Request().Context(), s.botService.Queries(), nextConfig, group.Config, s.cfg); err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": redact.ErrorString(err)})
-	}
-
-	updated, err := s.botService.Queries().UpdateGroupConfig(c.Request().Context(), store.UpdateGroupConfigParams{
-		ChatID: chatID,
-		Config: nextConfig,
+		if groupConfigRevision(group.Config) != input.ExpectedRevision {
+			return conflict
+		}
+		next, e := preserveCurrentJoinProtection(group.Config, nextConfig)
+		if e != nil {
+			return fmt.Errorf("%w: %v", invalid, e)
+		}
+		if e = validateJoinProtectionConfigDocument(next); e != nil {
+			return fmt.Errorf("%w: %v", invalid, e)
+		}
+		if e = validateGroupPolicyUpdate(ctx, tx, next, group.Config, s.cfg); e != nil {
+			return fmt.Errorf("%w: %v", invalid, e)
+		}
+		updated, e = tx.UpdateGroupConfig(ctx, store.UpdateGroupConfigParams{ChatID: chatID, Config: next})
+		return e
 	})
+	if errors.Is(err, conflict) {
+		return c.JSON(http.StatusConflict, map[string]string{"error": "group config revision conflict; reload and retry"})
+	}
+	if errors.Is(err, invalid) {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": redact.ErrorString(err)})
+	}
+	if errors.Is(err, pgx.ErrNoRows) {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "group not found"})
+	}
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "update group config failed"})
 	}
@@ -212,8 +243,9 @@ func (s *Server) handlePutGroupConfig(c echo.Context) error {
 	policy.Messages.KeywordReplies = s.botService.MergeKeywordReplyStats(c.Request().Context(), chatID, policy.Messages.KeywordReplies)
 
 	return c.JSON(http.StatusOK, map[string]any{
-		"group":         serializeGroup(updated),
-		"merged_policy": policy,
+		"group":           serializeGroup(updated),
+		"config_revision": groupConfigRevision(updated.Config),
+		"merged_policy":   policy,
 	})
 }
 
@@ -350,7 +382,7 @@ var (
 
 type authorizedGroupWriter interface {
 	GetAuthorizedGroupByChatID(ctx context.Context, chatID int64) (store.AuthorizedGroup, error)
-	UpsertAuthorizedGroup(ctx context.Context, arg store.UpsertAuthorizedGroupParams) (store.AuthorizedGroup, error)
+	InsertAuthorizedGroupIfAbsent(ctx context.Context, arg store.UpsertAuthorizedGroupParams) (store.AuthorizedGroup, error)
 }
 
 func createAuthorizedGroupIfAbsent(ctx context.Context, queries authorizedGroupWriter, params store.UpsertAuthorizedGroupParams) (store.AuthorizedGroup, error) {
@@ -361,7 +393,10 @@ func createAuthorizedGroupIfAbsent(ctx context.Context, queries authorizedGroupW
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return store.AuthorizedGroup{}, fmt.Errorf("%w: %w", errLoadAuthorizedGroup, err)
 	}
-	created, err := queries.UpsertAuthorizedGroup(ctx, params)
+	created, err := queries.InsertAuthorizedGroupIfAbsent(ctx, params)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return store.AuthorizedGroup{}, errAuthorizedGroupAlreadyExists
+	}
 	if err != nil {
 		return store.AuthorizedGroup{}, fmt.Errorf("%w: %w", errSaveAuthorizedGroup, err)
 	}
@@ -639,7 +674,7 @@ func (s *Server) handleListProfileCheckLogs(c echo.Context) error {
 
 	page := parsePage(c.QueryParam("page"))
 	pageSize := parsePageSize(c.QueryParam("page_size"))
-	offset := int32((page - 1) * pageSize)
+	offset := pageOffset(page, pageSize)
 	search := strings.TrimSpace(c.QueryParam("search"))
 
 	total, err := s.botService.Queries().CountProfileCheckLogs(c.Request().Context(), store.CountProfileCheckLogsParams{
@@ -781,7 +816,12 @@ func (s *Server) handleBan(c echo.Context) error {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "create operation failed"})
 	}
 	ctx := c.Request().Context()
-	if err := s.botService.BanChatUser(ctx, chatID, userID); err != nil {
+	release, err := s.botService.AcquireModerationReview(ctx, chatID, userID)
+	if err != nil {
+		return c.JSON(http.StatusConflict, map[string]string{"error": "处理正在进行，请稍后重试"})
+	}
+	defer release()
+	if err := s.botService.BanChatUserNoLock(ctx, chatID, userID); err != nil {
 		s.recordManualModerationCase(ctx, op, chatID, userID, "ban", "failed", "处理未确认，请联系管理员核查", admin.TelegramID)
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "ban failed"})
 	}
@@ -809,7 +849,12 @@ func (s *Server) handleUnban(c echo.Context) error {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "create operation failed"})
 	}
 	ctx := c.Request().Context()
-	if err := s.botService.UnbanChatUser(ctx, chatID, userID); err != nil {
+	release, err := s.botService.AcquireModerationReview(ctx, chatID, userID)
+	if err != nil {
+		return c.JSON(http.StatusConflict, map[string]string{"error": "处理正在进行，请稍后重试"})
+	}
+	defer release()
+	if _, err := s.botService.SafeUnbanChatUserNoLock(ctx, chatID, userID); err != nil {
 		s.recordManualModerationCase(ctx, op, chatID, userID, "unban", "failed", "处理未确认，请联系管理员核查", admin.TelegramID)
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "unban failed"})
 	}
@@ -1128,14 +1173,12 @@ func (s *Server) handleListAIModels(c echo.Context) error {
 	items := make([]map[string]any, 0, len(providers.List()))
 	for _, provider := range providers.List() {
 		items = append(items, map[string]any{
-			"name":          provider.Key,
-			"label":         provider.Label,
-			"type":          provider.Type,
-			"base_url":      provider.BaseURL,
-			"timeout_ms":    provider.TimeoutMs,
-			"enabled":       provider.Enabled,
-			"extra_headers": provider.ExtraHeaders,
-			"models":        grouped[provider.Key],
+			"name":       provider.Key,
+			"label":      provider.Label,
+			"type":       provider.Type,
+			"timeout_ms": provider.TimeoutMs,
+			"enabled":    provider.Enabled,
+			"models":     grouped[provider.Key],
 		})
 	}
 	return c.JSON(http.StatusOK, map[string]any{"providers": items})
@@ -1220,17 +1263,20 @@ func (s *Server) handleAIPromptPreview(c echo.Context) error {
 		scene = "bio"
 	}
 
-	policy, err := config.LoadPolicy(c.Request().Context(), s.botService.Queries(), 0)
-	if err != nil {
-		policy = config.DefaultPolicy
-	}
-
-	rules := policy.AI.MessageRules
-	if scene == "bio" {
-		rules = policy.AI.BioRules
-	}
-	if override := strings.TrimSpace(payload.RulesOverride); override != "" {
-		rules = override
+	rules := strings.TrimSpace(payload.RulesOverride)
+	if rules == "" {
+		admin, _ := currentAdmin(c)
+		if !adminHasGlobalAccess(admin) {
+			return c.JSON(http.StatusForbidden, map[string]string{"error": "global config out of scope"})
+		}
+		policy, err := config.LoadPolicy(c.Request().Context(), s.botService.Queries(), 0)
+		if err != nil {
+			policy = config.DefaultPolicy
+		}
+		rules = policy.AI.MessageRules
+		if scene == "bio" {
+			rules = policy.AI.BioRules
+		}
 	}
 
 	return c.JSON(http.StatusOK, map[string]any{
@@ -1967,6 +2013,17 @@ func parsePage(value string) int {
 	return parsed
 }
 
+// pageOffset avoids integer wrap before conversion to the database's int32 offset.
+func pageOffset(page, pageSize int) int32 {
+	if page <= 1 || pageSize <= 0 {
+		return 0
+	}
+	if page-1 > math.MaxInt32/pageSize {
+		return math.MaxInt32
+	}
+	return int32((page - 1) * pageSize)
+}
+
 func parsePageSize(value string) int {
 	parsed, err := strconv.Atoi(strings.TrimSpace(value))
 	if err != nil || parsed <= 0 || parsed > 100 {
@@ -1981,7 +2038,7 @@ func parseCleanupDays(value string, fallback int) (int, error) {
 		return fallback, nil
 	}
 	parsed, err := strconv.Atoi(value)
-	if err != nil || parsed <= 0 {
+	if err != nil || parsed <= 0 || parsed > math.MaxInt32 {
 		return 0, fmt.Errorf("invalid days")
 	}
 	return parsed, nil
@@ -2041,6 +2098,12 @@ func parseChatAndUser(c echo.Context) (int64, int64, error) {
 		return 0, 0, fmt.Errorf("invalid user_id")
 	}
 	return chatID, userID, nil
+}
+
+// The revision identifies the exact JSONB configuration returned by PostgreSQL.
+func groupConfigRevision(raw []byte) string {
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:])
 }
 
 func serializeGroup(group store.Group) map[string]any {
@@ -2187,13 +2250,24 @@ func marshalGroupScope(scope []int64) []byte {
 	return raw
 }
 
+func validAdminGroupScope(admin store.Admin) bool {
+	if admin.Role == "owner" || len(admin.GroupScope) == 0 {
+		return true
+	}
+	var scope []int64
+	return json.Unmarshal(admin.GroupScope, &scope) == nil
+}
+
 func adminHasGlobalAccess(admin store.Admin) bool {
-	return admin.Role == "owner" || len(decodeGroupScope(admin.GroupScope)) == 0
+	return admin.Role == "owner" || validAdminGroupScope(admin) && len(decodeGroupScope(admin.GroupScope)) == 0
 }
 
 func adminCanAccessChat(admin store.Admin, chatID int64) bool {
 	if admin.Role == "owner" {
 		return true
+	}
+	if !validAdminGroupScope(admin) {
+		return false
 	}
 	scope := decodeGroupScope(admin.GroupScope)
 	if len(scope) == 0 {

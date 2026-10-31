@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AdminShell } from "@/components/admin-shell";
 import { Card, CardBody, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -23,6 +23,7 @@ import {
   fetchGlobalConfig,
   isGlobalConfigConflict,
   saveGlobalConfigSection,
+  validGlobalConfigVersion,
 } from "@/lib/global-config";
 import { useToast } from "@/components/providers";
 import { useDirtyGuard, useDirtyNavigation } from "@/components/dirty-guard";
@@ -176,6 +177,10 @@ export default function LLMAdminPage() {
     probe_interval_seconds: 120,
   });
   const [loading, setLoading] = useState(true);
+  const [loaded, setLoaded] = useState(false);
+  const [configVersion, setConfigVersion] = useState<number | null>(null);
+  const [loadError, setLoadError] = useState("");
+  const loadSequence = useRef(0);
 
   const statsByModelId = useMemo(() => {
     const map = new Map<number, Stats>();
@@ -184,6 +189,7 @@ export default function LLMAdminPage() {
   }, [stats]);
 
   const reloadAll = useCallback(async () => {
+    const sequence = ++loadSequence.current;
     setLoading(true);
     try {
       const [p, m, s, g] = await Promise.all([
@@ -192,6 +198,11 @@ export default function LLMAdminPage() {
         apiFetch<{ stats: Stats[] }>("/api/admin/llm/stats"),
         fetchGlobalConfig(),
       ]);
+      if (sequence !== loadSequence.current) return;
+      if (!validGlobalConfigVersion(g.version)) throw new Error("缺少配置版本，请刷新后重试");
+      setConfigVersion(g.version);
+      setLoaded(true);
+      setLoadError("");
       setProviders(p.providers ?? []);
       setModels(m.models ?? []);
       setStats(s.stats ?? []);
@@ -202,9 +213,12 @@ export default function LLMAdminPage() {
         probe_interval_seconds: Number(ai.probe_interval_seconds ?? 120) || 120,
       });
     } catch (e) {
-      pushToast(e instanceof Error ? e.message : "加载失败", "error");
+      if (sequence !== loadSequence.current) return;
+      const message = e instanceof Error ? e.message : "加载失败";
+      setLoadError(message);
+      pushToast(message, "error");
     } finally {
-      setLoading(false);
+      if (sequence === loadSequence.current) setLoading(false);
     }
   }, [pushToast]);
 
@@ -225,7 +239,7 @@ export default function LLMAdminPage() {
       title="模型管理"
       subtitle="管理供应商和模型条目。"
       actions={
-        <Button variant="secondary" onClick={reloadAll} disabled={loading}>
+        <Button variant="secondary" onClick={() => { if (confirmNavigation("当前模型编辑草稿尚未保存，确定刷新吗？")) void reloadAll(); }} disabled={loading}>
           <RefreshCw
             size={14}
             className={loading ? "animate-spin" : undefined}
@@ -245,14 +259,15 @@ export default function LLMAdminPage() {
         />
       </div>
 
-      {tab === "providers" && (
+      {!loaded && <p role="status" className="text-sm text-[var(--text-muted)]">{loadError ? "加载失败，请刷新重试" : "正在加载…"}</p>}
+      {loaded && tab === "providers" && (
         <ProviderPanel
           providers={providers}
           onChanged={reloadAll}
           pushToast={pushToast}
         />
       )}
-      {tab === "models" && (
+      {loaded && tab === "models" && (
         <ModelPanel
           providers={providers}
           models={models}
@@ -261,10 +276,12 @@ export default function LLMAdminPage() {
           pushToast={pushToast}
         />
       )}
-      {tab === "stats" && <StatsPanel models={models} stats={stats} />}
-      {tab === "settings" && (
+      {loaded && tab === "stats" && <StatsPanel models={models} stats={stats} />}
+      {loaded && tab === "settings" && (
         <SettingsPanel
           settings={settings}
+          configVersion={configVersion}
+          onVersionChange={setConfigVersion}
           onChanged={reloadAll}
           pushToast={pushToast}
         />
@@ -935,7 +952,8 @@ function ModelForm({
     setEnabled(model?.enabled ?? true);
     setProbeEnabled(model?.probe_enabled ?? true);
     setProbeInterval(model?.probe_interval_seconds ?? 0);
-  }, [model, providers]);
+  // A provider list refresh must not reset a draft for the same model.
+  }, [model]);
 
   async function submit() {
     const capabilityTags = caps
@@ -1184,10 +1202,14 @@ function ModelForm({
 
 function SettingsPanel({
   settings,
+  configVersion,
+  onVersionChange,
   onChanged,
   pushToast,
 }: {
   settings: ProbeSettings;
+  configVersion: number | null;
+  onVersionChange: (version: number | null) => void;
   onChanged: () => Promise<void>;
   pushToast: ToastFn;
 }) {
@@ -1208,16 +1230,22 @@ function SettingsPanel({
   }, [settings]);
 
   async function save() {
+    if (configVersion == null) { pushToast("缺少配置版本，请刷新后再保存", "error"); return; }
     setSaving(true);
     try {
       const nextInterval = Math.max(30, Number(interval) || 120);
-      const payload = await saveGlobalConfigSection("llm", {
+      const payload = await saveGlobalConfigSection("llm", configVersion, {
         ai: {
           probe_enabled: probeEnabled,
           auto_degrade: autoDegrade,
           probe_interval_seconds: nextInterval,
         },
       });
+      if (!validGlobalConfigVersion(payload.version)) {
+        onVersionChange(null);
+        throw new Error("保存结果缺少配置版本，请保留草稿并刷新核对");
+      }
+      onVersionChange(payload.version);
       const next = asRecord(asRecord(payload.config).ai);
       setProbeEnabled(Boolean(next.probe_enabled ?? false));
       setAutoDegrade(Boolean(next.auto_degrade ?? true));
@@ -1291,7 +1319,7 @@ function SettingsPanel({
         </div>
 
         <div className="mt-4 flex flex-wrap gap-2">
-          <Button onClick={save} disabled={saving || !settingsDirty}>
+          <Button onClick={save} disabled={saving || configVersion == null || !settingsDirty}>
             {saving ? "保存中…" : settingsDirty ? "保存设置" : "已保存"}
           </Button>
           <Button type="button" variant="secondary" onClick={runNow}>

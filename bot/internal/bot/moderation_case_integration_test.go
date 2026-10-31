@@ -351,13 +351,16 @@ func TestBotInviterHumanAndNewMemberCaseIntegration(t *testing.T) {
 func TestVerificationPartialKickDoesNotRepeatIntegration(t *testing.T) {
 	ctx := context.Background()
 	pool, q, s, tr := settlementFixture(t)
-	p := settlementPending(t, q, 101, "button", `{}`)
+	p, err := q.UpsertPendingVerification(ctx, store.UpsertPendingVerificationParams{ChatID: -90001, UserID: 101, Method: "button", Payload: []byte(`{}`), ExpiresAt: time.Now().Add(time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
 	chat := &tele.Chat{ID: -90001}
 	user := &tele.User{ID: 101}
 	tr.mu.Lock()
 	tr.failUnban = true
 	tr.mu.Unlock()
-	err := s.failVerificationImmediately(ctx, chat, user, p, "kick", "verify_wrong")
+	err = s.failVerificationImmediately(ctx, chat, user, p, "kick", "verify_wrong")
 	if err == nil {
 		t.Fatal("expected unban failure")
 	}

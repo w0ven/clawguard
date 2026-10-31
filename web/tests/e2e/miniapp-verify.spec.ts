@@ -91,3 +91,17 @@ test('verified task resumes without loading challenge scripts and ignores device
   await expect(page.getByText('入群验证已完成')).toBeVisible();
   expect(challengeRequests).toBe(0);
 });
+
+test('Telegram-shaped launch preserves full init data through config and fails closed for expired identity', async ({page}) => {
+ const init = new URLSearchParams({query_id:'AAFixture',user:JSON.stringify({id:123,first_name:'测试',username:'fixture'}),auth_date:'1793430000',hash:'a'.repeat(64),signature:'fixture-signature'}).toString();
+ await page.route('https://telegram.org/js/telegram-web-app.js*', route => route.fulfill({contentType:'application/javascript',body:telegramSDKFixture}));
+ let calls=0;await page.route('**/api/verify/mini/**',route=>{calls++;expect(route.request().postDataJSON()).toEqual({token,init_data:init});return route.fulfill({status:401,json:{error:'身份已过期，请重新从私聊打开'}})});
+ await page.goto(`/verify/mini?task=${token}${telegramFragment(init)}`);await expect(page.getByText('身份已过期，请重新从私聊打开')).toBeVisible();await expect(page.getByRole('button',{name:'提交验证'})).toHaveCount(0);expect(calls).toBeGreaterThan(0);
+});
+
+test('verification rejects server-reported replay without falsely showing success', async ({page}) => {
+ await page.addInitScript(()=>{const w=window as any;w.turnstile={render:(_:unknown,o:any)=>{w.cf=o;return 'cf'},remove:()=>{}};w.hcaptcha={render:(_:unknown,o:any)=>{w.h=o;return 'hc'},remove:()=>{}}});
+ await page.route('https://telegram.org/js/telegram-web-app.js*',route=>route.fulfill({contentType:'application/javascript',body:telegramSDKFixture}));
+ await page.route('**/api/verify/mini/**',route=>route.request().url().endsWith('/config')?route.fulfill({json:{turnstile_sitekey:'cf',hcaptcha_sitekey:'hc',group_title:'测试群',user_id:123,remaining_ms:120000}}):route.fulfill({status:409,json:{error:'验证已使用，请重新打开'}}));
+ await page.goto(`/verify/mini?task=${token}${telegramFragment('signed')}`);await expect.poll(()=>page.evaluate(()=>!!((window as any).cf&&(window as any).h))).toBe(true);await page.evaluate(()=>{(window as any).cf.callback('cf');(window as any).h.callback('hc')});await page.getByRole('button',{name:'提交验证'}).click();await expect(page.getByText('验证已使用，请重新打开')).toBeVisible();await expect(page.getByText('入群验证已完成')).toHaveCount(0);
+});

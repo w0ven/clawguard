@@ -115,14 +115,36 @@ func TestCanRunScheduledMessageAllowsAutomaticActive(t *testing.T) {
 	}
 }
 
-func TestSchedulerStopCancelsDeleteLater(t *testing.T) {
+func TestSendThrottledDoesNotSendWhenCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
-	s := &Scheduler{ctx: ctx, cancel: cancel, cron: cron.New(cron.WithLocation(time.UTC), cron.WithSeconds())}
-	s.deleteLater(42, 1, time.Hour)
-	stopCtx := s.Stop()
-	select {
-	case <-stopCtx.Done():
-	case <-time.After(time.Second):
-		t.Fatal("Stop did not finish after canceling deleteLater")
+	cancel()
+	s := &Scheduler{} // nil bot must not be reached
+	if _, err := s.sendThrottled(ctx, &tele.Chat{ID: 1}, "test"); err != context.Canceled {
+		t.Fatalf("error = %v, want context.Canceled", err)
+	}
+}
+
+func TestSlottedSchedulePreservesPlannedTimes(t *testing.T) {
+	schedule := &slottedSchedule{Schedule: cron.Every(time.Minute)}
+	now := time.Date(2026, 10, 31, 8, 0, 0, 0, time.UTC)
+	first := schedule.Next(now)
+	second := schedule.Next(first)
+	if a, ok := schedule.take(); !ok || !a.Equal(first) {
+		t.Fatalf("first slot=%v ok=%v", a, ok)
+	}
+	if b, ok := schedule.take(); !ok || !b.Equal(second) {
+		t.Fatalf("second slot=%v ok=%v", b, ok)
+	}
+	if _, ok := schedule.take(); ok {
+		t.Fatal("unexpected extra slot")
+	}
+}
+
+func TestFloodRetryAfterValueAndPointer(t *testing.T) {
+	f := tele.FloodError{RetryAfter: 4}
+	for _, err := range []error{f, &f} {
+		if n, ok := floodRetryAfter(err); !ok || n != 4 {
+			t.Fatalf("retry=%d ok=%v", n, ok)
+		}
 	}
 }

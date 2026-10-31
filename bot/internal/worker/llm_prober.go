@@ -144,6 +144,9 @@ func (p *LLMProber) tick(ctx context.Context) {
 	enabled := true
 	models := p.models.List(ai.ModelFilter{Enabled: &enabled})
 	for _, m := range models {
+		if ctx.Err() != nil {
+			return
+		}
 		if !m.ProbeEnabled {
 			continue
 		}
@@ -183,6 +186,9 @@ func (p *LLMProber) probeOne(ctx context.Context, model ai.Model) {
 	probeCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
 	_, probeErr := client.Probe(probeCtx, model.ModelKey)
+	if ctx.Err() != nil {
+		return // shutdown is not a model health failure
+	}
 
 	checkedAt := time.Now().UTC()
 	probeOK := probeErr == nil

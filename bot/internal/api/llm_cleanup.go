@@ -104,7 +104,16 @@ func cleanupDeletedLLMModelReferences(ctx context.Context, queries *store.Querie
 	if err != nil {
 		return total, fmt.Errorf("list groups: %w", err)
 	}
-	for _, group := range groups {
+	for _, listed := range groups {
+		// Re-read under the row lock: the list is only an enumeration, not a
+		// snapshot safe for writing over a concurrent administrator save.
+		group, err := queries.GetGroupByChatIDForUpdate(ctx, listed.ChatID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return total, fmt.Errorf("lock group %d config: %w", listed.ChatID, err)
+		}
 		cleaned, refs, changed, err := cleanLLMModelReferencesFromConfig(group.Config, target)
 		if err != nil {
 			return total, fmt.Errorf("clean group %d config: %w", group.ChatID, err)

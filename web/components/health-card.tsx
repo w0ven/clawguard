@@ -20,7 +20,10 @@ export function HealthCard() {
 
   useEffect(() => {
     let cancelled = false;
+    let inFlight = false;
     const load = async () => {
+      if (inFlight || cancelled) return;
+      inFlight = true;
       try {
         const data = await apiFetch<HealthStatus>("/api/admin/health");
         if (cancelled) return;
@@ -29,6 +32,8 @@ export function HealthCard() {
       } catch (loadError) {
         if (cancelled) return;
         setError(loadError instanceof Error ? loadError.message : "加载失败");
+      } finally {
+        inFlight = false;
       }
     };
     void load();

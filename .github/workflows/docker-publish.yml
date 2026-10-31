@@ -53,7 +53,7 @@ jobs:
         run: go vet ./...
       - name: Race tests
         working-directory: bot
-        run: go test -race ./internal/bot ./internal/api ./internal/config ./internal/worker
+        run: go test -race ./...
       - name: Vulnerability scan
         working-directory: bot
         run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
@@ -78,7 +78,7 @@ jobs:
         working-directory: bot
         env:
           TEST_DATABASE_URL: postgres://clawguard:test-password@127.0.0.1:5432/clawguard_test?sslmode=disable
-        run: go test -tags=integration -timeout 180s ./internal/store ./internal/api ./internal/bot ./internal/worker
+        run: go test -tags=integration -timeout 180s ./internal/store ./internal/api ./internal/bot ./internal/worker ./internal/scheduler
 
   test-web:
     name: Test web
@@ -121,6 +121,8 @@ jobs:
         uses: actions/checkout@v5
       - name: Redis legacy persistence and privilege smoke test
         run: bash scripts/redis-hardening-smoke.sh
+      - name: Compose release and rollback regression test
+        run: bash scripts/test-deploy-production.sh
 
   build-and-push:
     name: Build ${{ matrix.service }}

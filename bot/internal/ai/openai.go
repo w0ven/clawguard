@@ -12,6 +12,19 @@ import (
 	"time"
 )
 
+const maxModelResponseBytes = 2 << 20
+
+func decodeModelResponse(body io.Reader, result *chatCompletionResponse) error {
+	raw, err := io.ReadAll(io.LimitReader(body, maxModelResponseBytes+1))
+	if err != nil {
+		return err
+	}
+	if len(raw) > maxModelResponseBytes {
+		return fmt.Errorf("model response exceeds %d bytes", maxModelResponseBytes)
+	}
+	return json.Unmarshal(raw, result)
+}
+
 var openAIHTTPClient = &http.Client{
 	Timeout: 5 * time.Minute,
 	Transport: &http.Transport{
@@ -128,7 +141,7 @@ func (c *OpenAICompatibleClient) Check(ctx context.Context, req CheckRequest) (*
 	}
 
 	var decoded chatCompletionResponse
-	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
+	if err := decodeModelResponse(resp.Body, &decoded); err != nil {
 		return nil, fmt.Errorf("decode llm response: %w", err)
 	}
 	if len(decoded.Choices) == 0 {
@@ -224,7 +237,7 @@ func (c *OpenAICompatibleClient) Probe(ctx context.Context, modelKey string) (in
 	}
 
 	var decoded chatCompletionResponse
-	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
+	if err := decodeModelResponse(resp.Body, &decoded); err != nil {
 		return 0, fmt.Errorf("decode probe response: %w", err)
 	}
 	if len(decoded.Choices) == 0 {
@@ -288,7 +301,7 @@ func (c *OpenAICompatibleClient) Chat(ctx context.Context, req CheckRequest) (*C
 		return nil, providerHTTPError(resp, fmt.Errorf("chat status %d", resp.StatusCode))
 	}
 	var decoded chatCompletionResponse
-	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
+	if err := decodeModelResponse(resp.Body, &decoded); err != nil {
 		return nil, fmt.Errorf("decode chat response: %w", err)
 	}
 	if len(decoded.Choices) == 0 {

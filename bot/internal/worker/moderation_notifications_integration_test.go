@@ -104,8 +104,17 @@ func TestModerationNotificationsRecoveryAndFairness(t *testing.T) {
 		}
 		return s
 	}
-	if state(7001) != "sent" || state(7002) != "unreachable" || state(7003) != "pending" || state(7004) != "pending" {
-		t.Fatalf("states: %s %s %s %s", state(7001), state(7002), state(7003), state(7004))
+	if state(7001) != "sent" || state(7002) != "unreachable" || state(7003) != "sending" || state(7004) != "pending" || state(7005) != "sending" {
+		t.Fatalf("states: %s %s %s %s %s", state(7001), state(7002), state(7003), state(7004), state(7005))
+	}
+	// Simulate lease expiry/restart; existing recovery marks the unknown
+	// outcomes terminal without replaying the Telegram request.
+	if _, err = pool.Exec(ctx, `UPDATE moderation_notifications n SET lease_until=now()-interval '1 second' FROM moderation_cases c WHERE n.case_id=c.id AND c.source_key IN ($1,$2)`, fmt.Sprintf("%s-%d", prefix, 7003), fmt.Sprintf("%s-%d", prefix, 7005)); err != nil {
+		t.Fatal(err)
+	}
+	w.process(ctx)
+	if state(7003) != "uncertain" || state(7005) != "uncertain" {
+		t.Fatalf("recovered states: %s %s", state(7003), state(7005))
 	}
 	if tr.count(7001) != 1 || tr.count(7002) != 1 {
 		t.Fatal("wrong deliveries")
@@ -115,23 +124,17 @@ func TestModerationNotificationsRecoveryAndFairness(t *testing.T) {
 		t.Fatalf("retry-after %v %v", wait, err)
 	}
 	for i := 0; i < 4; i++ {
-		_, err = pool.Exec(ctx, `UPDATE moderation_notifications n SET next_attempt_at=now() FROM moderation_cases c WHERE n.case_id=c.id AND c.source_key=$1`, fmt.Sprintf("%s-%d", prefix, 7003))
+		_, err = pool.Exec(ctx, `UPDATE moderation_notifications n SET next_attempt_at=now() FROM moderation_cases c WHERE n.case_id=c.id AND c.source_key=$1`, fmt.Sprintf("%s-%d", prefix, 7004))
 		if err != nil {
 			t.Fatal(err)
 		}
 		w.process(ctx)
 	}
-	if state(7003) != "failed" || tr.count(7003) != 5 {
-		t.Fatalf("retry cap %s calls=%d", state(7003), tr.count(7003))
+	if state(7004) != "failed" || tr.count(7004) != 5 {
+		t.Fatalf("429 retry cap %s calls=%d", state(7004), tr.count(7004))
 	}
-	for i := 0; i < 4; i++ {
-		if _, err = pool.Exec(ctx, `UPDATE moderation_notifications n SET next_attempt_at=now() FROM moderation_cases c WHERE n.case_id=c.id AND c.source_key=$1`, fmt.Sprintf("%s-%d", prefix, 7005)); err != nil {
-			t.Fatal(err)
-		}
-		w.process(ctx)
-	}
-	if state(7005) != "failed" || tr.count(7005) != 5 {
-		t.Fatalf("timeout cap %s calls=%d", state(7005), tr.count(7005))
+	if tr.count(7003) != 1 || tr.count(7005) != 1 {
+		t.Fatalf("uncertain outcomes retried: 500=%d timeout=%d", tr.count(7003), tr.count(7005))
 	}
 	if tr.count(7002) != 1 {
 		t.Fatal("retried permanent 403")

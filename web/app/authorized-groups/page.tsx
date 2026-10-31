@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AdminShell } from "@/components/admin-shell";
+import { useDirtyGuard } from "@/components/dirty-guard";
 import { Card, CardBody, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -37,6 +38,10 @@ export default function AuthorizedGroupsPage() {
   const [saving, setSaving] = useState(false);
   const [chatId, setChatId] = useState("");
   const [title, setTitle] = useState("");
+  const savedTitles = useRef(new Map<number, string>());
+  const actionLock = useRef(false);
+  const hasDraft = groups.some((group) => group.title !== savedTitles.current.get(group.chat_id));
+  useDirtyGuard(hasDraft, "群标题尚未保存，确定离开吗？");
 
   async function load() {
     setLoading(true);
@@ -44,7 +49,9 @@ export default function AuthorizedGroupsPage() {
       const res = await apiFetch<{ groups: AuthorizedGroup[] }>(
         "/api/admin/authorized-groups",
       );
-      setGroups(res.groups ?? []);
+      const items = res.groups ?? [];
+      savedTitles.current = new Map(items.map((group) => [group.chat_id, group.title]));
+      setGroups(items);
     } catch (e) {
       pushToast(e instanceof Error ? e.message : "加载失败", "error");
     } finally {
@@ -57,10 +64,12 @@ export default function AuthorizedGroupsPage() {
   }, []);
 
   async function createGroup() {
+    if (actionLock.current) return;
     if (!chatId.trim()) {
       pushToast("chat_id 不能为空", "error");
       return;
     }
+    actionLock.current = true;
     setSaving(true);
     try {
       await apiFetch("/api/admin/authorized-groups", {
@@ -77,11 +86,15 @@ export default function AuthorizedGroupsPage() {
     } catch (e) {
       pushToast(e instanceof Error ? e.message : "保存失败", "error");
     } finally {
+      actionLock.current = false;
       setSaving(false);
     }
   }
 
   async function updateGroup(group: AuthorizedGroup, patch: Partial<AuthorizedGroup>) {
+    if (actionLock.current) return;
+    actionLock.current = true;
+    setSaving(true);
     try {
       await apiFetch(`/api/admin/authorized-groups/${group.chat_id}`, {
         method: "PUT",
@@ -95,11 +108,16 @@ export default function AuthorizedGroupsPage() {
       pushToast("已更新", "success");
     } catch (e) {
       pushToast(e instanceof Error ? e.message : "更新失败", "error");
+    } finally {
+      actionLock.current = false;
+      setSaving(false);
     }
   }
 
   async function removeGroup(group: AuthorizedGroup) {
-    if (!confirm(`确认删除授权群 ${group.chat_id}？`)) return;
+    if (actionLock.current || !confirm(`确认删除授权群 ${group.chat_id}？`)) return;
+    actionLock.current = true;
+    setSaving(true);
     try {
       await apiFetch(`/api/admin/authorized-groups/${group.chat_id}`, {
         method: "DELETE",
@@ -108,6 +126,9 @@ export default function AuthorizedGroupsPage() {
       pushToast("已删除", "success");
     } catch (e) {
       pushToast(e instanceof Error ? e.message : "删除失败", "error");
+    } finally {
+      actionLock.current = false;
+      setSaving(false);
     }
   }
 
@@ -119,16 +140,18 @@ export default function AuthorizedGroupsPage() {
         </CardHeader>
         <CardBody className="grid gap-3 sm:grid-cols-[1.2fr_1fr_auto]">
           <Input
+            disabled={saving}
             placeholder="chat_id，例如 -1001234567890"
             value={chatId}
             onChange={(e) => setChatId(e.target.value)}
           />
           <Input
+            disabled={saving}
             placeholder="群标题（可选）"
             value={title}
             onChange={(e) => setTitle(e.target.value)}
           />
-          <Button onClick={createGroup} disabled={saving}>
+          <Button onClick={createGroup} disabled={saving || hasDraft}>
             <Plus className="h-3.5 w-3.5" />
             添加
           </Button>
@@ -161,6 +184,7 @@ export default function AuthorizedGroupsPage() {
                   <TableCell className="font-mono text-xs">{group.chat_id}</TableCell>
                   <TableCell>
                     <Input
+                      disabled={saving}
                       value={group.title}
                       onChange={(e) => {
                         const next = e.target.value;
@@ -173,7 +197,7 @@ export default function AuthorizedGroupsPage() {
                         );
                       }}
                       onBlur={(e) => {
-                        if (e.target.value !== group.title) {
+                        if (e.target.value !== savedTitles.current.get(group.chat_id)) {
                           void updateGroup(group, { title: e.target.value });
                         }
                       }}
@@ -187,6 +211,7 @@ export default function AuthorizedGroupsPage() {
                   </TableCell>
                   <TableCell>
                     <Switch
+                      disabled={saving || hasDraft}
                       checked={group.enabled}
                       onCheckedChange={(checked) =>
                         void updateGroup(group, { enabled: checked })
@@ -197,6 +222,7 @@ export default function AuthorizedGroupsPage() {
                     <Button
                       variant="ghost"
                       size="sm"
+                      disabled={saving || hasDraft}
                       onClick={() => void removeGroup(group)}
                     >
                       <Trash2 className="h-3.5 w-3.5 text-[var(--danger)]" />

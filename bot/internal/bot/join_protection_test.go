@@ -1,7 +1,9 @@
 package bot
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -131,20 +133,17 @@ func TestSyntheticCleanupDoesNotReservePendingSlot(t *testing.T) {
 	}
 }
 
-func TestVerificationKickContinuesUnbanWhenRetryFindsExistingBan(t *testing.T) {
+func TestVerificationKickNeverUnbansExistingBan(t *testing.T) {
 	unbanCalls := 0
 	err := runVerificationKick(
-		func() error { return errors.New("Bad Request: user already banned") },
+		func() error { return &telegramExplicitRejection{err: errors.New("Bad Request: user already banned")} },
 		func() error {
 			unbanCalls++
 			return nil
 		},
 	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if unbanCalls != 1 {
-		t.Fatalf("unban calls = %d, want 1", unbanCalls)
+	if err == nil || unbanCalls != 0 {
+		t.Fatalf("err=%v unban calls=%d, want existing ban preserved", err, unbanCalls)
 	}
 }
 
@@ -213,7 +212,7 @@ func TestJoinProtectorNotificationRateLimit(t *testing.T) {
 }
 
 func TestPromptSendFailureRemainsOnCleanupPath(t *testing.T) {
-	telegramErr := errors.New("telegram unavailable")
+	telegramErr := &telegramExplicitRejection{err: errors.New("telegram unavailable")}
 	var persisted atomic.Bool
 	action, err := runPromptFailureCleanup(promptFailureCleanupOps{
 		applyAction: func() (string, error) { return "", telegramErr },
@@ -228,7 +227,7 @@ func TestPromptSendFailureRemainsOnCleanupPath(t *testing.T) {
 }
 
 func TestJoinProtectionBanFailurePersistsAndOpensCooldown(t *testing.T) {
-	telegramErr := errors.New("telegram unavailable")
+	telegramErr := &telegramExplicitRejection{err: errors.New("telegram unavailable")}
 	var temporaryBanCalls atomic.Int64
 	var fallbackRestrictCalls atomic.Int64
 	var persistedReason string
@@ -256,12 +255,21 @@ func TestJoinProtectionBanFailurePersistsAndOpensCooldown(t *testing.T) {
 	}
 }
 
+func TestJoinProtectionUnknownDoesNotFallbackOrQueue(t *testing.T) {
+	for _, fault := range []error{context.DeadlineExceeded, ErrTelegramResultUnconfirmed, fmt.Errorf("transport failed: user not found")} {
+		err := runJoinProtectionAction(joinProtectionActionOps{allow: func() bool { return true }, applyAction: func() error { return fault }, fallbackRestrict: func() error { t.Fatal("fallback after unknown"); return nil }, persistCleanup: func(string) error { t.Fatal("queued unknown"); return nil }, success: func() { t.Fatal("reported success") }, fail: func(error) { t.Fatal("reported definite failure") }})
+		if !errors.Is(err, errCleanupManualReview) {
+			t.Fatalf("fault %v: %v", fault, err)
+		}
+	}
+}
+
 func TestJoinProtectionBanTerminalErrorDoesNotPersist(t *testing.T) {
 	var persisted atomic.Bool
 	var succeeded atomic.Bool
 	err := runJoinProtectionAction(joinProtectionActionOps{
 		allow:       func() bool { return true },
-		applyAction: func() error { return errors.New("Bad Request: user not found") },
+		applyAction: func() error { return &telegramExplicitRejection{err: errors.New("Bad Request: user not found")} },
 		persistCleanup: func(string) error {
 			persisted.Store(true)
 			return nil

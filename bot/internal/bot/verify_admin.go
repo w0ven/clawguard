@@ -27,6 +27,10 @@ func (s *Service) existingVerificationMessageID(ctx context.Context, chatID, use
 	return int(*pending.JoinMessageID)
 }
 
+func pendingVerificationMessageMatches(msg *tele.Message, pending store.PendingVerification) bool {
+	return msg != nil && msg.Chat != nil && msg.Chat.ID == pending.ChatID && pending.JoinMessageID != nil && *pending.JoinMessageID > 0 && int64(msg.ID) == *pending.JoinMessageID
+}
+
 func (s *Service) verificationMessageRef(chat *tele.Chat, messageID int) *tele.Message {
 	if chat == nil || messageID <= 0 {
 		return nil
@@ -55,19 +59,10 @@ func (s *Service) sendOrEditVerificationText(
 		DisableWebPagePreview: true,
 		ReplyMarkup:           markup,
 	}
-	if existingID > 0 {
-		msg := s.verificationMessageRef(chat, existingID)
-		if _, err := s.bot.Edit(msg, html, opts); err == nil {
-			return msg, nil
-		} else if s.logger != nil {
-			s.logger.Warn("edit verification text failed, sending a new message",
-				zap.Error(err),
-				zap.Int64("chat_id", chat.ID),
-				zap.Int("message_id", existingID),
-			)
-		}
-		s.deleteVerificationMessage(chat, int64Ptr(int64(existingID)))
-	}
+	// A replacement challenge needs a new Telegram message identity. Editing
+	// the previous card lets a delayed old callback act on the new task.
+	// The old card is removed only after the new task is persisted.
+	_ = existingID
 	return s.sendThrottled(ctx, chat, html, opts)
 }
 
@@ -81,24 +76,7 @@ func (s *Service) sendOrEditVerificationPhoto(
 		ParseMode:   tele.ModeHTML,
 		ReplyMarkup: markup,
 	}
-	if existingID > 0 {
-		msg := s.verificationMessageRef(chat, existingID)
-		if _, err := s.bot.EditCaption(msg, photo.Caption, opts); err == nil {
-			if markup != nil {
-				if _, markupErr := s.bot.EditReplyMarkup(msg, markup); markupErr != nil && s.logger != nil {
-					s.logger.Warn("edit verification photo markup failed", zap.Error(markupErr), zap.Int64("chat_id", chat.ID), zap.Int("message_id", existingID))
-				}
-			}
-			return msg, nil
-		} else if s.logger != nil {
-			s.logger.Warn("edit verification photo failed, sending a new message",
-				zap.Error(err),
-				zap.Int64("chat_id", chat.ID),
-				zap.Int("message_id", existingID),
-			)
-		}
-		s.deleteVerificationMessage(chat, int64Ptr(int64(existingID)))
-	}
+	_ = existingID
 	return s.bot.Send(chat, photo, opts)
 }
 
@@ -196,6 +174,10 @@ func (s *Service) handleVerifyAdmin(c tele.Context) error {
 		}
 		s.logger.Error("load pending verification for admin action", zap.Error(err), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", payload.UserID))
 		return c.Respond(&tele.CallbackResponse{Text: "暂时无法处理，请稍后重试", ShowAlert: true})
+	}
+
+	if !pendingVerificationMessageMatches(callback.Message, pending) {
+		return c.Respond(&tele.CallbackResponse{Text: "验证卡已失效，请使用最新验证卡", ShowAlert: true})
 	}
 
 	user := &tele.User{

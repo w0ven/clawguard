@@ -22,7 +22,7 @@ export const test = base.extend<{mock:Mock}>({mock:[async({page},use,testInfo)=>
    const body=req.postDataJSON();mock.writes.push({path:p,method:req.method(),body});
    if(mock.delay)await new Promise(r=>setTimeout(r,mock.delay));
    if(mock.status>=400)return route.fulfill({status:mock.status,json:{error:`Fixture ${mock.status} rejected`}});
-   if(p.endsWith('/config'))data={group:{...group,config:body},merged_policy:{...policy,...body}};
+   if(p.endsWith('/config'))data={group:{...group,config:body.config},merged_policy:{...policy,...body.config},config_revision:'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'};
    else if(p==='/api/admin/global-config')data={config:body.config,version:8};
    else if(p.endsWith('/join-protection'))data={join_protection:body,status};
    else data={ok:true};
@@ -30,12 +30,12 @@ export const test = base.extend<{mock:Mock}>({mock:[async({page},use,testInfo)=>
   else if(p==='/api/auth/me') data={admin:{id:1,telegram_id:1,role:'super_admin',display_name:'Fixture Admin'}};
   else if(p==='/api/admin/groups')data={groups:[group,{...group,chat_id:-1002,title:'Fixture 第二群'}]};
   else if(p==='/api/admin/appeals')data={appeals:[],pending_count:0,has_more:false};
-  else if(/^\/api\/admin\/groups\/-\d+$/.test(p))data={group:p.endsWith('-1002')?{...group,chat_id:-1002,title:'Fixture 第二群'}:group,merged_policy:policy};
+  else if(/^\/api\/admin\/groups\/-\d+$/.test(p))data={group:p.endsWith('-1002')?{...group,chat_id:-1002,title:'Fixture 第二群'}:group,merged_policy:policy,config_revision:'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'};
   else if(p.endsWith('/exempt-users'))data={users:[]};
   else if(p.endsWith('/scheduled-messages'))data={scheduled_messages:[],limit:20};
   else if(p.endsWith('/join-protection'))data={join_protection:join,defaults:join,status};
   else if(p==='/api/admin/global-config')data={config:policy,version:7};
-  else if(p==='/api/admin/llm/providers'||p==='/api/admin/ai-providers')data={providers:[provider]};
+  else if(p==='/api/admin/llm/providers'||p==='/api/admin/ai-providers'||p==='/api/admin/ai-models')data={providers:[provider]};
   else if(p==='/api/admin/llm/models')data={models:[model]};
   else if(p==='/api/admin/llm/stats')data={stats:[]};
   else if(p==='/api/admin/adkiller')data={api_key_set:false,api_key_hint:''};

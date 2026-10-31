@@ -2,7 +2,10 @@ package bot
 
 import (
 	"context"
+	"errors"
+	"fmt"
 
+	"github.com/jackc/pgx/v5"
 	"go.uber.org/zap"
 	tele "gopkg.in/telebot.v3"
 
@@ -92,10 +95,34 @@ func (s *Service) restrictUngraduatedPermissionsLocked(chat *tele.Chat, user *te
 		User:   user,
 		Rights: ungraduatedRestrictedRights(policy),
 	}
-	if err := s.bot.Restrict(chat, &member); err != nil {
+	if err := telegramConfirmedRestrict(s.bot, chat, &member); err != nil {
 		return err
 	}
 	s.logTelegramPermissionInfo("restricted ungraduated permissions", chat, user, reason)
+	return nil
+}
+
+// Legacy verification must not lift a later independent punishment. This
+// conservative recheck is performed under the same subject gate before the
+// task is consumed or any permissions are changed.
+func (s *Service) ensureLegacyVerificationSafe(ctx context.Context, chat *tele.Chat, user *tele.User) error {
+	if s == nil || s.queries == nil || s.bot == nil || chat == nil || user == nil {
+		return ErrDualCaptchaConflict
+	}
+	safe, err := s.queries.DualCaptchaSafety(ctx, chat.ID, user.ID)
+	if err != nil {
+		return fmt.Errorf("check verification safety: %w", err)
+	}
+	if !safe {
+		return ErrDualCaptchaConflict
+	}
+	member, err := s.bot.ChatMemberOf(chat, user)
+	if err != nil {
+		return fmt.Errorf("check verification restriction: %w", err)
+	}
+	if !verificationRestrictionApplied(member) {
+		return ErrDualCaptchaConflict
+	}
 	return nil
 }
 
@@ -109,14 +136,15 @@ func (s *Service) applyVerificationPassPermissionsLocked(ctx context.Context, ch
 	}
 	if ungraduatedPermissionRestrictionEnabled(policy) && s.queries != nil {
 		trust, err := s.queries.GetUserTrust(ctx, chat.ID, user.ID)
-		if err != nil {
-			s.logTelegramPermissionWarning("load user trust before verification permission sync failed", err, chat, user, "verification_pass")
-		} else if isUngraduatedTrustStatus(trust.Status) {
-			if err := s.restrictUngraduatedPermissionsLocked(chat, user, policy, "verification_pass"); err == nil {
-				return nil
-			} else {
-				s.logTelegramPermissionWarning("restrict permissions after verification pass failed, falling back to normal permissions", err, chat, user, "verification_pass")
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("load trust before verification permission sync: %w", err)
+		} else if err == nil && isUngraduatedTrustStatus(trust.Status) {
+			// Never turn a failed policy restriction into a full permission
+			// grant. The caller restores the pending task for a safe retry.
+			if err := s.restrictUngraduatedPermissionsLocked(chat, user, policy, "verification_pass"); err != nil {
+				return fmt.Errorf("apply ungraduated permissions: %w", err)
 			}
+			return nil
 		}
 	}
 	return s.restoreUserMessagePermissionsLocked(chat, user, "verification_pass")
@@ -180,7 +208,7 @@ func (s *Service) restoreUserMessagePermissionsLocked(chat *tele.Chat, user *tel
 		User:   user,
 		Rights: normalMemberRights(),
 	}
-	if err := s.bot.Restrict(chat, &member); err != nil {
+	if err := telegramConfirmedRestrict(s.bot, chat, &member); err != nil {
 		return err
 	}
 	s.logTelegramPermissionInfo("restored user message permissions", chat, user, reason)

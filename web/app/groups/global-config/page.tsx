@@ -1,7 +1,7 @@
 "use client";
 
 import type { Dispatch, SetStateAction } from "react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { AdminShell } from "@/components/admin-shell";
 import {
   ArrayTextarea,
@@ -19,15 +19,15 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Select } from "@/components/ui/select";
 import { Button } from "@/components/ui/button";
-import { apiFetch } from "@/lib/api";
+import { fetchModelOptions } from "@/lib/model-picker";
 import {
   GLOBAL_CONFIG_CONFLICT_MESSAGE,
   fetchGlobalConfig,
   isGlobalConfigConflict,
   saveGlobalConfigDocument,
+  validGlobalConfigVersion,
 } from "@/lib/global-config";
 import {
-  cleanStaleAIModelRefs,
   getPathValue,
   hasPath,
   parseArrayValue,
@@ -84,52 +84,36 @@ export default function GlobalConfigPage() {
   const [initial, setInitial] = useState<Record<string, unknown>>({});
   const [version, setVersion] = useState<number | null>(null);
   const [saving, setSaving] = useState(false);
+  const [loadError, setLoadError] = useState("");
+  const [loaded, setLoaded] = useState(false);
   const [llmModelOptions, setLLMModelOptions] = useState<LLMModelOption[]>([]);
   const [llmOptionsError, setLLMOptionsError] = useState<string | null>(null);
-  const modelOptionsRef = useRef<LLMModelOption[]>([]);
-  const configLoadedRef = useRef(false);
 
   useEffect(() => {
     fetchGlobalConfig()
       .then((p) => {
+        if (!validGlobalConfigVersion(p.version)) throw new Error("缺少配置版本，请刷新后重试");
         const loadedConfig = p.config ?? {};
-        const normalizedConfig = cleanStaleAIModelRefs(loadedConfig, modelOptionsRef.current);
-        setDraft(normalizedConfig);
-        setInitial(normalizedConfig);
-        setVersion(typeof p.version === "number" ? p.version : null);
-        configLoadedRef.current = true;
+        setDraft(loadedConfig);
+        setInitial(loadedConfig);
+        setVersion(p.version);
+        setLoaded(true);
       })
-      .catch((e) =>
-        pushToast(e instanceof Error ? e.message : "加载失败", "error"),
-      );
+      .catch((e) => {
+        const message = e instanceof Error ? e.message : "加载失败";
+        setLoadError(message);
+        pushToast(message, "error");
+      });
   }, [pushToast]);
 
   useEffect(() => {
     let alive = true;
-    apiFetch<{
-      models?: Array<{
-        provider_key: string;
-        model_key: string;
-        label?: string;
-      }>;
-    }>("/api/admin/llm/models")
-      .then((payload) => {
+    fetchModelOptions()
+      .then((options) => {
         if (!alive) {
           return;
         }
-        const options = (payload.models ?? []).map((model) => {
-          const value = `${model.provider_key}:${model.model_key}`;
-          return {
-            value,
-            label: `${value} · ${model.label || model.model_key}`,
-          };
-        });
-        modelOptionsRef.current = options;
         setLLMModelOptions(options);
-        if (configLoadedRef.current) {
-          setInitial((current) => cleanStaleAIModelRefs(current, options));
-          setDraft((current) => cleanStaleAIModelRefs(current, options));
-        }
         setLLMOptionsError(null);
       })
       .catch((error) => {
@@ -159,11 +143,16 @@ export default function GlobalConfigPage() {
     }
     setSaving(true);
     try {
-      const nextDraft = cleanStaleAIModelRefs(draft, llmModelOptions);
+      const nextDraft = draft;
       const p = await saveGlobalConfigDocument(version, nextDraft);
+      if (!validGlobalConfigVersion(p.version)) {
+        setVersion(null);
+        setLoadError("保存结果缺少配置版本，请保留草稿并刷新核对");
+        throw new Error("保存结果缺少配置版本，请保留草稿并刷新核对");
+      }
       setDraft(p.config ?? {});
       setInitial(p.config ?? {});
-      setVersion(typeof p.version === "number" ? p.version : version);
+      setVersion(p.version);
       pushToast("已保存", "success");
     } catch (e) {
       pushToast(
@@ -204,7 +193,7 @@ export default function GlobalConfigPage() {
             <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-[var(--accent)]">默认策略工作区</p>
             <p className="mt-1 text-xs text-[var(--text-muted)]">群级页面可逐字段覆盖；全局文档保存带版本冲突保护。</p>
           </div>
-          <Badge tone={isDirty ? "warning" : "success"}>{isDirty ? "有未保存修改" : "已同步"}</Badge>
+          <Badge tone={isDirty || version == null ? "warning" : "success"}>{version == null ? (loadError ? "加载失败，请刷新重试" : "正在加载") : isDirty ? "有未保存修改" : "已同步"}</Badge>
         </div>
         <Tabs
           tabs={globalScenes.map(({ value, label }) => ({ value, label }))}
@@ -219,7 +208,7 @@ export default function GlobalConfigPage() {
         <Tabs tabs={tabsForScene(activeScene)} value={activeTab} onValueChange={setActiveTab} className="w-full border-0 bg-transparent p-0" />
       </section>
 
-      <fieldset disabled={saving} className="min-w-0 border-0 p-0">
+      <fieldset disabled={saving || !loaded} className="min-w-0 border-0 p-0">
       <div className="space-y-3 pb-20">
         {tabFields.map((field) => {
           const value = getPathValue(draft as GuardPolicy, field.path);
@@ -429,12 +418,12 @@ export default function GlobalConfigPage() {
 
       <div className="glass-savebar fixed inset-x-3 bottom-4 z-20 flex items-center justify-between gap-3 rounded-2xl px-3 py-2.5 md:inset-x-auto md:bottom-6 md:left-[calc(17rem+2rem)] md:right-8 md:px-4">
         <div className="min-w-0">
-          <p className="truncate text-sm font-semibold">{isDirty ? "全局策略草稿" : "全局策略已保存"}</p>
+          <p className="truncate text-sm font-semibold">{version == null ? (loadError ? "加载失败，请刷新重试" : "正在加载全局策略") : isDirty ? "全局策略草稿" : "全局策略已保存"}</p>
           <p className="hidden text-xs text-[var(--text-muted)] sm:block">{isDirty ? "切换场景不会丢失草稿；409 冲突会保留本地内容" : "保存整份文档，版本号用于并发保护"}</p>
         </div>
         <div className="flex shrink-0 items-center gap-2">
           <Button type="button" variant="ghost" size="sm" onClick={discard} disabled={!isDirty || saving}>放弃</Button>
-          <Button onClick={save} disabled={!isDirty || saving} variant={isDirty ? "primary" : "secondary"} size="sm">
+          <Button onClick={save} disabled={!isDirty || saving || version == null} variant={isDirty ? "primary" : "secondary"} size="sm">
             <Save className="h-4 w-4" />
             {saving ? "保存中…" : isDirty ? "保存全局策略" : "已保存"}
           </Button>

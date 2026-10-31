@@ -146,6 +146,8 @@ type CheckOutput struct {
 
 type pendingBatch struct {
 	ctx     context.Context
+	cancel  context.CancelFunc
+	active  int
 	inputs  []CheckInput
 	waiters []chan batchResult
 }
@@ -254,19 +256,32 @@ func (m *Moderator) CheckMessage(ctx context.Context, input CheckInput) (CheckOu
 	m.mu.Lock()
 	batch := m.batches[key]
 	if batch == nil {
-		batch = &pendingBatch{ctx: ctx}
+		batchCtx, cancelBatch := context.WithCancel(m.lifeContext())
+		batch = &pendingBatch{ctx: batchCtx, cancel: cancelBatch}
 		m.batches[key] = batch
 		window := input.Policy.BatchWindowMs
 		if window <= 0 {
 			window = 500
 		}
-		safeGo(m.lifeContext(), m.logger, func() {
-			m.flushBatch(key, time.Duration(window)*time.Millisecond)
+		safeGo(context.Background(), m.logger, func() {
+			m.flushBatch(key, batch, time.Duration(window)*time.Millisecond)
 		})
 	}
 	batch.inputs = append(batch.inputs, input)
 	batch.waiters = append(batch.waiters, waiter)
+	batch.active++
 	m.mu.Unlock()
+	defer func() {
+		m.mu.Lock()
+		batch.active--
+		if batch.active == 0 {
+			if m.batches[key] == batch {
+				delete(m.batches, key)
+			}
+			batch.cancel()
+		}
+		m.mu.Unlock()
+	}()
 
 	select {
 	case <-ctx.Done():
@@ -274,6 +289,13 @@ func (m *Moderator) CheckMessage(ctx context.Context, input CheckInput) (CheckOu
 		// terminating batch a short bounded interval to report exhaustion;
 		// explicit cancellation is returned immediately.
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			// Preserve the existing deadline/fallback contract for a sole
+			// waiter; do not cancel work shared by other live callers.
+			m.mu.Lock()
+			if batch.active == 1 {
+				batch.cancel()
+			}
+			m.mu.Unlock()
 			timer := time.NewTimer(100 * time.Millisecond)
 			defer timer.Stop()
 			select {
@@ -290,21 +312,35 @@ func (m *Moderator) CheckMessage(ctx context.Context, input CheckInput) (CheckOu
 	}
 }
 
-func (m *Moderator) flushBatch(key string, window time.Duration) {
-	time.Sleep(window)
+func (m *Moderator) flushBatch(key string, batch *pendingBatch, window time.Duration) {
+	timer := time.NewTimer(window)
+	defer timer.Stop()
+	select {
+	case <-batch.ctx.Done():
+		m.mu.Lock()
+		if m.batches[key] == batch {
+			delete(m.batches, key)
+		}
+		waiters := append([]chan batchResult(nil), batch.waiters...)
+		m.mu.Unlock()
+		for _, waiter := range waiters {
+			waiter <- batchResult{err: batch.ctx.Err()}
+		}
+		return
+	case <-timer.C:
+	}
 	m.mu.Lock()
-	batch := m.batches[key]
+	if m.batches[key] != batch {
+		m.mu.Unlock()
+		return
+	}
 	delete(m.batches, key)
 	m.mu.Unlock()
-	if batch == nil || len(batch.inputs) == 0 {
+	if len(batch.inputs) == 0 {
 		return
 	}
 
-	batchCtx := batch.ctx
-	if batchCtx == nil {
-		batchCtx = m.lifeContext()
-	}
-	batchCtx, cancel := context.WithTimeout(batchCtx, 30*time.Second)
+	batchCtx, cancel := context.WithTimeout(batch.ctx, 30*time.Second)
 	defer cancel()
 
 	// Image batches must deliver each result independently: a later failed

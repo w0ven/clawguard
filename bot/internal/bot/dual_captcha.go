@@ -199,7 +199,7 @@ func (s *Service) verifyDualCaptchaForUser(ctx context.Context, token, cfRespons
 	} else if !current {
 		return s.markDualCaptchaConflict(ctx, pending.ID, claim)
 	}
-	if err := s.bot.Restrict(chat, &tele.ChatMember{User: user, Rights: target.Rights}); err != nil {
+	if err := telegramConfirmedRestrict(s.bot, chat, &tele.ChatMember{User: user, Rights: target.Rights}); err != nil {
 		return ErrDualCaptchaUnavailable
 	}
 	return s.finishDualCaptcha(ctx, pending, claim, chat, user)

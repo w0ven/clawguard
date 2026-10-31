@@ -19,11 +19,13 @@ import {
 } from "@/components/ui/table";
 import {
   apiFetch,
+  ApiError,
   deleteOldProfileCheckLogs,
   fetchProfileCheckLogs,
 } from "@/lib/api";
+import { isGroupConfigRevision, type GroupConfigRevision } from "@/lib/group-config";
+import { fetchModelOptions } from "@/lib/model-picker";
 import {
-  cleanStaleAIModelRefs,
   formatArrayValue,
   getPathValue,
   hasPath,
@@ -646,7 +648,7 @@ export const fieldDescriptors: FieldDescriptor[] = [
     tab: "ai",
     path: ["ai", "custom_rules"],
     label: "自定义规则",
-    description: "只会追加到固定 system prompt 末尾",
+    description: "只会追加到固定 system prompt 末尾；规则中写 ban 不会覆盖消息分类动作策略",
     kind: "template",
   },
   {
@@ -697,7 +699,7 @@ export const fieldDescriptors: FieldDescriptor[] = [
     tab: "ai",
     path: ["ai", "thresholds", "warn"],
     label: "Warn 阈值",
-    description: "0-1",
+    description: "0-1。简介危险判定达到此阈值后直接封禁；消息处罚仍按分类策略。",
     kind: "number",
   },
   {
@@ -950,6 +952,7 @@ function isConfigFieldGroupTrigger(
 type Props = {
   group: Group;
   mergedPolicy: GuardPolicy;
+  configRevision: GroupConfigRevision;
 };
 
 type ProfileCheckLogFilters = {
@@ -992,7 +995,7 @@ function truncateText(value: string, maxLength: number) {
   return `${value.slice(0, maxLength)}...`;
 }
 
-export function GroupConfigEditor({ group, mergedPolicy }: Props) {
+export function GroupConfigEditor({ group, mergedPolicy, configRevision }: Props) {
   const { pushToast } = useToast();
   const { confirmNavigation } = useDirtyNavigation();
   const [activeScene, setActiveScene] = useState("membership");
@@ -1008,6 +1011,7 @@ export function GroupConfigEditor({ group, mergedPolicy }: Props) {
   const [audit, setAudit] = useState<AuditEntry[]>([]);
   const [auditExpanded, setAuditExpanded] = useState<Set<number>>(new Set());
   const [saving, setSaving] = useState(false);
+  const [revision, setRevision] = useState<GroupConfigRevision | null>(configRevision);
   const [profileCheckLogs, setProfileCheckLogs] = useState<ProfileCheckLog[]>(
     [],
   );
@@ -1040,29 +1044,12 @@ export function GroupConfigEditor({ group, mergedPolicy }: Props) {
 
   useEffect(() => {
     let alive = true;
-    apiFetch<{
-      models?: Array<{
-        provider_key: string;
-        model_key: string;
-        label?: string;
-        enabled?: boolean;
-      }>;
-    }>("/api/admin/llm/models")
-      .then((payload) => {
+    fetchModelOptions()
+      .then((options) => {
         if (!alive) {
           return;
         }
-        const options = (payload.models ?? []).map((model) => {
-          const value = `${model.provider_key}:${model.model_key}`;
-          const label = `${value} · ${model.label || model.model_key}`;
-          return { value, label };
-        });
         setLLMModelOptions(options);
-        // Normalize stale refs in both snapshots so loading model metadata does
-        // not manufacture a dirty draft before the user edits anything.
-        const normalizedInitial = cleanStaleAIModelRefs(group.config ?? {}, options);
-        setInitialConfig(normalizedInitial);
-        setDraft((current) => cleanStaleAIModelRefs(current, options));
         setLLMOptionsError(null);
       })
       .catch((error) => {
@@ -1357,22 +1344,31 @@ export function GroupConfigEditor({ group, mergedPolicy }: Props) {
   }
 
   async function saveConfig() {
+    if (revision === null) { pushToast("缺少群配置版本，请保留草稿并刷新核对", "error"); return; }
     setSaving(true);
     try {
-      const nextDraft = cleanStaleAIModelRefs(draft, llmModelOptions);
+      const nextDraft = draft;
       const p = await apiFetch<{
         group: Group;
         merged_policy: GuardPolicy;
+        config_revision?: unknown;
       }>(`/api/admin/groups/${group.chat_id}/config`, {
         method: "PUT",
-        body: JSON.stringify(nextDraft),
+        body: JSON.stringify({ expected_config_revision: revision, config: nextDraft }),
       });
+      if (!isGroupConfigRevision(p.config_revision)) {
+        setRevision(null);
+        throw new Error("保存结果缺少群配置版本，请保留草稿并刷新核对");
+      }
+      setRevision(p.config_revision);
       setInitialConfig(p.group.config ?? {});
       setDraft(p.group.config ?? {});
       setMergedPolicyState(p.merged_policy);
       pushToast("已保存", "success");
     } catch (e) {
-      pushToast(e instanceof Error ? e.message : "保存失败", "error");
+      pushToast(e instanceof ApiError && e.status === 409
+        ? "群配置已被其他人更新，未覆盖远端配置。草稿仍在本页；请先复制保留修改，再刷新页面核对最新配置。"
+        : e instanceof Error ? e.message : "保存失败", "error");
     } finally {
       setSaving(false);
     }
@@ -1681,7 +1677,7 @@ export function GroupConfigEditor({ group, mergedPolicy }: Props) {
           </div>
           <div className="flex shrink-0 items-center gap-2">
             <Button type="button" variant="ghost" size="sm" onClick={discardConfig} disabled={!isDirty || saving}>放弃</Button>
-            <Button onClick={saveConfig} disabled={!isDirty || saving} variant={isDirty ? "primary" : "secondary"} size="sm">
+            <Button onClick={saveConfig} disabled={!isDirty || saving || revision === null} variant={isDirty ? "primary" : "secondary"} size="sm">
               <Save className="h-4 w-4" />
               {saving ? "保存中…" : isDirty ? "保存策略" : "已保存"}
             </Button>
@@ -2918,6 +2914,7 @@ export function ModelRefSelect({
       onChange={(e) => onChange(e.target.value)}
     >
       <option value="">请选择模型</option>
+      {value && !options.some((option) => option.value === value) && <option value={value}>{value}（当前不可用）</option>}
       {options.map((option) => (
         <option key={option.value} value={option.value}>
           {option.label}

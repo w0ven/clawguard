@@ -4,10 +4,15 @@ WORKDIR /app
 
 RUN apk add --no-cache ca-certificates git
 
-COPY go.mod ./
+COPY go.mod go.sum ./
 RUN go mod download
 
-COPY . .
+# Only source and runtime assets; do not bake local binaries or secrets into
+# intermediate build layers when the build context contains operator files.
+COPY cmd ./cmd
+COPY internal ./internal
+COPY migrations ./migrations
+COPY entrypoint.sh ./entrypoint.sh
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /out/clawguard ./cmd/clawguard
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /out/migrate ./cmd/migrate
 

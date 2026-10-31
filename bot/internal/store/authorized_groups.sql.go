@@ -30,6 +30,13 @@ SET title = COALESCE(NULLIF(EXCLUDED.title, ''), authorized_groups.title),
 RETURNING chat_id, title, authorized_at, authorized_by, enabled, notes
 `
 
+const insertAuthorizedGroupIfAbsent = `-- name: InsertAuthorizedGroupIfAbsent :one
+INSERT INTO authorized_groups (chat_id, title, authorized_by, enabled, notes)
+VALUES ($1, COALESCE($2, ''), $3, COALESCE($4, TRUE), COALESCE($5, ''))
+ON CONFLICT (chat_id) DO NOTHING
+RETURNING chat_id, title, authorized_at, authorized_by, enabled, notes
+`
+
 const deleteAuthorizedGroup = `-- name: DeleteAuthorizedGroup :exec
 DELETE FROM authorized_groups
 WHERE chat_id = $1
@@ -99,6 +106,14 @@ func (q *Queries) UpsertAuthorizedGroup(ctx context.Context, arg UpsertAuthorize
 	var i AuthorizedGroup
 	err := scanAuthorizedGroup(row, &i)
 	return i, err
+}
+
+// InsertAuthorizedGroupIfAbsent never overwrites a concurrently-created group.
+func (q *Queries) InsertAuthorizedGroupIfAbsent(ctx context.Context, arg UpsertAuthorizedGroupParams) (AuthorizedGroup, error) {
+	row := q.db.QueryRow(ctx, insertAuthorizedGroupIfAbsent, arg.ChatID, arg.Title, arg.AuthorizedBy, arg.Enabled, arg.Notes)
+	var group AuthorizedGroup
+	err := scanAuthorizedGroup(row, &group)
+	return group, err
 }
 
 func (q *Queries) DeleteAuthorizedGroup(ctx context.Context, chatID int64) error {

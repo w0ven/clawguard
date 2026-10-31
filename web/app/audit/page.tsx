@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { AdminShell } from "@/components/admin-shell";
 import { Card, CardHeader, CardTitle, CardBody } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -300,24 +300,30 @@ export default function AuditPage() {
   const [items, setItems] = useState<AuditEntry[]>([]);
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
   const [loading, setLoading] = useState(true);
+  const loadSequence = useRef(0);
 
   async function load() {
+    const sequence = ++loadSequence.current;
     setLoading(true);
     const search = new URLSearchParams({ limit: "100" });
     if (chatId) search.set("chat_id", chatId);
 
     try {
       const payload = await apiFetch<{ audit: AuditEntry[] }>(`/api/admin/audit?${search}`);
-      setItems(payload.audit ?? []);
+      if (sequence === loadSequence.current) {
+        setItems(payload.audit ?? []);
+        setExpanded(new Set());
+      }
     } catch (e) {
-      pushToast(e instanceof Error ? e.message : "加载失败", "error");
+      if (sequence === loadSequence.current) pushToast(e instanceof Error ? e.message : "加载失败", "error");
     } finally {
-      setLoading(false);
+      if (sequence === loadSequence.current) setLoading(false);
     }
   }
 
   useEffect(() => {
-    load();
+    void load();
+    return () => { loadSequence.current++; };
   }, []);
 
   const filtered = useMemo(

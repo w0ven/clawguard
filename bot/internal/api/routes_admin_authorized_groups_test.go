@@ -34,7 +34,7 @@ func (f *fakeAuthorizedGroupWriter) GetAuthorizedGroupByChatID(_ context.Context
 	return store.AuthorizedGroup{}, pgx.ErrNoRows
 }
 
-func (f *fakeAuthorizedGroupWriter) UpsertAuthorizedGroup(_ context.Context, arg store.UpsertAuthorizedGroupParams) (store.AuthorizedGroup, error) {
+func (f *fakeAuthorizedGroupWriter) InsertAuthorizedGroupIfAbsent(_ context.Context, arg store.UpsertAuthorizedGroupParams) (store.AuthorizedGroup, error) {
 	f.upsertCalls = append(f.upsertCalls, arg)
 	if f.upsertErr != nil {
 		return store.AuthorizedGroup{}, f.upsertErr

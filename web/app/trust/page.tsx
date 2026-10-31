@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useEffect, useState } from "react";
+import { Suspense, useEffect, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Search } from "lucide-react";
 import { AdminShell } from "@/components/admin-shell";
@@ -133,23 +133,31 @@ function TrustPageInner() {
   const [total, setTotal] = useState(0);
   const [hasMore, setHasMore] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [updating, setUpdating] = useState(false);
+  const updateLock = useRef(false);
 
   const page = Math.max(1, Number(filters.page) || 1);
+  const currentFilters = useRef(filters);
+  currentFilters.current = filters;
+  const loadSequence = useRef(0);
 
   async function load(activeFilters: TrustFilters) {
+    const sequence = ++loadSequence.current;
+    const query = buildApiSearch(activeFilters);
     setLoading(true);
     try {
       const payload = await apiFetch<TrustListResponse>(
-        `/api/admin/user-trust?${buildApiSearch(activeFilters)}`,
+        `/api/admin/user-trust?${query}`,
       );
+      if (sequence !== loadSequence.current || query !== buildApiSearch(currentFilters.current)) return;
       setItems(payload.items ?? []);
       setCounts(payload.counts ?? {});
       setTotal(payload.total ?? 0);
       setHasMore(Boolean(payload.has_more));
     } catch (e) {
-      pushToast(e instanceof Error ? e.message : "加载失败", "error");
+      if (sequence === loadSequence.current && query === buildApiSearch(currentFilters.current)) pushToast(e instanceof Error ? e.message : "加载失败", "error");
     } finally {
-      setLoading(false);
+      if (sequence === loadSequence.current && query === buildApiSearch(currentFilters.current)) setLoading(false);
     }
   }
 
@@ -176,7 +184,11 @@ function TrustPageInner() {
   }, [searchParams]);
 
   useEffect(() => {
+    setItems([]);
+    setTotal(0);
+    setHasMore(false);
     void load(filters);
+    return () => { loadSequence.current++; };
   }, [filters]);
 
   function updateDraft(key: keyof TrustFilters, value: string) {
@@ -207,6 +219,9 @@ function TrustPageInner() {
   }
 
   async function updateStatus(item: UserTrust, nextStatus: string) {
+    if (updateLock.current) return;
+    updateLock.current = true;
+    setUpdating(true);
     try {
       const result = await apiFetch<{telegram_action_error?: string; telegram_permission_error?: string}>(`/api/admin/user-trust/${item.chat_id}/${item.user_id}`, {
         method: "PUT",
@@ -216,7 +231,7 @@ function TrustPageInner() {
           notes: item.notes,
         }),
       });
-      await load(filters);
+      await load(currentFilters.current);
       const syncError = result.telegram_action_error || result.telegram_permission_error;
       if (syncError) {
         pushToast(`Telegram 同步失败，请重试：${syncError}`, "error");
@@ -225,6 +240,9 @@ function TrustPageInner() {
       }
     } catch (e) {
       pushToast(e instanceof Error ? e.message : "更新失败", "error");
+    } finally {
+      updateLock.current = false;
+      setUpdating(false);
     }
   }
 
@@ -360,6 +378,7 @@ function TrustPageInner() {
                         <Button
                           size="sm"
                           variant="secondary"
+                          disabled={updating}
                           onClick={() => updateStatus(item, "trusted")}
                         >
                           信任
@@ -367,6 +386,7 @@ function TrustPageInner() {
                         <Button
                           size="sm"
                           variant="ghost"
+                          disabled={updating}
                           onClick={() => updateStatus(item, "new")}
                         >
                           重置
@@ -374,6 +394,7 @@ function TrustPageInner() {
                         <Button
                           size="sm"
                           variant="danger"
+                          disabled={updating}
                           onClick={() => updateStatus(item, "banned")}
                         >
                           封禁

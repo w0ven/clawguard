@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { GuardedLink } from "@/components/guarded-link";
 import { AdminShell } from "@/components/admin-shell";
 import { Card, CardHeader, CardTitle, CardBody } from "@/components/ui/card";
@@ -47,6 +47,7 @@ export default function DashboardPage() {
   const [systemState, setSystemState] = useState<SystemState | null>(null);
   const [loading, setLoading] = useState(true);
   const [updatingState, setUpdatingState] = useState(false);
+  const updateLock = useRef(false);
 
   async function load() {
     setLoading(true);
@@ -74,7 +75,8 @@ export default function DashboardPage() {
     patch: Record<string, unknown>,
     message: string,
   ) {
-    if (!confirm(message)) return;
+    if (loading || !systemState || updateLock.current || !confirm(message)) return;
+    updateLock.current = true;
     setUpdatingState(true);
     try {
       const res = await apiFetch<{ state: SystemState }>(
@@ -89,6 +91,7 @@ export default function DashboardPage() {
     } catch (e) {
       pushToast(e instanceof Error ? e.message : "更新失败", "error");
     } finally {
+      updateLock.current = false;
       setUpdatingState(false);
     }
   }
@@ -155,7 +158,7 @@ export default function DashboardPage() {
               </div>
               <Switch
                 checked={systemState?.ai_paused ?? false}
-                disabled={updatingState}
+                disabled={loading || !systemState || updatingState}
                 onCheckedChange={(checked) =>
                   void updateSystemState(
                     {
@@ -179,7 +182,7 @@ export default function DashboardPage() {
               </div>
               <Switch
                 checked={systemState?.actions_paused ?? false}
-                disabled={updatingState}
+                disabled={loading || !systemState || updatingState}
                 onCheckedChange={(checked) =>
                   void updateSystemState(
                     { actions_paused: checked },
@@ -200,7 +203,7 @@ export default function DashboardPage() {
               </div>
               <Switch
                 checked={systemState?.frozen ?? false}
-                disabled={updatingState}
+                disabled={loading || !systemState || updatingState}
                 onCheckedChange={(checked) =>
                   void updateSystemState(
                     { frozen: checked },

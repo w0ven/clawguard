@@ -12,3 +12,14 @@ for(const mode of ['decision','retry'] as const){
   await expect(page.getByText('实际结果：原封禁已解除')).toBeVisible();expect(writes).toBe(1);
  });
 }
+
+test('review draft survives rejected close and pending decision locks selection',async({page})=>{
+ await page.context().addCookies([{name:'cg_admin',value:'fixture',domain:'127.0.0.1',path:'/'}]);
+ const base={id:7,case_id:42,chat_id:-100,user_id:123,group_title:'测试群',status:'pending',decision:null,public_note:'',execution_result:'',reason:'理由',reference_url:'javascript:alert(1)',turnstile_verified:true,hcaptcha_verified:true,action:'ban',case_result:'executed',explanation:'',summary:'',created_at:'2026-10-31T06:00:00Z',case_notification_state:'unreachable',result_notification_state:''};
+ let release!:()=>void;const pending=new Promise<void>(resolve=>{release=resolve});let writes=0;
+ await page.route('**/*',r=>new URL(r.request().url()).hostname==='127.0.0.1'?r.continue():r.abort());
+ await page.route('**/api/**',async r=>{const p=new URL(r.request().url()).pathname;if(p==='/api/admin/groups')return r.fulfill({json:{groups:[]}});if(p==='/api/admin/appeals')return r.fulfill({json:{appeals:[base],pending_count:1,has_more:false}});if(p==='/api/admin/appeals/7')return r.fulfill({json:{appeal:base}});if(p.endsWith('/decision')){writes++;await pending;return r.fulfill({status:503,json:{error:'处理失败'}})}return r.fulfill({status:404,json:{error:'unexpected'}})});
+ await page.goto('/appeals');await page.getByRole('button',{name:/APL-7/}).click();await expect(page.getByText('处理通知：无法送达').last()).toBeVisible();await expect(page.getByRole('link',{name:/javascript/})).toHaveCount(0);
+ await page.getByLabel('公开处理说明（必填）').fill('保留说明');page.once('dialog',d=>d.dismiss());await page.getByRole('button',{name:'关闭',exact:true}).click();await expect(page.getByLabel('公开处理说明（必填）')).toHaveValue('保留说明');
+ await page.getByRole('button',{name:'通过并核查处理'}).click();await expect(page.getByRole('button',{name:'关闭',exact:true})).toBeDisabled();await expect(page.getByRole('button',{name:/APL-7/})).toBeDisabled();await expect(page.getByLabel('公开处理说明（必填）')).toBeDisabled();expect(writes).toBe(1);release();await expect(page.locator('p[role="alert"]')).toContainText('处理失败');await expect(page.getByLabel('公开处理说明（必填）')).toHaveValue('保留说明');
+});

@@ -194,3 +194,19 @@ func TestRateLimitRepairsCounterWithoutExpiry(t *testing.T) {
 		t.Fatalf("recovered request: allowed=%v err=%v", allowed, err)
 	}
 }
+
+func TestTurnstileRateLimitKeyDoesNotExposeCredential(t *testing.T) {
+	const secret = "fixture-live-verification-token"
+	s := &Server{}
+	e := echo.New()
+	c := e.NewContext(httptest.NewRequest("POST", "/", nil), httptest.NewRecorder())
+	c.SetParamNames("token")
+	c.SetParamValues(secret)
+	key := s.turnstileTokenRateLimitKey(c)
+	if key == "" || strings.Contains(key, secret) {
+		t.Fatalf("unsafe limiter key: %s", key)
+	}
+	if key != s.turnstileTokenRateLimitKey(c) {
+		t.Fatal("unstable limiter key")
+	}
+}

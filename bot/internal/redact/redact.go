@@ -12,6 +12,8 @@ var (
 	telegramAPIURLTokenPattern = regexp.MustCompile(`(?i)(https?://api\.telegram\.org/(?:file/)?bot)[0-9]{5,}:[A-Za-z0-9_-]{20,}`)
 	telegramBotTokenPattern    = regexp.MustCompile(`(?i)(\bbot)[0-9]{5,}:[A-Za-z0-9_-]{20,}`)
 	telegramTokenPattern       = regexp.MustCompile(`\b[0-9]{5,}:[A-Za-z0-9_-]{20,}`)
+	urlUserinfoPattern         = regexp.MustCompile(`(?i)(https?://)[^/@\s"']+@`)
+	credentialQueryPattern     = regexp.MustCompile(`(?i)([?&](?:api[_-]?key|access[_-]?token|token|secret|password|key|signature)=)[^&#\s"']*`)
 )
 
 // Text removes Telegram bot tokens from values before they are logged, stored,
@@ -22,7 +24,9 @@ func Text(value string) string {
 	}
 	value = telegramAPIURLTokenPattern.ReplaceAllString(value, `${1}[REDACTED]`)
 	value = telegramBotTokenPattern.ReplaceAllString(value, `${1}[REDACTED]`)
-	return telegramTokenPattern.ReplaceAllString(value, `[REDACTED]`)
+	value = telegramTokenPattern.ReplaceAllString(value, `[REDACTED]`)
+	value = urlUserinfoPattern.ReplaceAllString(value, `${1}[REDACTED]@`)
+	return credentialQueryPattern.ReplaceAllString(value, `${1}[REDACTED]`)
 }
 
 func ErrorString(err error) string {

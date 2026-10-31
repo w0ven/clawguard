@@ -44,3 +44,13 @@ test('direct case link preserves Telegram fragment and security headers are scop
  const mini=await request.get('/appeal/mini');expect(mini.headers()['referrer-policy']).toBe('no-referrer');expect(mini.headers()['content-security-policy']).toBe("frame-ancestors 'self' https://web.telegram.org");
  const home=await request.get('/');expect(home.headers()['content-security-policy']??'').not.toContain('web.telegram.org');
 });
+
+test('draft exit is confirmed and pending challenge cannot switch cases', async ({page}) => {
+ await page.route('**/*', r=>new URL(r.request().url()).hostname==='127.0.0.1'?r.continue():r.abort());
+ await page.route('https://telegram.org/js/telegram-web-app.js*',r=>r.fulfill({contentType:'application/javascript',body:`window.Telegram={WebApp:{initData:'signed',ready(){},expand(){},BackButton:{onClick(){},offClick(){},show(){},hide(){}}}}`}));
+ let release!:()=>void; const pending=new Promise<void>(resolve=>{release=resolve}); let challenges=0;
+ await page.route('**/api/appeal/mini/**',async r=>{const path=new URL(r.request().url()).pathname;if(path.endsWith('/list'))return r.fulfill({json:{cases:[item],has_more:false}});if(path.endsWith('/case'))return r.fulfill({json:{case:item,appeal:null}});if(path.endsWith('/challenge')){challenges++;await pending;return r.fulfill({status:503,json:{error:'暂不可用'}})}return r.abort()});
+ await page.goto('/appeal/mini'); await page.getByRole('button',{name:/CASE-42/}).click(); await page.getByLabel('申诉理由（必填）').fill('草稿');
+ page.once('dialog',d=>d.dismiss()); await page.getByRole('button',{name:'返回处理记录'}).click(); await expect(page.getByLabel('申诉理由（必填）')).toHaveValue('草稿');
+ await page.getByRole('button',{name:'下一步：安全验证'}).click(); await expect(page.getByRole('button',{name:'返回处理记录'})).toBeDisabled(); expect(challenges).toBe(1); release(); await expect(page.locator('p[role="alert"]')).toContainText('暂不可用'); await expect(page.getByLabel('申诉理由（必填）')).toHaveValue('草稿');
+});
