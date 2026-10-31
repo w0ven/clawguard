@@ -1024,8 +1024,14 @@ func (s *Service) startVerification(chat *tele.Chat, user *tele.User, joinEventM
 		s.logger.Debug("skip duplicate join event", zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
 		return nil
 	}
-	if err := s.rememberMembershipSession(ctx, chat.ID, user.ID, membershipGeneration); err != nil && s.logger != nil {
-		s.logger.Warn("persist membership session failed", zap.Error(err), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID), zap.String("generation", membershipGeneration))
+	if err := s.rememberMembershipSession(ctx, chat.ID, user.ID, membershipGeneration); err != nil {
+		if s.logger != nil {
+			s.logger.Warn("persist membership session failed", zap.Error(err), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID), zap.String("generation", membershipGeneration))
+		}
+		if policy.Verify.Enabled && policy.Verify.Method == "turnstile_hcaptcha" {
+			s.releaseVerificationJoinLock(ctx, chat.ID, user.ID)
+			return err
+		}
 	}
 
 	subject := joinProtectionSubject{}
@@ -1095,6 +1101,14 @@ func (s *Service) startVerification(chat *tele.Chat, user *tele.User, joinEventM
 		return nil
 	}
 
+	if policy.Verify.Method == "turnstile_hcaptcha" && (!s.cfg.DualCaptchaConfigured() || membershipGeneration == "") {
+		s.joinProtector.ReleasePending(chat.ID)
+		s.upsertJoinSideEffects(ctx, chat, user)
+		s.logger.Warn("dual verification unavailable; member not restricted", zap.Int64("chat_id", chat.ID))
+		s.sendBotPermissionWarningToChat(chat, "双重验证未配置或入群身份不可用，未限制新成员；请联系管理员检查配置。")
+		return nil
+	}
+
 	s.upsertJoinSideEffects(ctx, chat, user)
 
 	if s.exemptUser(ctx, chat, user) {
@@ -1132,7 +1146,8 @@ func (s *Service) startVerification(chat *tele.Chat, user *tele.User, joinEventM
 	}
 
 	verifyStartedAt := time.Now()
-	if err := s.startVerificationPrompt(ctx, chat, user, policy); err != nil {
+	promptCtx := context.WithValue(ctx, dualCaptchaGenerationKey{}, membershipGeneration)
+	if err := s.startVerificationPrompt(promptCtx, chat, user, policy); err != nil {
 		s.joinProtector.ReleasePending(chat.ID)
 		if cleanupErr := s.handleVerificationPromptFailure(ctx, chat, user, policy, err, membershipGeneration); cleanupErr != nil {
 			s.releaseVerificationJoinLock(ctx, chat.ID, user.ID)
@@ -1168,6 +1183,8 @@ func (s *Service) startVerificationPrompt(ctx context.Context, chat *tele.Chat, 
 		return s.startRandomVerification(ctx, chat, user, policy)
 	case "turnstile":
 		return s.startTurnstileVerification(ctx, chat, user, policy)
+	case "turnstile_hcaptcha":
+		return s.startDualCaptchaVerification(ctx, chat, user, policy)
 	default:
 		s.logger.Warn(
 			"unknown verification method, fallback to button",
@@ -2160,6 +2177,15 @@ func (s *Service) HandleVerificationExpiry(ctx context.Context, pending store.Pe
 	}
 	if !current {
 		return VerificationExpiryResult{}, nil
+	}
+	if pending.Method == "turnstile_hcaptcha" {
+		passed, err := s.queries.DualCaptchaPassed(ctx, pending.ID)
+		if err != nil {
+			return verificationExpiryRetry(time.Now().Add(time.Minute), "dual verification state unavailable"), nil
+		}
+		if passed {
+			return verificationExpiryRetry(time.Now().Add(time.Minute), "dual verification passed; permission recovery pending"), nil
+		}
 	}
 	failAction := verificationFailActionSnapshot(pending.Payload, policy.Verify.FailAction)
 	action, err := s.applyVerificationFailAction(chat, user, failAction)

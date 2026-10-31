@@ -42,6 +42,7 @@ import { useDirtyGuard, useDirtyNavigation } from "@/components/dirty-guard";
 import { ScheduledMessagesEditor } from "@/components/scheduled-messages-editor";
 import { JoinProtectionEditor } from "@/components/join-protection-editor";
 import { GroupExemptUsers } from "@/components/group-exempt-users";
+import { DualCaptchaAvailability } from "@/components/dual-captcha-availability";
 import { Save, ChevronDown, ChevronRight } from "lucide-react";
 
 type FieldKind =
@@ -92,6 +93,7 @@ export const fieldDescriptors: FieldDescriptor[] = [
       { label: "算术题（图片防 OCR）", value: "math_image" },
       { label: "Emoji 四选一", value: "random" },
       { label: "Cloudflare Turnstile", value: "turnstile" },
+      { label: "Turnstile + hCaptcha 双重验证", value: "turnstile_hcaptcha" },
     ],
   },
   {
@@ -1913,6 +1915,7 @@ function ConfigFieldChildRow({
             {field.description}
           </p>
         )}
+        {field.path.join(".") === "verify.method" && <DualCaptchaAvailability />}
         <ConfigFieldMeta value={value} inherited={inherited} />
         <ConfigInheritanceToggle
           inherited={inherited}

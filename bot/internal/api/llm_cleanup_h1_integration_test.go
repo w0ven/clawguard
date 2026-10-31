@@ -21,6 +21,7 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/pressly/goose/v3"
 
+	"github.com/openclaw/clawguard/internal/config"
 	"github.com/openclaw/clawguard/internal/store"
 )
 
@@ -434,7 +435,7 @@ func putGlobalConfigSection(ctx context.Context, queries *store.Queries, req glo
 		if err != nil {
 			return err
 		}
-		if err := validateGlobalPolicyUpdate(ctx, tx, next); err != nil {
+		if err := validateGlobalPolicyUpdate(ctx, tx, next, current.Config, config.Config{}); err != nil {
 			return globalConfigValidationError{err: err}
 		}
 		updated, err = tx.UpdateGlobalConfig(ctx, store.UpdateGlobalConfigParams{Config: next})

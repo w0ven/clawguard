@@ -12,7 +12,7 @@ type AIMuteClaim struct {
 }
 
 func (q *Queries) ReserveAIMute(ctx context.Context, chat, user, decision, until int64, token string) error {
-	_, err := q.db.Exec(ctx, `WITH old AS (UPDATE ai_mute_review_claims SET state='conflict' WHERE decision_id IN (SELECT decision_id FROM ai_mute_ownership WHERE chat_id=$1 AND user_id=$2) AND state IN ('claimed','telegram_done')) INSERT INTO ai_mute_ownership(chat_id,user_id,decision_id,until_date,token,state) VALUES($1,$2,$3,$4,$5,'pending') ON CONFLICT(chat_id,user_id) DO UPDATE SET decision_id=excluded.decision_id,until_date=excluded.until_date,token=excluded.token,state='pending',lease_until=NULL`, chat, user, decision, until, token)
+	_, err := q.db.Exec(ctx, `WITH dual AS (UPDATE dual_captcha_claims AS claim SET state='conflict',updated_at=now() FROM pending_verifications AS pending WHERE claim.pending_id=pending.id AND pending.chat_id=$1 AND pending.user_id=$2 AND claim.state IN ('validating','verified','applying')), old AS (UPDATE ai_mute_review_claims SET state='conflict' WHERE decision_id IN (SELECT decision_id FROM ai_mute_ownership WHERE chat_id=$1 AND user_id=$2) AND state IN ('claimed','telegram_done')) INSERT INTO ai_mute_ownership(chat_id,user_id,decision_id,until_date,token,state) VALUES($1,$2,$3,$4,$5,'pending') ON CONFLICT(chat_id,user_id) DO UPDATE SET decision_id=excluded.decision_id,until_date=excluded.until_date,token=excluded.token,state='pending',lease_until=NULL`, chat, user, decision, until, token)
 	return err
 }
 func (q *Queries) InvalidateAIMute(ctx context.Context, chat, user int64) error {

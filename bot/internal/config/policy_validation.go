@@ -219,7 +219,7 @@ func ValidateGuardPolicy(policy GuardPolicy) error {
 	if err := ValidateJoinProtectionPolicy(policy.JoinProtection); err != nil {
 		return fmt.Errorf("join_protection: %w", err)
 	}
-	if !oneOf(policy.Verify.Method, "button", "math", "math_image", "random", "turnstile") {
+	if !oneOf(policy.Verify.Method, "button", "math", "math_image", "random", "turnstile", "turnstile_hcaptcha") {
 		return fmt.Errorf("verify.method has unsupported value %q", policy.Verify.Method)
 	}
 	if !oneOf(policy.Verify.FailAction, "kick", "ban", "mute_permanent") {

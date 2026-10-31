@@ -63,7 +63,7 @@
 
 | 特性 | 描述 |
 | :--- | :--- |
-| 🔐 **入群验证** | 按钮、算术题、图片算术题、Emoji 四选一、Cloudflare Turnstile；任务带租约，重启后续跑。 |
+| 🔐 **入群验证** | 按钮、算术题、图片算术题、Emoji 四选一、Cloudflare Turnstile，或 Turnstile + hCaptcha 双重验证；任务带租约，重启后续跑。 |
 | 🚨 **洪泛防护** | 短窗口集中涌入时临时处理新账号，不波及群内老成员；Redis Lua 原子状态机。 |
 | 🧹 **规则过滤** | 关键词、正则、用户名黑名单、链接白名单、未毕业加严、速率限制、警告升级。 |
 | 🤖 **CAS 联动** | 同步 Combot Anti-Spam 黑名单，入群命中可直接封禁。 |
@@ -160,7 +160,7 @@ CLAWGUARD_TAG=sha-92b751a
 | PostgreSQL | `POSTGRES_*` | 数据库 |
 | Redis | `REDIS_*` | 状态、限流、入群防护 |
 | Auth | `JWT_SECRET`, `ENCRYPTION_KEY` | 登录 JWT 与 Provider Key 加密 |
-| Turnstile | `TURNSTILE_SITE_KEY`, `TURNSTILE_SECRET_KEY` | 入群验证码（可选） |
+| 验证码 | `TURNSTILE_SITE_KEY`, `TURNSTILE_SECRET_KEY`, `HCAPTCHA_SITE_KEY`, `HCAPTCHA_SECRET_KEY` | 双重验证需两家的站点密钥及服务端密钥（可选） |
 | Runtime | `CLAWGUARD_TAG` | 固定镜像版本，生产不要用漂浮的 `latest` |
 | Web build | `NEXT_PUBLIC_BOT_USERNAME`, `NEXT_PUBLIC_TURNSTILE_SITE_KEY` | **构建时**写入前端 bundle |
 
@@ -278,6 +278,9 @@ Fork 或离线构建见 [本地开发](./docs/development.md)。
 | 图片算术题 | 渲染题目图；失败或超时会删原图 |
 | Emoji 四选一 | 选对指定表情 |
 | Turnstile | Cloudflare 人机验证 |
+| Turnstile + hCaptcha | 两家均由服务端校验通过才放行 |
+
+双重验证需在两家控制台为 `PUBLIC_BASE_URL` 的主机名配置站点，填入上述四个密钥后重启 Bot，再按群选择该方式；站点密钥通过运行时接口提供，服务端密钥不发往浏览器，不需要重建 Web。未配置时无法保存该方式；若运行时密钥缺失，不会以按钮降级或因缺密钥处罚新成员。原有 Turnstile 单验证仍使用构建时 `NEXT_PUBLIC_TURNSTILE_SITE_KEY`。双验证不改变现有群或正在进行中的验证；调整超时请在群策略中明确设置。验证已通过而 Telegram 权限恢复失败时，可刷新两项并重试，若出现独立封禁或权限归属冲突需管理员核查。两家令牌一次性使用，任一失败后须刷新两项。
 
 可选：入群前跑 CAS、Bio 关键词 / AI。AI 简介审核先走模型链，仅全部失败时由已启用的 AdKiller 兜底；关键词模式不调用 AdKiller。
 

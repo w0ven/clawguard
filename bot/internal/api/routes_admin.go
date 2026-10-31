@@ -188,7 +188,7 @@ func (s *Server) handlePutGroupConfig(c echo.Context) error {
 	if err := validateJoinProtectionConfigDocument(nextConfig); err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": redact.ErrorString(err)})
 	}
-	if err := validateGroupPolicyUpdate(c.Request().Context(), s.botService.Queries(), nextConfig); err != nil {
+	if err := validateGroupPolicyUpdate(c.Request().Context(), s.botService.Queries(), nextConfig, group.Config, s.cfg); err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": redact.ErrorString(err)})
 	}
 
@@ -1598,7 +1598,7 @@ func normalizeJSONBody(c echo.Context) ([]byte, error) {
 	return raw, nil
 }
 
-func validateGroupPolicyUpdate(ctx context.Context, queries *store.Queries, groupConfig []byte) error {
+func validateGroupPolicyUpdate(ctx context.Context, queries *store.Queries, groupConfig, previous []byte, cfg config.Config) error {
 	if err := config.ValidatePolicyDocument(groupConfig); err != nil {
 		return err
 	}
@@ -1610,15 +1610,31 @@ func validateGroupPolicyUpdate(ctx context.Context, queries *store.Queries, grou
 	if err == nil {
 		documents = append(documents, globalConfig.Config)
 	}
+	priorDocuments := append(append([][]byte(nil), documents...), previous)
+	priorPolicy, err := config.MergePolicyDocuments(priorDocuments...)
+	if err != nil {
+		return err
+	}
 	documents = append(documents, groupConfig)
 	policy, err := config.MergePolicyDocuments(documents...)
 	if err != nil {
 		return err
 	}
-	return config.ValidateGuardPolicy(policy)
+	if err := config.ValidateGuardPolicy(policy); err != nil {
+		return err
+	}
+	return validateDualCaptchaAvailability(priorPolicy, policy, cfg)
 }
 
-func validateGlobalPolicyUpdate(ctx context.Context, queries *store.Queries, globalConfig []byte) error {
+func validateDualCaptchaAvailability(previous, next config.GuardPolicy, cfg config.Config) error {
+	newSelection := previous.Verify.Method != "turnstile_hcaptcha" || (!previous.Verify.Enabled && next.Verify.Enabled)
+	if next.Verify.Method == "turnstile_hcaptcha" && newSelection && !cfg.DualCaptchaConfigured() {
+		return fmt.Errorf("双重验证不可用：请先配置 Turnstile 和 hCaptcha 的站点密钥及服务端密钥")
+	}
+	return nil
+}
+
+func validateGlobalPolicyUpdate(ctx context.Context, queries *store.Queries, globalConfig, previous []byte, cfg config.Config) error {
 	if err := config.ValidatePolicyDocument(globalConfig); err != nil {
 		return err
 	}
@@ -1627,6 +1643,13 @@ func validateGlobalPolicyUpdate(ctx context.Context, queries *store.Queries, glo
 		return err
 	}
 	if err := config.ValidateGuardPolicy(policy); err != nil {
+		return err
+	}
+	priorPolicy, err := config.MergePolicyDocuments(previous)
+	if err != nil {
+		return err
+	}
+	if err := validateDualCaptchaAvailability(priorPolicy, policy, cfg); err != nil {
 		return err
 	}
 
@@ -1641,6 +1664,13 @@ func validateGlobalPolicyUpdate(ctx context.Context, queries *store.Queries, glo
 		}
 		if err := config.ValidateGuardPolicy(policy); err != nil {
 			return fmt.Errorf("group %d effective config is invalid: %w", group.ChatID, err)
+		}
+		priorPolicy, err := config.MergePolicyDocuments(previous, group.Config)
+		if err != nil {
+			return err
+		}
+		if err := validateDualCaptchaAvailability(priorPolicy, policy, cfg); err != nil {
+			return fmt.Errorf("group %d: %w", group.ChatID, err)
 		}
 	}
 	return nil

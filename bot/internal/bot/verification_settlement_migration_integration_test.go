@@ -59,10 +59,14 @@ func TestVerificationCleanupSettlementMigrationPreservesRecovery(t *testing.T) {
 		t.Fatal("runtime.Caller failed")
 	}
 	dir := filepath.Join(filepath.Dir(file), "..", "..", "migrations")
-	if err := goose.DownContext(ctx, db, dir); err != nil {
+	latest, err := goose.GetDBVersionContext(ctx, db)
+	if err != nil || latest < 46 {
+		t.Fatalf("initial version=%d err=%v", latest, err)
+	}
+	if err := goose.DownToContext(ctx, db, dir, 44); err != nil {
 		t.Fatalf("goose rollback: %v", err)
 	}
-	// Other packages may supply migrations 042–045 before integration.
+	// Roll back through 046 even when later migrations have been added.
 	if version, err := goose.GetDBVersionContext(ctx, db); err != nil || version <= 0 || version >= 46 {
 		t.Fatalf("rollback version=%d err=%v", version, err)
 	}
@@ -72,7 +76,7 @@ func TestVerificationCleanupSettlementMigrationPreservesRecovery(t *testing.T) {
 	if err := goose.UpContext(ctx, db, dir); err != nil {
 		t.Fatalf("goose re-upgrade: %v", err)
 	}
-	if version, err := goose.GetDBVersionContext(ctx, db); err != nil || version != 46 {
+	if version, err := goose.GetDBVersionContext(ctx, db); err != nil || version != latest {
 		t.Fatalf("re-upgrade version=%d err=%v", version, err)
 	}
 	if got := snapshot(); got != before {

@@ -64,6 +64,13 @@ WHERE chat_id = $1 AND user_id = $2
 RETURNING chat_id, user_id, username, first_name, last_name, joined_at, updated_at, status_changed_at, status, score, messages_checked, messages_clean, graduated_at, banned_at, banned_reason, notes, is_bot;
 
 -- name: UpdateUserTrustStatus :one
+WITH invalidated AS (
+    UPDATE dual_captcha_claims AS claim SET state='conflict',updated_at=now()
+    FROM pending_verifications AS pending
+    WHERE $3::text='banned' AND claim.pending_id=pending.id
+      AND pending.chat_id=$1 AND pending.user_id=$2
+      AND claim.state IN ('validating','verified','applying')
+)
 UPDATE user_trust
 SET status = $3,
     score = $4,
