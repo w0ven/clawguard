@@ -747,12 +747,12 @@ func (s *Service) handleChatMemberUpdate(c tele.Context) error {
 		return nil
 	}
 	actionsPaused := state.ActionsPaused
-	if handled, err := s.handleDeletedAccountJoin(ctx, update.Chat, member.User, policy, actionsPaused); err != nil {
+	if handled, err := s.handleDeletedAccountJoin(ctx, update.Chat, member.User, policy, actionsPaused, generation); err != nil {
 		return err
 	} else if handled {
 		return nil
 	}
-	if s.handleUngraduatedInviteChatMember(ctx, update, member.User, policy) {
+	if s.handleUngraduatedInviteChatMember(ctx, update, member.User, policy, generation) {
 		return nil
 	}
 
@@ -760,7 +760,11 @@ func (s *Service) handleChatMemberUpdate(c tele.Context) error {
 		return s.handleOtherBotJoined(update, member.User)
 	}
 
-	return s.startVerification(update.Chat, member.User, nil, generation)
+	joinedAt := time.Time{}
+	if update.Unixtime > 0 {
+		joinedAt = time.Unix(update.Unixtime, 0)
+	}
+	return s.startVerificationAt(update.Chat, member.User, nil, generation, joinedAt)
 }
 
 func (s *Service) handleOtherBotJoined(update *tele.ChatMemberUpdate, user *tele.User) error {
@@ -971,6 +975,10 @@ func (s *Service) handleBotChatMemberUpdate(update *tele.ChatMemberUpdate) error
 }
 
 func (s *Service) startVerification(chat *tele.Chat, user *tele.User, joinEventMessage *tele.Message, membershipGeneration string) error {
+	return s.startVerificationAt(chat, user, joinEventMessage, membershipGeneration, time.Time{})
+}
+
+func (s *Service) startVerificationAt(chat *tele.Chat, user *tele.User, joinEventMessage *tele.Message, membershipGeneration string, joinedAt time.Time) error {
 	if chat == nil || user == nil {
 		return nil
 	}
@@ -1090,7 +1098,7 @@ func (s *Service) startVerification(chat *tele.Chat, user *tele.User, joinEventM
 		trust, trustOK := s.upsertJoinSideEffects(ctx, chat, user)
 		s.logger.Info("verification disabled by policy, skip flow", zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
 		if trustOK && !actionsPaused {
-			s.applyUngraduatedPermissionRestriction(chat, user, policy, trust, "join_without_verification")
+			s.applyUngraduatedPermissionRestriction(ctx, chat, user, policy, trust, "join_without_verification")
 		}
 		return nil
 	}
@@ -1119,11 +1127,18 @@ func (s *Service) startVerification(chat *tele.Chat, user *tele.User, joinEventM
 		Rights: tele.NoRights(),
 	}
 	restrictStartedAt := time.Now()
-	if err := restrictVerificationWithRecovery(ctx,
+	release, lockErr := s.AcquireModerationReview(ctx, chat.ID, user.ID)
+	if lockErr != nil {
+		s.joinProtector.ReleasePending(chat.ID)
+		return lockErr
+	}
+	restrictErr := restrictVerificationWithRecovery(ctx,
 		func() error { return s.bot.Restrict(chat, &member) },
 		func() (*tele.ChatMember, error) { return s.bot.ChatMemberOf(chat, user) },
 		waitVerificationRetry,
-	); err != nil {
+	)
+	release()
+	if err := restrictErr; err != nil {
 		s.joinProtector.ReleasePending(chat.ID)
 		readable := normalizeTelegramActionError("restrict", err)
 		s.logger.Error("restrict new member", zap.Error(readable), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
@@ -1147,6 +1162,11 @@ func (s *Service) startVerification(chat *tele.Chat, user *tele.User, joinEventM
 
 	verifyStartedAt := time.Now()
 	promptCtx := context.WithValue(ctx, dualCaptchaGenerationKey{}, membershipGeneration)
+	deadlineStart := flowStartedAt
+	if !joinedAt.IsZero() && joinedAt.Before(deadlineStart) {
+		deadlineStart = joinedAt
+	}
+	promptCtx = context.WithValue(promptCtx, dualCaptchaStartTimeKey{}, deadlineStart)
 	if err := s.startVerificationPrompt(promptCtx, chat, user, policy); err != nil {
 		s.joinProtector.ReleasePending(chat.ID)
 		if cleanupErr := s.handleVerificationPromptFailure(ctx, chat, user, policy, err, membershipGeneration); cleanupErr != nil {
@@ -1155,7 +1175,7 @@ func (s *Service) startVerification(chat *tele.Chat, user *tele.User, joinEventM
 		}
 		return nil
 	}
-	s.startAsyncVerificationChecks(chat, user, policy)
+	s.startAsyncVerificationChecks(chat, user, policy, membershipGeneration)
 	s.logger.Info("verification step completed",
 		zap.Int64("chat_id", chat.ID),
 		zap.Int64("user_id", user.ID),
@@ -1200,7 +1220,7 @@ func int64Ptr(v int64) *int64 {
 	return &v
 }
 
-func (s *Service) startAsyncVerificationChecks(chat *tele.Chat, user *tele.User, policy config.GuardPolicy) {
+func (s *Service) startAsyncVerificationChecks(chat *tele.Chat, user *tele.User, policy config.GuardPolicy, membershipGeneration string) {
 	go func() {
 		parent := s.lifecycleCtx
 		if parent == nil {
@@ -1230,16 +1250,17 @@ func (s *Service) startAsyncVerificationChecks(chat *tele.Chat, user *tele.User,
 				s.logger.Warn("cas lookup failed, skip", zap.Error(err), zap.Int64("user_id", user.ID))
 			} else if banned {
 				if err := s.handleAsyncVerificationMatch(ctx, asyncVerificationMatch{
-					chat:         chat,
-					user:         user,
-					policy:       policy,
-					rule:         "cas_banned",
-					matched:      stringifyCASResult(result),
-					messageText:  stringifyCASResult(result),
-					feedbackText: "CAS 黑名单",
-					feedbackKind: "cas",
-					logLabel:     "cas matched user",
-					decisionMode: "cas",
+					chat:                 chat,
+					user:                 user,
+					policy:               policy,
+					rule:                 "cas_banned",
+					matched:              stringifyCASResult(result),
+					messageText:          stringifyCASResult(result),
+					feedbackText:         "CAS 黑名单",
+					feedbackKind:         "cas",
+					logLabel:             "cas matched user",
+					decisionMode:         "cas",
+					membershipGeneration: membershipGeneration,
 				}); err != nil {
 					s.logger.Error("handle cas match failed", zap.Error(err), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
 				}
@@ -1286,17 +1307,18 @@ func (s *Service) startAsyncVerificationChecks(chat *tele.Chat, user *tele.User,
 				decisionMode = "join_adkiller_text_fallback"
 			}
 			if err := s.handleAsyncVerificationMatch(actionCtx, asyncVerificationMatch{
-				chat:         chat,
-				user:         user,
-				policy:       policy,
-				rule:         "profile_match",
-				matched:      stringPtr(matched),
-				messageText:  stringPtr(string(payload)),
-				feedbackText: "个人简介违规：" + matched,
-				feedbackKind: "profile",
-				logLabel:     "profile matched user",
-				aiOutput:     aiOutput,
-				decisionMode: decisionMode,
+				chat:                 chat,
+				user:                 user,
+				policy:               policy,
+				rule:                 "profile_match",
+				matched:              stringPtr(matched),
+				messageText:          stringPtr(string(payload)),
+				feedbackText:         "个人简介违规：" + matched,
+				feedbackKind:         "profile",
+				logLabel:             "profile matched user",
+				aiOutput:             aiOutput,
+				decisionMode:         decisionMode,
+				membershipGeneration: membershipGeneration,
 			}); err != nil {
 				s.logger.Error("handle profile match failed", zap.Error(err), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
 			}
@@ -1371,17 +1393,18 @@ func (s *Service) deleteJoinEventMessageAsync(chat *tele.Chat, user *tele.User, 
 }
 
 type asyncVerificationMatch struct {
-	chat         *tele.Chat
-	user         *tele.User
-	policy       config.GuardPolicy
-	rule         string
-	matched      *string
-	messageText  *string
-	feedbackText string
-	feedbackKind string
-	logLabel     string
-	aiOutput     *ai.CheckOutput
-	decisionMode string
+	chat                 *tele.Chat
+	user                 *tele.User
+	policy               config.GuardPolicy
+	rule                 string
+	matched              *string
+	messageText          *string
+	feedbackText         string
+	feedbackKind         string
+	logLabel             string
+	aiOutput             *ai.CheckOutput
+	decisionMode         string
+	membershipGeneration string
 }
 
 type asyncVerificationMatchOps struct {
@@ -1407,9 +1430,14 @@ func (s *Service) handleAsyncVerificationMatch(ctx context.Context, match asyncV
 			match.decisionMode = "join_ai"
 		}
 	}
+	release, lockErr := s.AcquireModerationReview(ctx, match.chat.ID, match.user.ID)
+	if lockErr != nil {
+		return lockErr
+	}
+	defer release()
 	var profileDecisionID int64
-	return performAsyncVerificationMatch(ctx, asyncVerificationMatchOps{
-		banUser:                  s.banUser,
+	err := performAsyncVerificationMatch(ctx, asyncVerificationMatchOps{
+		banUser:                  func(chat *tele.Chat, user *tele.User) error { return s.banUserWithOwnershipLocked(chat, user, false) },
 		awaitPendingVerification: s.awaitPendingVerification,
 		deleteVerificationMessage: func(chat *tele.Chat, messageID *int64) {
 			s.deleteVerificationMessage(chat, messageID)
@@ -1458,6 +1486,13 @@ func (s *Service) handleAsyncVerificationMatch(ctx context.Context, match asyncV
 		},
 		logger: s.logger,
 	}, match)
+	if err != nil || match.membershipGeneration == "" || match.user.IsBot {
+		return err
+	}
+	key := fmt.Sprintf("%d:%d:%s:%s", match.chat.ID, match.user.ID, match.membershipGeneration, match.rule)
+	ownership, _ := json.Marshal(map[string]any{"membership_generation": match.membershipGeneration, "rule": match.rule, "ai_decision_id": profileDecisionID, "automatic_reversal": "manual_review"})
+	_, caseErr := s.queries.RecordModerationCase(ctx, store.ModerationCaseInput{SourceKey: "join_check:" + key, SourceKind: "join_check", SourceID: key, ChatID: match.chat.ID, UserID: match.user.ID, Action: "ban", Result: "executed", Explanation: "入群资料检查", Ownership: ownership})
+	return caseErr
 }
 
 func performAsyncVerificationMatch(ctx context.Context, ops asyncVerificationMatchOps, match asyncVerificationMatch) error {
@@ -1652,6 +1687,11 @@ func (s *Service) startRandomVerification(ctx context.Context, chat *tele.Chat, 
 func (s *Service) storePendingVerification(ctx context.Context, chatID int64, user *tele.User, method string, payload []byte, messageID int, timeoutSeconds int, failAction string) error {
 	joinMessageID := int64(messageID)
 	expiresAt := time.Now().Add(time.Duration(timeoutSeconds) * time.Second)
+	if method == "turnstile_hcaptcha" {
+		if started, ok := ctx.Value(dualCaptchaStartTimeKey{}).(time.Time); ok && !started.IsZero() {
+			expiresAt = started.Add(time.Duration(timeoutSeconds) * time.Second)
+		}
+	}
 	payload, err := withVerificationFailActionSnapshot(payload, failAction)
 	if err != nil {
 		return fmt.Errorf("snapshot verification fail action: %w", err)
@@ -2023,6 +2063,11 @@ func (s *Service) handleVerifyRandom(c tele.Context) error {
 }
 
 func (s *Service) completeVerification(ctx context.Context, chat *tele.Chat, user *tele.User, pending store.PendingVerification, resultKind ...string) error {
+	release, err := s.AcquireModerationReview(ctx, chat.ID, user.ID)
+	if err != nil {
+		return err
+	}
+	defer release()
 	manual := len(resultKind) > 0 && resultKind[0] == "admin_pass"
 	if !manual && s.exemptUser(ctx, chat, user) {
 		return errExemptPending
@@ -2042,7 +2087,7 @@ func (s *Service) completeVerification(ctx context.Context, chat *tele.Chat, use
 		s.logger.Warn("load guard policy before verification permission sync failed, using defaults", zap.Error(polErr), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
 		policy = config.DefaultPolicy
 	}
-	if err := s.applyVerificationPassPermissions(ctx, chat, user, policy, manual); err != nil {
+	if err := s.applyVerificationPassPermissionsLocked(ctx, chat, user, policy, manual); err != nil {
 		if restoreErr := s.restorePendingVerification(ctx, pending); restoreErr != nil {
 			s.logger.Error("restore pending verification after restrict failure", zap.Error(restoreErr), zap.Int64("chat_id", pending.ChatID), zap.Int64("user_id", pending.UserID))
 		}
@@ -2102,6 +2147,11 @@ func (s *Service) RecoverVerificationCleanupSettlements(ctx context.Context, lim
 }
 
 func (s *Service) HandleVerificationExpiry(ctx context.Context, pending store.PendingVerification) (VerificationExpiryResult, error) {
+	release, lockErr := s.AcquireModerationReview(ctx, pending.ChatID, pending.UserID)
+	if lockErr != nil {
+		return verificationExpiryRetry(time.Now().Add(time.Minute), "moderation busy"), nil
+	}
+	defer release()
 	key := verificationCleanupKey(pending)
 	completed, err := s.queries.PendingVerificationCleanupExists(ctx, key)
 	if err != nil {
@@ -2187,9 +2237,23 @@ func (s *Service) HandleVerificationExpiry(ctx context.Context, pending store.Pe
 			return verificationExpiryRetry(time.Now().Add(time.Minute), "dual verification passed; permission recovery pending"), nil
 		}
 	}
-	failAction := verificationFailActionSnapshot(pending.Payload, policy.Verify.FailAction)
-	action, err := s.applyVerificationFailAction(chat, user, failAction)
+	review, err := s.queries.VerificationPartialRequiresReview(ctx, pending.ID)
 	if err != nil {
+		return verificationExpiryRetry(time.Now().Add(time.Minute), "verification case unavailable"), nil
+	}
+	if review {
+		return verificationExpiryRetry(time.Now().Add(time.Hour), "verification action requires administrator review"), nil
+	}
+	failAction := verificationFailActionSnapshot(pending.Payload, policy.Verify.FailAction)
+	action, err := s.applyVerificationFailActionLocked(chat, user, failAction)
+	if err != nil {
+		var applied *actionAppliedError
+		if errors.As(err, &applied) {
+			if recordErr := s.recordVerificationCase(ctx, pending, user, "kick", "verify_timeout", "partial"); recordErr != nil {
+				return VerificationExpiryResult{}, errors.Join(err, recordErr)
+			}
+			return verificationExpiryRetry(time.Now().Add(time.Hour), "verification action requires administrator review"), nil
+		}
 		if isTerminalTelegramCleanupError(err) {
 			action = "already_absent"
 		} else {
@@ -2257,12 +2321,33 @@ func (s *Service) deleteProcessedPendingVerification(ctx context.Context, pendin
 }
 
 func (s *Service) failVerificationImmediately(ctx context.Context, chat *tele.Chat, user *tele.User, pending store.PendingVerification, failAction, rule string) error {
+	release, err := s.AcquireModerationReview(ctx, chat.ID, user.ID)
+	if err != nil {
+		return err
+	}
+	defer release()
 	if rule != "verify_admin_reject" && s.exemptUser(ctx, chat, user) {
 		return errExemptPending
 	}
-	action, err := s.applyVerificationFailAction(chat, user, failAction)
+	review, err := s.queries.VerificationPartialRequiresReview(ctx, pending.ID)
 	if err != nil {
 		return err
+	}
+	if review {
+		return fmt.Errorf("验证处理部分完成，请联系管理员核查")
+	}
+	action, err := s.applyVerificationFailActionLocked(chat, user, failAction)
+	if err != nil {
+		var applied *actionAppliedError
+		if errors.As(err, &applied) {
+			if recordErr := s.recordVerificationCase(ctx, pending, user, "kick", rule, "partial"); recordErr != nil {
+				return errors.Join(err, recordErr)
+			}
+		}
+		return err
+	}
+	if err := s.recordVerificationCase(ctx, pending, user, action, rule); err != nil {
+		return fmt.Errorf("record verification case: %w", err)
 	}
 
 	s.finalizeVerificationPrompt(chat, pending, verificationResultHTML(user, verificationFailKind(rule)))
@@ -2294,6 +2379,17 @@ func (s *Service) failVerificationImmediately(ctx context.Context, chat *tele.Ch
 }
 
 func (s *Service) applyVerificationFailAction(chat *tele.Chat, user *tele.User, failAction string) (string, error) {
+	if chat == nil || user == nil {
+		return "", fmt.Errorf("invalid verification subject")
+	}
+	release, err := s.AcquireModerationReview(context.Background(), chat.ID, user.ID)
+	if err != nil {
+		return "", err
+	}
+	defer release()
+	return s.applyVerificationFailActionLocked(chat, user, failAction)
+}
+func (s *Service) applyVerificationFailActionLocked(chat *tele.Chat, user *tele.User, failAction string) (string, error) {
 	member := &tele.ChatMember{User: user}
 
 	switch failAction {
@@ -2332,12 +2428,17 @@ func (s *Service) applyVerificationFailAction(chat *tele.Chat, user *tele.User, 
 }
 
 func runVerificationKick(ban, unban func() error) error {
-	if err := ban(); err != nil && !isAlreadyBannedTelegramError(err) {
-		return fmt.Errorf("kick user via ban: %w", err)
+	banErr := ban()
+	if banErr != nil && !isAlreadyBannedTelegramError(banErr) {
+		return fmt.Errorf("kick user via ban: %w", banErr)
 	}
 	if err := unban(); err != nil {
 		if !isTerminalTelegramCleanupError(err) || isAlreadyBannedTelegramError(err) {
-			return fmt.Errorf("unban kicked user: %w", err)
+			wrapped := fmt.Errorf("unban kicked user: %w", err)
+			if banErr == nil {
+				return &actionAppliedError{action: "ban", err: wrapped}
+			}
+			return wrapped
 		}
 	}
 	return nil
@@ -2666,12 +2767,17 @@ func (s *Service) handleWarnCommand(c tele.Context) error {
 	}
 	policy.Warnings.ActionAtMax = "mute"
 
-	count, escalated, err := s.IncrWarning(context.Background(), chat, &tele.User{
+	count, escalated, err := s.incrWarningForEvent(context.Background(), chat, &tele.User{
 		ID:        target.UserID,
+		IsBot:     target.IsBot,
 		Username:  target.Username,
 		FirstName: target.Display,
-	}, reason, policy, true, false)
+	}, reason, policy, true, false, moderationEventKey(msg, "command_warning", "warn", "warn"))
 	if err != nil {
+		var applied *actionAppliedError
+		if errors.As(err, &applied) {
+			s.writeCommandModerationAudit(context.Background(), "warn", c.Sender(), chat, &tele.User{ID: target.UserID, IsBot: target.IsBot}, "warn", reason, target.MessageID, msg.ID, "partial", "警告已记录，其他处理步骤尚待核查")
+		}
 		return fmt.Errorf("insert manual warning: %w", err)
 	}
 
@@ -2711,6 +2817,7 @@ func (s *Service) handleWarnCommand(c tele.Context) error {
 
 	s.writeCommandModerationAudit(context.Background(), "warn", c.Sender(), chat, &tele.User{
 		ID:        target.UserID,
+		IsBot:     target.IsBot,
 		Username:  target.Username,
 		FirstName: target.Display,
 	}, "warn", reason, target.MessageID, msg.ID, "success", "")
@@ -2729,11 +2836,18 @@ func (s *Service) handleUnbanCommand(c tele.Context) error {
 		return c.Send(redact.ErrorString(err), &tele.SendOptions{ParseMode: tele.ModeHTML})
 	}
 
+	release, err := s.AcquireModerationReview(context.Background(), chat.ID, target.UserID)
+	if err != nil {
+		return c.Send("处理繁忙，请稍后重试")
+	}
+	defer release()
 	warnings := make([]string, 0, 2)
-	if warning, err := s.SafeUnbanChatUser(context.Background(), chat.ID, target.UserID); err != nil {
-		s.writeCommandModerationAudit(context.Background(), "unban", c.Sender(), chat, &tele.User{ID: target.UserID, Username: target.Username, FirstName: target.Display}, "unban", "manual_unban", target.MessageID, msg.ID, "failed", redact.ErrorString(err))
+	unbanOutcome := "success"
+	if warning, err := s.SafeUnbanChatUserNoLock(context.Background(), chat.ID, target.UserID); err != nil {
+		s.writeCommandModerationAudit(context.Background(), "unban", c.Sender(), chat, &tele.User{ID: target.UserID, IsBot: target.IsBot, Username: target.Username, FirstName: target.Display}, "unban", "manual_unban", target.MessageID, msg.ID, "failed", redact.ErrorString(err))
 		return c.Send("解封失败: "+htmlEscape(redact.ErrorString(err)), &tele.SendOptions{ParseMode: tele.ModeHTML})
 	} else if strings.TrimSpace(warning) != "" {
+		unbanOutcome = "skipped"
 		warnings = append(warnings, warning)
 	}
 	if err := s.queries.DeleteGroupBan(context.Background(), chat.ID, target.UserID); err != nil {
@@ -2774,9 +2888,10 @@ func (s *Service) handleUnbanCommand(c tele.Context) error {
 	}
 	s.writeCommandModerationAudit(context.Background(), "unban", c.Sender(), chat, &tele.User{
 		ID:        target.UserID,
+		IsBot:     target.IsBot,
 		Username:  target.Username,
 		FirstName: target.Display,
-	}, "unban", "manual_unban", target.MessageID, msg.ID, "success", "")
+	}, "unban", "manual_unban", target.MessageID, msg.ID, unbanOutcome, "")
 
 	return c.Send(text, &tele.SendOptions{ParseMode: tele.ModeHTML})
 }
@@ -2793,10 +2908,18 @@ func (s *Service) handleSpamCommand(c tele.Context) error {
 	}
 
 	ctx := context.Background()
+	release, err := s.AcquireModerationReview(ctx, chat.ID, target.UserID)
+	if err != nil {
+		return c.Send("处理繁忙，请稍后重试")
+	}
+	defer release()
 
-	// 1. Delete the spam message (reply target or resolved user's last message)
+	// Keep the observed deletion result separate from the following ban.
+	spamAction := "ban"
+	deleted := false
 	if target.MessageID != 0 {
-		_ = s.bot.Delete(&tele.Message{ID: target.MessageID, Chat: chat})
+		spamAction = "delete_ban"
+		deleted = s.bot.Delete(&tele.Message{ID: target.MessageID, Chat: chat}) == nil
 	}
 
 	// 2. Delete the /spam command message itself after 3s
@@ -2806,14 +2929,19 @@ func (s *Service) handleSpamCommand(c tele.Context) error {
 
 	targetUser := &tele.User{
 		ID:        target.UserID,
+		IsBot:     target.IsBot,
 		Username:  target.Username,
 		FirstName: target.Display,
 	}
 
 	// 3. Ban user. Bots cannot file an official Telegram spam report; revoke_messages
 	// is the available Bot API mechanism for removing the target user's chat history.
-	if err := s.banUser(chat, targetUser); err != nil {
-		s.writeCommandModerationAudit(ctx, "spam", c.Sender(), chat, targetUser, "ban", "spam", target.MessageID, msg.ID, "failed", redact.ErrorString(err))
+	if err := s.banUserWithOwnershipLocked(chat, targetUser, false); err != nil {
+		outcome := "failed"
+		if deleted {
+			outcome = "partial"
+		}
+		s.writeCommandModerationAudit(ctx, "spam", c.Sender(), chat, targetUser, spamAction, "spam", target.MessageID, msg.ID, outcome, redact.ErrorString(err))
 		return c.Send("封禁失败: "+htmlEscape(redact.ErrorString(err)), &tele.SendOptions{ParseMode: tele.ModeHTML})
 	}
 
@@ -2821,6 +2949,7 @@ func (s *Service) handleSpamCommand(c tele.Context) error {
 	reason := "spam"
 	bannedBy := c.Sender().ID
 	if err := s.queries.UpsertGroupBan(ctx, chat.ID, target.UserID, &reason, "manual", &bannedBy); err != nil {
+		s.writeCommandModerationAudit(ctx, "spam", c.Sender(), chat, targetUser, spamAction, "spam", target.MessageID, msg.ID, "partial", "处理已执行，但本群记录未保存")
 		return c.Send("封禁已执行，但保存本群记录失败，请重试")
 	}
 
@@ -2836,7 +2965,11 @@ func (s *Service) handleSpamCommand(c tele.Context) error {
 	})
 
 	// 4. Audit log
-	s.writeCommandModerationAudit(ctx, "spam", c.Sender(), chat, targetUser, "ban", "spam", target.MessageID, msg.ID, "success", "")
+	spamOutcome := "success"
+	if target.MessageID != 0 && !deleted {
+		spamOutcome = "partial"
+	}
+	s.writeCommandModerationAudit(ctx, "spam", c.Sender(), chat, targetUser, spamAction, "spam", target.MessageID, msg.ID, spamOutcome, "")
 
 	// 5. Send exactly one user-visible result: configured ban feedback, or a fallback confirmation.
 	policy, _ := s.LoadGuardPolicy(ctx, chat.ID)
@@ -2898,20 +3031,46 @@ func (s *Service) writeCommandModerationAudit(ctx context.Context, command strin
 			"display":    displayName(target),
 		},
 	}
+	auditAction := action
+	if command == "spam" && action == "delete_ban" {
+		auditAction = "ban"
+	}
 	after := map[string]any{
 		"source":                "command:" + command,
-		"action":                action,
+		"action":                auditAction,
 		"reason":                reason,
 		"message_id":            commandMessageID,
 		"referenced_message_id": referencedMessageID,
 		"outcome":               outcome,
 		"error":                 errText,
 	}
-	s.WriteRuntimeAuditWithAdmin(ctx, "moderation", &chatID, adminID, "command_"+command+"_"+action, before, after)
+	s.WriteRuntimeAuditWithAdmin(ctx, "moderation", &chatID, adminID, "command_"+command+"_"+auditAction, before, after)
+	if commandMessageID > 0 && (action == "ban" || action == "delete_ban" || action == "warn" || action == "unban") && (outcome == "success" || outcome == "partial") {
+		// Targets supplied by numeric ID may still be known bots in the group.
+		if trust, err := s.queries.GetUserTrust(ctx, chat.ID, target.ID); err == nil && trust.IsBot {
+			return
+		}
+		msg := &tele.Message{ID: commandMessageID, Chat: chat, Sender: target}
+		key := moderationEventKey(msg, "command", command, action)
+		result, explanation := "executed", "群管理员处理"
+		if outcome == "partial" {
+			result, explanation = "partial", "部分处理已执行，其他步骤请联系管理员确认"
+		}
+		// only_if_banned can succeed as a no-op, so an actual reversal is not proven.
+		if action == "unban" {
+			result, explanation = "partial", "管理员已处理解封请求，具体状态请联系管理员确认"
+		}
+		warningEvent := ""
+		if action == "warn" && outcome == "success" && operator != nil {
+			warningEvent = moderationEventKey(&tele.Message{ID: commandMessageID, Chat: chat, Sender: operator}, "command_warning", "warn", "warn")
+		}
+		_ = s.recordMessageModerationCase(ctx, msg, "command_event", key, action, result, explanation, 0, warningEvent)
+	}
 }
 
 type commandTarget struct {
 	UserID    int64
+	IsBot     bool
 	Username  string
 	Display   string
 	MessageID int // the message to delete (e.g. replied-to spam message)
@@ -2980,6 +3139,7 @@ func (s *Service) resolveCommandTarget(ctx context.Context, msg *tele.Message, c
 		}
 		return commandTarget{
 			UserID:    msg.ReplyTo.Sender.ID,
+			IsBot:     msg.ReplyTo.Sender.IsBot,
 			Username:  msg.ReplyTo.Sender.Username,
 			Display:   formatTargetDisplay(msg.ReplyTo.Sender.ID, msg.ReplyTo.Sender.Username, displayName(msg.ReplyTo.Sender)),
 			MessageID: msg.ReplyTo.ID,
@@ -3019,6 +3179,7 @@ func (s *Service) resolveWarnTargetAndReason(ctx context.Context, msg *tele.Mess
 			}
 			target = commandTarget{
 				UserID:   msg.ReplyTo.Sender.ID,
+				IsBot:    msg.ReplyTo.Sender.IsBot,
 				Username: msg.ReplyTo.Sender.Username,
 				Display:  formatTargetDisplay(msg.ReplyTo.Sender.ID, msg.ReplyTo.Sender.Username, displayName(msg.ReplyTo.Sender)),
 			}

@@ -58,13 +58,14 @@ func (s *Server) registerAdminRoutes() {
 	admin.PUT("/system-state", s.handlePutSystemState)
 	admin.GET("/health", s.handleHealth)
 	admin.GET("/events", s.handleListEvents)
+	admin.GET("/moderation-notifications", s.handleModerationNotifications)
 	admin.GET("/violations", s.handleListViolations)
 	admin.GET("/profile-check-logs", s.handleListProfileCheckLogs)
 	admin.DELETE("/profile-check-logs", s.handleDeleteOldProfileCheckLogs)
 	admin.GET("/warnings", s.handleListWarnings)
 	admin.POST("/warnings/clear", s.handleClearWarnings)
-	admin.POST("/ban", s.handleBan, s.apiRateLimit(s.adminRateLimitKey("admin:ban"), adminBanLimit, apiRateLimitWindow))
-	admin.POST("/unban", s.handleUnban, s.apiRateLimit(s.adminRateLimitKey("admin:ban"), adminBanLimit, apiRateLimitWindow))
+	admin.POST("/ban", s.manualModerationIdempotency(s.handleBan), s.apiRateLimit(s.adminRateLimitKey("admin:ban"), adminBanLimit, apiRateLimitWindow))
+	admin.POST("/unban", s.manualModerationIdempotency(s.handleUnban), s.apiRateLimit(s.adminRateLimitKey("admin:ban"), adminBanLimit, apiRateLimitWindow))
 	admin.GET("/audit", s.handleListAudit)
 	admin.GET("/stats", s.handleStats)
 	admin.GET("/admins", s.handleListAdmins)
@@ -775,14 +776,21 @@ func (s *Server) handleBan(c echo.Context) error {
 		return c.JSON(http.StatusForbidden, map[string]string{"error": "group out of scope"})
 	}
 
-	if err := s.botService.BanChatUser(c.Request().Context(), chatID, userID); err != nil {
+	op, err := manualModerationOperationID()
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "create operation failed"})
+	}
+	ctx := c.Request().Context()
+	if err := s.botService.BanChatUser(ctx, chatID, userID); err != nil {
+		s.recordManualModerationCase(ctx, op, chatID, userID, "ban", "failed", "处理未确认，请联系管理员核查", admin.TelegramID)
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "ban failed"})
 	}
 
-	if err := s.botService.Queries().UpsertGroupBan(c.Request().Context(), chatID, userID, stringPtr("manual admin ban"), "manual", &admin.TelegramID); err != nil {
+	if err := s.botService.Queries().UpsertGroupBan(ctx, chatID, userID, stringPtr("manual admin ban"), "manual", &admin.TelegramID); err != nil {
+		s.recordManualModerationCase(ctx, op, chatID, userID, "ban", "partial", "封禁已执行，但群内记录未保存，请联系管理员核查", admin.TelegramID)
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "record group ban failed; retry"})
 	}
-
+	s.recordManualModerationCase(ctx, op, chatID, userID, "ban", "executed", "群管理员处理", admin.TelegramID)
 	return c.NoContent(http.StatusNoContent)
 }
 
@@ -796,18 +804,29 @@ func (s *Server) handleUnban(c echo.Context) error {
 		return c.JSON(http.StatusForbidden, map[string]string{"error": "group out of scope"})
 	}
 
-	if err := s.botService.UnbanChatUser(c.Request().Context(), chatID, userID); err != nil {
+	op, err := manualModerationOperationID()
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "create operation failed"})
+	}
+	ctx := c.Request().Context()
+	if err := s.botService.UnbanChatUser(ctx, chatID, userID); err != nil {
+		s.recordManualModerationCase(ctx, op, chatID, userID, "unban", "failed", "处理未确认，请联系管理员核查", admin.TelegramID)
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "unban failed"})
 	}
 
-	if err := s.botService.Queries().DeleteGroupBan(c.Request().Context(), chatID, userID); err != nil {
+	// Telegram's only_if_banned may return success even when nothing was
+	// changed; never report that this request definitely reversed a ban.
+	explanation := "管理员已处理解封请求，具体状态请联系管理员确认"
+	if err := s.botService.Queries().DeleteGroupBan(ctx, chatID, userID); err != nil {
+		s.recordManualModerationCase(ctx, op, chatID, userID, "unban", "partial", explanation, admin.TelegramID)
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "clear ban failed; retry unban"})
 	}
-	_, err = s.botService.Queries().UnbanUserTrust(c.Request().Context(), store.UnbanUserTrustParams{ChatID: chatID, UserID: userID, Score: 0.5})
+	_, err = s.botService.Queries().UnbanUserTrust(ctx, store.UnbanUserTrustParams{ChatID: chatID, UserID: userID, Score: 0.5})
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		s.recordManualModerationCase(ctx, op, chatID, userID, "unban", "partial", explanation, admin.TelegramID)
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "clear group trust ban failed; retry unban"})
 	}
-
+	s.recordManualModerationCase(ctx, op, chatID, userID, "unban", "partial", explanation, admin.TelegramID)
 	return c.NoContent(http.StatusNoContent)
 }
 
@@ -1329,58 +1348,7 @@ func (s *Server) handleUpdateAIDecision(c echo.Context) error {
 	if nextOverride != nil && *nextOverride == "false_positive" && strings.Contains(strings.ToLower(previous.ActionTaken), "ban") {
 		return s.reviewAIBanFalsePositive(c, id)
 	}
-	var updated store.AIDecision
-	var changed float64
-	err = s.botService.Queries().Transact(ctx, func(tx *store.Queries) error {
-		if e := tx.LockAIDecisionReview(ctx, id); e != nil {
-			return e
-		}
-		current, e := tx.GetAIDecisionByID(ctx, id)
-		if e != nil {
-			return e
-		}
-		if strings.Contains(strings.ToLower(current.ActionTaken), "mute") && !stringPtrEqual(current.AdminOverride, nextOverride) {
-			claim, claimErr := tx.LockAIMuteClaim(ctx, id)
-			if claimErr != nil && !errors.Is(claimErr, pgx.ErrNoRows) {
-				return claimErr
-			}
-			if claimErr == nil && (claim.State == "telegram_done" || (claim.State == "claimed" && claim.LeaseActive)) {
-				return errReviewBusy
-			}
-		}
-		updated, e = tx.UpdateAIDecisionOverride(ctx, id, nextOverride)
-		if e != nil {
-			return e
-		}
-		if nextOverride == nil || stringPtrEqual(current.AdminOverride, nextOverride) {
-			return nil
-		}
-		var delta float64
-		switch *nextOverride {
-		case "false_positive":
-			delta = 0.1
-		case "confirm":
-			delta = -0.1
-		case "false_negative":
-			delta = -0.2
-		default:
-			return nil
-		}
-		prior, e := tx.GetUserTrust(ctx, current.ChatID, current.UserID)
-		if e != nil && !errors.Is(e, pgx.ErrNoRows) {
-			return e
-		}
-		scoreBefore := 0.5
-		if e == nil {
-			scoreBefore = prior.Score
-		}
-		trust, e := tx.AdjustUserTrustScore(ctx, store.AdjustUserTrustScoreParams{ChatID: current.ChatID, UserID: current.UserID, Delta: delta})
-		if e != nil {
-			return e
-		}
-		changed = trust.Score - scoreBefore
-		return nil
-	})
+	updated, changed, err := s.applyAIDecisionOverride(ctx, id, nextOverride)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return c.JSON(http.StatusNotFound, map[string]string{"error": "decision not found"})
 	}

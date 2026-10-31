@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/labstack/echo/v4"
 	"github.com/openclaw/clawguard/internal/bot"
@@ -109,6 +110,10 @@ func TestTrustStatusSyncIntegration(t *testing.T) {
 	if rec.Code != 200 || tr.count("/unbanChatMember") != before || tr.count("/restrictChatMember") != 2 {
 		t.Fatalf("duplicate external action: %s", rec.Body)
 	}
+	var caseCount int
+	if err = fx.pool.QueryRow(ctx, `SELECT count(*) FROM moderation_cases WHERE source_kind='trust_sync' AND user_id=101 AND action='unban'`).Scan(&caseCount); err != nil || caseCount != 1 {
+		t.Fatalf("sync case count %d %v", caseCount, err)
+	}
 	if _, err = fx.pool.Exec(ctx, `UPDATE user_trust SET status='banned',status_changed_at=now() WHERE chat_id=-100 AND user_id=101; CREATE FUNCTION fail_trust_settle() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN RAISE EXCEPTION 'injected'; END$$; CREATE TRIGGER fail_trust_settle BEFORE UPDATE ON user_trust FOR EACH ROW EXECUTE FUNCTION fail_trust_settle()`); err != nil {
 		t.Fatal(err)
 	}
@@ -134,21 +139,28 @@ func TestTrustStatusSyncIntegration(t *testing.T) {
 	done := make(chan *httptest.ResponseRecorder, 1)
 	go func() { done <- call("new") }()
 	<-started
-	if e := svc.BanChatUser(ctx, -100, 101); e != nil {
+	banDone := make(chan error, 1)
+	go func() { banDone <- svc.BanChatUser(ctx, -100, 101) }()
+	select {
+	case e := <-banDone:
 		close(release)
-		t.Fatal(e)
+		t.Fatalf("later ban not serialized: %v", e)
+	case <-time.After(30 * time.Millisecond):
 	}
 	close(release)
 	rec = <-done
-	if rec.Code != 500 {
-		t.Fatalf("manual ban conflict: %d %s", rec.Code, rec.Body)
+	if e := <-banDone; e != nil {
+		t.Fatal(e)
+	}
+	if rec.Code != 200 {
+		t.Fatalf("sync preceding ban: %d %s", rec.Code, rec.Body)
 	}
 	tr.mu.Lock()
 	tr.started, tr.release = nil, nil
 	tr.mu.Unlock()
 	u, err = fx.queries.GetUserTrust(ctx, -100, 101)
-	if err != nil || u.Status != "banned" {
-		t.Fatalf("manual ban overwritten: %+v %v", u, err)
+	if err != nil || u.Status != "new" {
+		t.Fatalf("sync did not settle before later ban: %+v %v", u, err)
 	}
 	if _, err = fx.pool.Exec(ctx, `UPDATE user_trust SET status='new',status_changed_at=now() WHERE chat_id=-100 AND user_id=101`); err != nil {
 		t.Fatal(err)

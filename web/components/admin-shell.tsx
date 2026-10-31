@@ -1,7 +1,7 @@
 "use client";
 
 import type { ReactNode } from "react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import type { LucideIcon } from "lucide-react";
@@ -57,6 +57,7 @@ const navSections: readonly NavSection[] = [
     items: [
       { href: "/violations", label: "违规", icon: TriangleAlert },
       { href: "/ai-review", label: "AI 复核", icon: Bot },
+      { href: "/appeals", label: "申诉管理", icon: ScrollText },
       { href: "/trust", label: "信任系统", icon: UserRoundCheck },
     ],
   },
@@ -98,6 +99,13 @@ export function AdminShell({
   const { active: miniApp, haptic } = useTelegramMiniApp();
   const { confirmNavigation } = useDirtyNavigation();
   const [menuOpen, setMenuOpen] = useState(false);
+  const [appealCount, setAppealCount] = useState<number | null>(null);
+  useEffect(() => {
+    let live = true;
+    const load = () => { void apiFetch<{pending_count:number}>("/api/admin/appeals?status=pending").then(v => { if (live) setAppealCount(v.pending_count); }).catch(() => {}); };
+    load(); const timer = window.setInterval(load, 60000);
+    return () => {live = false; window.clearInterval(timer)};
+  }, [pathname]);
 
   const isActive = (href: string) => pathname === href || pathname.startsWith(href + "/");
 
@@ -139,7 +147,7 @@ export function AdminShell({
         )}
       >
         <Icon className={compact ? "h-5 w-5" : "h-4 w-4 shrink-0"} />
-        <span>{item.label}</span>
+        <span>{item.label}{item.href === "/appeals" && appealCount !== null && ` (${appealCount})`}</span>
       </Link>
     );
   };

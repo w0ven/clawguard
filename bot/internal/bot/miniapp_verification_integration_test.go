@@ -1,0 +1,270 @@
+//go:build integration
+
+package bot
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"path"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/openclaw/clawguard/internal/config"
+	"github.com/openclaw/clawguard/internal/store"
+	tele "gopkg.in/telebot.v3"
+)
+
+type miniCapture struct {
+	base             *dualTelegram
+	mu               sync.Mutex
+	sent             []string
+	failNotification bool
+}
+
+func (m *miniCapture) RoundTrip(r *http.Request) (*http.Response, error) {
+	m.mu.Lock()
+	blocked := m.failNotification && r.URL.Host == "api.telegram.org"
+	m.mu.Unlock()
+	if blocked {
+		return &http.Response{StatusCode: 403, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"ok":false}`))}, nil
+	}
+	if path.Base(r.URL.Path) == "sendMessage" {
+		raw, _ := io.ReadAll(r.Body)
+		r.Body = io.NopCloser(strings.NewReader(string(raw)))
+		m.mu.Lock()
+		m.sent = append(m.sent, string(raw))
+		m.mu.Unlock()
+	}
+	return m.base.RoundTrip(r)
+}
+func (m *miniCapture) messages() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]string(nil), m.sent...)
+}
+
+func TestMiniAppVerificationStartAndSettlement(t *testing.T) {
+	ctx := context.Background()
+	pool, q, s, _ := settlementFixture(t)
+	s.lifecycleCtx, s.lifecycleCancel = context.WithCancel(context.Background())
+	s.cfg = config.Config{BotToken: "123:TEST", BotUsername: "fixture_bot", PublicBaseURL: "https://example.com", TurnstileSiteKey: "cf", TurnstileSecret: "cf-secret", HCaptchaSiteKey: "hc", HCaptchaSecret: "hc-secret"}
+	tr := &miniCapture{base: &dualTelegram{role: "restricted"}}
+	b, err := tele.NewBot(tele.Settings{Token: s.cfg.BotToken, URL: "http://telegram.test", Client: &http.Client{Transport: tr}, Synchronous: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.bot = b
+	s.sender = b
+	b.Handle("/start", func(c tele.Context) error { return s.runCommandHandler("start", c, s.handleStartCommand) })
+	oldTransport := http.DefaultTransport
+	http.DefaultTransport = tr
+	t.Cleanup(func() { s.Stop(); http.DefaultTransport = oldTransport })
+	_, err = pool.Exec(ctx, `UPDATE groups SET config='{"verify":{"enabled":true,"method":"turnstile_hcaptcha","welcome_message":{"enabled":false}}}' WHERE chat_id=-90001`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.rememberMembershipSession(ctx, -90001, 101, "generation"); err != nil {
+		t.Fatal(err)
+	}
+	policy := config.DefaultPolicy
+	policy.Verify.Enabled = true
+	policy.Verify.Method = "turnstile_hcaptcha"
+	policy.Verify.TimeoutSeconds = 180
+	chat, user := &tele.Chat{ID: -90001}, &tele.User{ID: 101, FirstName: "Test"}
+	joinStarted := time.Now().Add(-30 * time.Second)
+	promptCtx := context.WithValue(ctx, dualCaptchaGenerationKey{}, "generation")
+	promptCtx = context.WithValue(promptCtx, dualCaptchaStartTimeKey{}, joinStarted)
+	if err = s.startDualCaptchaVerification(promptCtx, chat, user, policy); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := q.GetPendingVerification(ctx, store.GetPendingVerificationParams{ChatID: chat.ID, UserID: user.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if delta := pending.ExpiresAt.Sub(joinStarted.Add(180 * time.Second)); delta < -time.Millisecond || delta > time.Millisecond {
+		t.Fatalf("deadline reset: %v", delta)
+	}
+	var payload dualCaptchaPayload
+	if json.Unmarshal(pending.Payload, &payload) != nil || !payload.MiniApp {
+		t.Fatal("missing miniapp ownership")
+	}
+	sent := tr.messages()
+	if len(sent) == 0 || !strings.Contains(sent[0], "t.me/fixture_bot?start=v_") || strings.Contains(sent[0], "example.com") {
+		t.Fatalf("group prompt %v", sent)
+	}
+	sendStart := func(id int64) {
+		update := tele.Update{ID: int(id + 1000), Message: &tele.Message{Chat: &tele.Chat{ID: id, Type: tele.ChatPrivate}, Sender: &tele.User{ID: id, FirstName: "Test"}, Text: "/start v_" + payload.Token}}
+		if err := s.ProcessUpdate(update); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sendStart(102)
+	sent = tr.messages()
+	if strings.Contains(sent[len(sent)-1], "web_app") {
+		t.Fatal("wrong user got Mini App")
+	}
+	sendStart(101)
+	sent = tr.messages()
+	if !strings.Contains(sent[len(sent)-1], "web_app") || !strings.Contains(sent[len(sent)-1], "/verify/mini?task=") {
+		t.Fatalf("private card: %s", sent[len(sent)-1])
+	}
+	if _, err = pool.Exec(ctx, `INSERT INTO dual_captcha_claims(pending_id,token,state,lease_until) VALUES($1,'test','conflict',now())`, pending.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = pool.Exec(ctx, `UPDATE pending_verifications SET expires_at=now()-interval '1 second' WHERE id=$1`, pending.ID); err != nil {
+		t.Fatal(err)
+	}
+	sendStart(101)
+	sent = tr.messages()
+	if !strings.Contains(sent[len(sent)-1], "联系群管理员") || strings.Contains(sent[len(sent)-1], "web_app") {
+		t.Fatalf("conflict card: %s", sent[len(sent)-1])
+	}
+	if _, err = pool.Exec(ctx, `UPDATE pending_verifications SET expires_at=now()+interval '2 minutes' WHERE id=$1`, pending.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = pool.Exec(ctx, `DELETE FROM dual_captcha_claims WHERE pending_id=$1`, pending.ID); err != nil {
+		t.Fatal(err)
+	}
+	var starts int
+	if err = pool.QueryRow(ctx, `SELECT count(*) FROM telegram_private_sessions WHERE user_id=101`).Scan(&starts); err != nil || starts != 1 {
+		t.Fatalf("start record %d %v", starts, err)
+	}
+	oldProvider := dualCaptchaHTTPClient
+	dualCaptchaHTTPClient = &http.Client{Transport: dualRoundTrip(func(r *http.Request) (*http.Response, error) {
+		body := `{"success":true,"hostname":"example.com"}`
+		if r.URL.String() == dualTurnstileURL {
+			body = fmt.Sprintf(`{"success":true,"hostname":"example.com","action":"clawguard_dual","cdata":%q}`, payload.Token)
+		}
+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
+	})}
+	t.Cleanup(func() { dualCaptchaHTTPClient = oldProvider })
+	if err = s.VerifyDualCaptcha(ctx, payload.Token, "cf", "hc", ""); err == nil {
+		t.Fatal("legacy bypass succeeded")
+	}
+	if err = s.VerifyMiniAppDualCaptcha(ctx, payload.Token, "cf", "hc", "", 102); err == nil {
+		t.Fatal("wrong identity succeeded")
+	}
+	if err = s.RecoverMiniAppDualCaptcha(ctx, payload.Token, 101); err == nil {
+		t.Fatal("unverified recovery bypass")
+	}
+	if err = s.VerifyMiniAppDualCaptcha(ctx, payload.Token, "cf", "hc", "", 101); err != nil {
+		t.Fatalf("verification: %v", err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		var state string
+		if pool.QueryRow(ctx, `SELECT status FROM miniapp_verification_notifications WHERE pending_id=$1`, pending.ID).Scan(&state) == nil && state == "sent" {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if tr.base.count() != 1 {
+		t.Fatalf("restore calls %d", tr.base.count())
+	}
+	var status string
+	if err = pool.QueryRow(ctx, `SELECT status FROM miniapp_verification_notifications WHERE pending_id=$1`, pending.ID).Scan(&status); err != nil || status != "sent" {
+		t.Fatalf("notification %s %v", status, err)
+	}
+	if err = s.VerifyMiniAppDualCaptcha(ctx, payload.Token, "cf", "hc", "", 101); err == nil {
+		t.Fatal("replay succeeded")
+	}
+	tr.mu.Lock()
+	tr.failNotification = true
+	tr.mu.Unlock()
+	tr.base.mu.Lock()
+	tr.base.role = "restricted"
+	tr.base.mu.Unlock()
+	if err = s.startDualCaptchaVerification(context.WithValue(ctx, dualCaptchaGenerationKey{}, "generation"), chat, user, policy); err != nil {
+		t.Fatal(err)
+	}
+	pending, err = q.GetPendingVerification(ctx, store.GetPendingVerificationParams{ChatID: chat.ID, UserID: user.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = json.Unmarshal(pending.Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.VerifyMiniAppDualCaptcha(ctx, payload.Token, "cf", "hc", "", 101); err != nil {
+		t.Fatalf("blocked notification must not fail verification: %v", err)
+	}
+	deadline = time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if pool.QueryRow(ctx, `SELECT status FROM miniapp_verification_notifications WHERE pending_id=$1`, pending.ID).Scan(&status) == nil && status == "failed" {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if status != "failed" {
+		t.Fatalf("notification status %q", status)
+	}
+	if tr.base.count() != 2 {
+		t.Fatalf("unexpected restore count %d", tr.base.count())
+	}
+}
+
+func TestMiniAppRecoveryAfterDBSettlementFailure(t *testing.T) {
+	ctx := context.Background()
+	pool, q, s, _ := settlementFixture(t)
+	s.cfg = config.Config{BotToken: "123:TEST", PublicBaseURL: "https://example.com", TurnstileSiteKey: "cf", TurnstileSecret: "secret", HCaptchaSiteKey: "hc", HCaptchaSecret: "secret"}
+	tr := &dualTelegram{role: "restricted"}
+	b, err := tele.NewBot(tele.Settings{Token: "123:TEST", URL: "http://telegram.test", Client: &http.Client{Transport: tr}, Synchronous: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.bot = b
+	s.sender = b
+	_, err = pool.Exec(ctx, `UPDATE groups SET config='{"verify":{"enabled":true,"method":"turnstile_hcaptcha","welcome_message":{"enabled":false}}}' WHERE chat_id=-90001`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.rememberMembershipSession(ctx, -90001, 101, "generation"); err != nil {
+		t.Fatal(err)
+	}
+	token := "12345678-1234-1234-1234-123456789012"
+	_, err = q.UpsertPendingVerification(ctx, store.UpsertPendingVerificationParams{ChatID: -90001, UserID: 101, Method: "turnstile_hcaptcha", Payload: []byte(fmt.Sprintf(`{"token":%q,"miniapp":true,"membership_generation":"generation"}`, token)), ExpiresAt: time.Now().Add(time.Minute)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var providerCalls int
+	old := dualCaptchaHTTPClient
+	dualCaptchaHTTPClient = &http.Client{Transport: dualRoundTrip(func(r *http.Request) (*http.Response, error) {
+		providerCalls++
+		body := `{"success":true,"hostname":"example.com"}`
+		if r.URL.String() == dualTurnstileURL {
+			body = fmt.Sprintf(`{"success":true,"hostname":"example.com","action":"clawguard_dual","cdata":%q}`, token)
+		}
+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
+	})}
+	t.Cleanup(func() { dualCaptchaHTTPClient = old })
+	_, err = pool.Exec(ctx, `CREATE FUNCTION mini_fail_settlement() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN RAISE EXCEPTION 'fixture'; END$$; CREATE TRIGGER mini_fail_settlement BEFORE DELETE ON pending_verifications FOR EACH ROW EXECUTE FUNCTION mini_fail_settlement()`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.VerifyMiniAppDualCaptcha(ctx, token, "cf", "hc", "", 101); err == nil {
+		t.Fatal("settlement failed but returned success")
+	}
+	if tr.count() != 1 || providerCalls != 2 {
+		t.Fatalf("calls restore=%d provider=%d", tr.count(), providerCalls)
+	}
+	_, err = pool.Exec(ctx, `DROP TRIGGER mini_fail_settlement ON pending_verifications; DROP FUNCTION mini_fail_settlement(); UPDATE pending_verifications SET expires_at=now()-interval '5 seconds' WHERE chat_id=-90001 AND user_id=101`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.RecoverMiniAppDualCaptcha(ctx, token, 102); err == nil {
+		t.Fatal("other identity recovered")
+	}
+	if err = s.RecoverMiniAppDualCaptcha(ctx, token, 101); err != nil {
+		t.Fatalf("recovery: %v", err)
+	}
+	if tr.count() != 1 || providerCalls != 2 {
+		t.Fatalf("replayed restore=%d provider=%d", tr.count(), providerCalls)
+	}
+	if err = s.RecoverMiniAppDualCaptcha(ctx, token, 101); err == nil {
+		t.Fatal("replay accepted")
+	}
+}

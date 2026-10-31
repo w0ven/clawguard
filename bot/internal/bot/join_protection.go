@@ -307,6 +307,10 @@ type joinProtectionActionOps struct {
 
 func runPromptFailureCleanup(ops promptFailureCleanupOps) (string, error) {
 	action, err := ops.applyAction()
+	var applied *actionAppliedError
+	if errors.As(err, &applied) {
+		return "", err
+	}
 	if err == nil || isTerminalTelegramCleanupError(err) {
 		if err != nil {
 			return "already_absent", nil
@@ -699,6 +703,17 @@ func (s *Service) temporaryBanJoinFloodUser(chat *tele.Chat, user *tele.User, ac
 	if chat == nil || user == nil {
 		return nil
 	}
+	release, err := s.AcquireModerationReview(context.Background(), chat.ID, user.ID)
+	if err != nil {
+		return err
+	}
+	defer release()
+	return s.temporaryBanJoinFloodUserLocked(chat, user, actionUntil)
+}
+func (s *Service) temporaryBanJoinFloodUserLocked(chat *tele.Chat, user *tele.User, actionUntil time.Time) error {
+	if chat == nil || user == nil {
+		return nil
+	}
 	if !joinProtectionActionDeadlineActive(actionUntil, time.Now()) {
 		return nil
 	}
@@ -713,6 +728,17 @@ func (s *Service) temporaryBanJoinFloodUser(chat *tele.Chat, user *tele.User, ac
 }
 
 func (s *Service) temporaryRestrictJoinFloodUser(chat *tele.Chat, user *tele.User, actionUntil time.Time) error {
+	if chat == nil || user == nil {
+		return nil
+	}
+	release, err := s.AcquireModerationReview(context.Background(), chat.ID, user.ID)
+	if err != nil {
+		return err
+	}
+	defer release()
+	return s.temporaryRestrictJoinFloodUserLocked(chat, user, actionUntil)
+}
+func (s *Service) temporaryRestrictJoinFloodUserLocked(chat *tele.Chat, user *tele.User, actionUntil time.Time) error {
 	if chat == nil || user == nil {
 		return nil
 	}
@@ -731,6 +757,17 @@ func joinProtectionActionDeadlineActive(actionUntil, now time.Time) bool {
 }
 
 func (s *Service) restrictJoinFloodUserFallback(chat *tele.Chat, user *tele.User) error {
+	if chat == nil || user == nil {
+		return nil
+	}
+	release, err := s.AcquireModerationReview(context.Background(), chat.ID, user.ID)
+	if err != nil {
+		return err
+	}
+	defer release()
+	return s.restrictJoinFloodUserFallbackLocked(chat, user)
+}
+func (s *Service) restrictJoinFloodUserFallbackLocked(chat *tele.Chat, user *tele.User) error {
 	if chat == nil || user == nil {
 		return nil
 	}
@@ -766,6 +803,16 @@ func joinProtectionSubjectForTrustLookup(trust store.UserTrust, err error) joinP
 	return joinProtectionSubject{Candidate: true, Action: joinProtectionActionTemporaryRestrict}
 }
 
+func (s *Service) applyJoinProtectionTemporaryActionLocked(chat *tele.Chat, user *tele.User, action string, actionUntil time.Time) error {
+	switch action {
+	case joinProtectionActionTemporaryRestrict:
+		return s.temporaryRestrictJoinFloodUserLocked(chat, user, actionUntil)
+	case joinProtectionActionTemporaryBan:
+		return s.temporaryBanJoinFloodUserLocked(chat, user, actionUntil)
+	default:
+		return fmt.Errorf("unsupported join protection temporary action %q", action)
+	}
+}
 func (s *Service) applyJoinProtectionTemporaryAction(chat *tele.Chat, user *tele.User, action string, actionUntil time.Time) error {
 	switch action {
 	case joinProtectionActionTemporaryRestrict:
@@ -778,6 +825,11 @@ func (s *Service) applyJoinProtectionTemporaryAction(chat *tele.Chat, user *tele
 }
 
 func (s *Service) handleJoinProtectionAction(ctx context.Context, chat *tele.Chat, user *tele.User, policy config.JoinProtectionPolicy, action, membershipGeneration string, now time.Time) error {
+	release, err := s.AcquireModerationReview(ctx, chat.ID, user.ID)
+	if err != nil {
+		return err
+	}
+	defer release()
 	if s.exemptUser(ctx, chat, user) {
 		return nil
 	}
@@ -852,17 +904,22 @@ func (s *Service) handleJoinProtectionAction(ctx context.Context, chat *tele.Cha
 		return nil
 	}
 
+	var applied string
 	var fallbackRestrict func() error
 	if action == joinProtectionActionTemporaryBan {
 		fallbackRestrict = func() error {
 			if s.exemptUser(ctx, chat, user) {
 				return nil
 			}
-			return s.temporaryRestrictJoinFloodUser(chat, user, actionUntil)
+			err := s.temporaryRestrictJoinFloodUserLocked(chat, user, actionUntil)
+			if err == nil {
+				applied = "mute"
+			}
+			return err
 		}
 	}
 	s.ensureRuntimeGuards()
-	return runJoinProtectionAction(joinProtectionActionOps{
+	runErr := runJoinProtectionAction(joinProtectionActionOps{
 		allow: func() bool {
 			allowed, _ := s.allowTelegramCleanup(ctx, chat.ID, now)
 			return allowed
@@ -871,7 +928,15 @@ func (s *Service) handleJoinProtectionAction(ctx context.Context, chat *tele.Cha
 			if s.exemptUser(ctx, chat, user) {
 				return nil
 			}
-			return s.applyJoinProtectionTemporaryAction(chat, user, action, actionUntil)
+			err := s.applyJoinProtectionTemporaryActionLocked(chat, user, action, actionUntil)
+			if err == nil {
+				if action == joinProtectionActionTemporaryBan {
+					applied = "ban"
+				} else {
+					applied = "mute"
+				}
+			}
+			return err
 		},
 		fallbackRestrict: fallbackRestrict,
 		persistCleanup:   persistCleanup,
@@ -883,6 +948,15 @@ func (s *Service) handleJoinProtectionAction(ctx context.Context, chat *tele.Cha
 		},
 		failureReason: "join_protection_" + action + "_failed",
 	})
+	if applied != "" && membershipGeneration != "" && !user.IsBot && s.queries != nil {
+		key := fmt.Sprintf("%d:%d:%s:%s", chat.ID, user.ID, membershipGeneration, applied)
+		ownership, _ := json.Marshal(map[string]any{"membership_generation": membershipGeneration, "until": actionUntil, "automatic_reversal": "manual_review"})
+		_, caseErr := s.queries.RecordModerationCase(ctx, store.ModerationCaseInput{SourceKey: "join_protection:" + key, SourceKind: "join_protection", SourceID: key, ChatID: chat.ID, UserID: user.ID, Action: applied, Result: "executed", Explanation: "入群保护临时处理", Ownership: ownership})
+		if caseErr != nil {
+			s.logger.Warn("record join protection case failed", zap.Error(caseErr))
+		}
+	}
+	return runErr
 }
 
 func (s *Service) ProcessJoinProtectionCleanupFallbacks(ctx context.Context, limit int64) error {
@@ -897,172 +971,192 @@ func (s *Service) ProcessJoinProtectionCleanupFallbacks(ctx context.Context, lim
 		if !ok {
 			break
 		}
-		if task.CompletedAction != "" {
-			if err := s.settleRedisJoinCleanup(ctx, task, task.CompletedAction); err != nil {
+		stop := false
+		err = func() error {
+			release, err := s.AcquireModerationReview(ctx, task.ChatID, task.UserID)
+			if err != nil {
+				return rescheduleJoinProtectionCleanupRedis(ctx, s.redis, task.Member, time.Now().Add(time.Minute))
+			}
+			defer release()
+			if task.CompletedAction != "" {
+				if err := s.settleRedisJoinCleanup(ctx, task, task.CompletedAction); err != nil {
+					if rescheduleErr := rescheduleJoinProtectionCleanupRedis(ctx, s.redis, task.Member, time.Now().Add(time.Minute)); rescheduleErr != nil {
+						return errors.Join(err, rescheduleErr)
+					}
+					s.logger.Error("settle completed redis cleanup", zap.Error(err), zap.String("member", task.Member))
+				}
+				return nil
+			}
+			state, stateErr := s.GetSystemState(ctx)
+			if stateErr != nil || state.Frozen || state.ActionsPaused {
+				if err := rescheduleJoinProtectionCleanupRedis(ctx, s.redis, task.Member, time.Now().Add(time.Minute)); err != nil {
+					s.logger.Error("reschedule join protection cleanup while actions paused", zap.Error(err), zap.Int64("chat_id", task.ChatID), zap.Int64("user_id", task.UserID))
+				}
+				if stateErr != nil {
+					return fmt.Errorf("reload system state before join protection cleanup: %w", stateErr)
+				}
+				stop = true
+				return nil
+			}
+			authorized, authErr := s.IsAuthorizedGroup(ctx, task.ChatID)
+			if authErr != nil || !authorized {
+				if err := rescheduleJoinProtectionCleanupRedis(ctx, s.redis, task.Member, time.Now().Add(time.Minute)); err != nil {
+					return err
+				}
+				return nil
+			}
+			allowed, cooldownUntil := s.allowTelegramCleanup(ctx, task.ChatID, time.Now())
+			if !allowed {
+				if err := rescheduleJoinProtectionCleanupRedis(ctx, s.redis, task.Member, cooldownUntil); err != nil {
+					s.logger.Error("reschedule join protection cleanup during cooldown", zap.Error(err), zap.Int64("chat_id", task.ChatID), zap.Int64("user_id", task.UserID))
+				}
+				return nil
+			}
+
+			chat := &tele.Chat{ID: task.ChatID}
+			if group, groupErr := s.queries.GetGroupByChatID(ctx, task.ChatID); groupErr == nil {
+				chat.Title = group.Title
+			}
+			user := &tele.User{ID: task.UserID, Username: task.Username, FirstName: task.FirstName}
+			if pause, reason := s.deferredExemption(ctx, chat, user); pause {
+				s.logger.Info("deferred cleanup paused", zap.String("reason", reason), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
+				if err := rescheduleJoinProtectionCleanupRedis(ctx, s.redis, task.Member, time.Now().Add(time.Minute)); err != nil {
+					return err
+				}
+				return nil
+			}
+			// A newer database verification supersedes a Redis fallback. Never let
+			// an old fallback punish the new instance.
+			_, pendingErr := s.queries.GetPendingVerification(ctx, store.GetPendingVerificationParams{ChatID: task.ChatID, UserID: task.UserID})
+			if pendingErr == nil {
+				if err := removeJoinProtectionCleanupRedis(ctx, s.redis, task.Member, task.ChatID); err != nil {
+					return err
+				}
+				return nil
+			}
+			if !errors.Is(pendingErr, pgx.ErrNoRows) {
+				if err := rescheduleJoinProtectionCleanupRedis(ctx, s.redis, task.Member, time.Now().Add(time.Minute)); err != nil {
+					return err
+				}
+				return nil
+			}
+			currentTask, currentErr := joinProtectionCleanupCurrent(ctx, s.redis, task)
+			if currentErr != nil {
+				if err := rescheduleJoinProtectionCleanupRedis(ctx, s.redis, task.Member, time.Now().Add(time.Minute)); err != nil {
+					return err
+				}
+				return nil
+			}
+			if !currentTask {
+				if err := removeJoinProtectionCleanupRedis(ctx, s.redis, task.Member, task.ChatID); err != nil {
+					return err
+				}
+				return nil
+			}
+			action := task.Action
+			var actionErr error
+			now := time.Now()
+			// Old Redis records without a join generation cannot be tied to the
+			// current membership. Do not punish a possibly rejoined user. An
+			// already-expired temporary action is safe to settle without Telegram.
+			if task.MembershipGeneration == "" && !((task.Action == joinProtectionActionTemporaryBan || task.Action == joinProtectionActionTemporaryRestrict) && !joinProtectionActionDeadlineActive(task.ActionUntil, now)) {
+				s.logger.Warn("legacy redis cleanup has no membership generation; manual review required", zap.String("member", task.Member))
+				if err := rescheduleJoinProtectionCleanupRedis(ctx, s.redis, task.Member, now.Add(time.Minute)); err != nil {
+					return err
+				}
+				return nil
+			}
+			if (task.Action == joinProtectionActionTemporaryBan || task.Action == joinProtectionActionTemporaryRestrict) && !joinProtectionActionDeadlineActive(task.ActionUntil, now) {
+				action = "expired"
+			} else if task.MembershipGeneration != "" {
+				current, currentErr := s.membershipSessionCurrent(ctx, task.ChatID, task.UserID, task.MembershipGeneration)
+				if currentErr != nil {
+					if err := rescheduleJoinProtectionCleanupRedis(ctx, s.redis, task.Member, now.Add(time.Minute)); err != nil {
+						s.logger.Error("reschedule join protection cleanup after membership lookup failure", zap.Error(err), zap.Int64("chat_id", task.ChatID), zap.Int64("user_id", task.UserID))
+					}
+					return nil
+				}
+				if !current {
+					if err := removeJoinProtectionCleanupRedis(ctx, s.redis, task.Member, task.ChatID); err != nil {
+						s.logger.Error("remove superseded join protection cleanup", zap.Error(err), zap.Int64("chat_id", task.ChatID), zap.Int64("user_id", task.UserID))
+					}
+					s.logger.Info("superseded join protection cleanup discarded", zap.String("event", "join_protection_cleanup_superseded"), zap.Int64("chat_id", task.ChatID), zap.Int64("user_id", task.UserID), zap.String("membership_generation", task.MembershipGeneration))
+					return nil
+				}
+				if task.Action == joinProtectionActionTemporaryBan || task.Action == joinProtectionActionTemporaryRestrict {
+					actionErr = s.applyJoinProtectionTemporaryActionLocked(chat, user, task.Action, task.ActionUntil)
+				} else {
+					action, actionErr = s.applyVerificationFailActionLocked(chat, user, task.Action)
+				}
+			} else if task.Action == joinProtectionActionTemporaryBan || task.Action == joinProtectionActionTemporaryRestrict {
+				actionErr = s.applyJoinProtectionTemporaryActionLocked(chat, user, task.Action, task.ActionUntil)
+			} else {
+				action, actionErr = s.applyVerificationFailActionLocked(chat, user, task.Action)
+			}
+			var partial *actionAppliedError
+			if errors.As(actionErr, &partial) {
+				action, actionErr = "partial_kick", nil
+			}
+			if actionErr != nil && !isTerminalTelegramCleanupError(actionErr) {
+				if s.exemptUser(ctx, chat, user) {
+					if err := rescheduleJoinProtectionCleanupRedis(ctx, s.redis, task.Member, time.Now().Add(time.Minute)); err != nil {
+						return err
+					}
+					return nil
+				}
+				if task.Action == joinProtectionActionTemporaryBan {
+					_ = s.temporaryRestrictJoinFloodUserLocked(chat, user, task.ActionUntil)
+				} else if task.Action != joinProtectionActionTemporaryRestrict {
+					_ = s.restrictJoinFloodUserFallbackLocked(chat, user)
+				}
+				cleanupPolicy := config.DefaultJoinProtectionPolicy
+				if loadedPolicy, policyErr := s.LoadGuardPolicy(ctx, task.ChatID); policyErr == nil {
+					cleanupPolicy = loadedPolicy.JoinProtection
+				}
+				s.openTelegramCleanupCooldown(ctx, chat, cleanupPolicy, actionErr)
+				_, retryAt := s.allowTelegramCleanup(ctx, task.ChatID, time.Now())
+				if retryAt.IsZero() {
+					retryAt = time.Now().Add(5 * time.Minute)
+				}
+				if err := rescheduleJoinProtectionCleanupRedis(ctx, s.redis, task.Member, retryAt); err != nil {
+					s.logger.Error("reschedule failed join protection cleanup", zap.Error(err), zap.Int64("chat_id", task.ChatID), zap.Int64("user_id", task.UserID))
+				}
+				return nil
+			}
+			if actionErr != nil {
+				action = "already_absent"
+			}
+			marked, err := completeJoinProtectionCleanupRedis(ctx, s.redis, task.Member, action)
+			if err != nil || !marked {
+				if err == nil {
+					err = fmt.Errorf("cleanup task was removed before result persisted")
+				}
+				return fmt.Errorf("persist redis cleanup result: %w", err)
+			}
+			s.markTelegramCleanupSuccess(ctx, task.ChatID)
+			if err := s.settleRedisJoinCleanup(ctx, task, action); err != nil {
 				if rescheduleErr := rescheduleJoinProtectionCleanupRedis(ctx, s.redis, task.Member, time.Now().Add(time.Minute)); rescheduleErr != nil {
 					return errors.Join(err, rescheduleErr)
 				}
 				s.logger.Error("settle completed redis cleanup", zap.Error(err), zap.String("member", task.Member))
+				return nil
 			}
-			continue
+
+			s.logger.Info(
+				"redis join protection cleanup completed",
+				zap.String("event", "join_protection_redis_cleanup_completed"),
+				zap.Int64("chat_id", task.ChatID),
+				zap.Int64("user_id", task.UserID),
+				zap.String("action", action),
+			)
+			return nil
+		}()
+		if err != nil {
+			return err
 		}
-		state, stateErr := s.GetSystemState(ctx)
-		if stateErr != nil || state.Frozen || state.ActionsPaused {
-			if err := rescheduleJoinProtectionCleanupRedis(ctx, s.redis, task.Member, time.Now().Add(time.Minute)); err != nil {
-				s.logger.Error("reschedule join protection cleanup while actions paused", zap.Error(err), zap.Int64("chat_id", task.ChatID), zap.Int64("user_id", task.UserID))
-			}
-			if stateErr != nil {
-				return fmt.Errorf("reload system state before join protection cleanup: %w", stateErr)
-			}
+		if stop {
 			return nil
 		}
-		authorized, authErr := s.IsAuthorizedGroup(ctx, task.ChatID)
-		if authErr != nil || !authorized {
-			if err := rescheduleJoinProtectionCleanupRedis(ctx, s.redis, task.Member, time.Now().Add(time.Minute)); err != nil {
-				return err
-			}
-			continue
-		}
-		allowed, cooldownUntil := s.allowTelegramCleanup(ctx, task.ChatID, time.Now())
-		if !allowed {
-			if err := rescheduleJoinProtectionCleanupRedis(ctx, s.redis, task.Member, cooldownUntil); err != nil {
-				s.logger.Error("reschedule join protection cleanup during cooldown", zap.Error(err), zap.Int64("chat_id", task.ChatID), zap.Int64("user_id", task.UserID))
-			}
-			continue
-		}
-
-		chat := &tele.Chat{ID: task.ChatID}
-		if group, groupErr := s.queries.GetGroupByChatID(ctx, task.ChatID); groupErr == nil {
-			chat.Title = group.Title
-		}
-		user := &tele.User{ID: task.UserID, Username: task.Username, FirstName: task.FirstName}
-		if pause, reason := s.deferredExemption(ctx, chat, user); pause {
-			s.logger.Info("deferred cleanup paused", zap.String("reason", reason), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
-			if err := rescheduleJoinProtectionCleanupRedis(ctx, s.redis, task.Member, time.Now().Add(time.Minute)); err != nil {
-				return err
-			}
-			continue
-		}
-		// A newer database verification supersedes a Redis fallback. Never let
-		// an old fallback punish the new instance.
-		_, pendingErr := s.queries.GetPendingVerification(ctx, store.GetPendingVerificationParams{ChatID: task.ChatID, UserID: task.UserID})
-		if pendingErr == nil {
-			if err := removeJoinProtectionCleanupRedis(ctx, s.redis, task.Member, task.ChatID); err != nil {
-				return err
-			}
-			continue
-		}
-		if !errors.Is(pendingErr, pgx.ErrNoRows) {
-			if err := rescheduleJoinProtectionCleanupRedis(ctx, s.redis, task.Member, time.Now().Add(time.Minute)); err != nil {
-				return err
-			}
-			continue
-		}
-		currentTask, currentErr := joinProtectionCleanupCurrent(ctx, s.redis, task)
-		if currentErr != nil {
-			if err := rescheduleJoinProtectionCleanupRedis(ctx, s.redis, task.Member, time.Now().Add(time.Minute)); err != nil {
-				return err
-			}
-			continue
-		}
-		if !currentTask {
-			if err := removeJoinProtectionCleanupRedis(ctx, s.redis, task.Member, task.ChatID); err != nil {
-				return err
-			}
-			continue
-		}
-		action := task.Action
-		var actionErr error
-		now := time.Now()
-		// Old Redis records without a join generation cannot be tied to the
-		// current membership. Do not punish a possibly rejoined user. An
-		// already-expired temporary action is safe to settle without Telegram.
-		if task.MembershipGeneration == "" && !((task.Action == joinProtectionActionTemporaryBan || task.Action == joinProtectionActionTemporaryRestrict) && !joinProtectionActionDeadlineActive(task.ActionUntil, now)) {
-			s.logger.Warn("legacy redis cleanup has no membership generation; manual review required", zap.String("member", task.Member))
-			if err := rescheduleJoinProtectionCleanupRedis(ctx, s.redis, task.Member, now.Add(time.Minute)); err != nil {
-				return err
-			}
-			continue
-		}
-		if (task.Action == joinProtectionActionTemporaryBan || task.Action == joinProtectionActionTemporaryRestrict) && !joinProtectionActionDeadlineActive(task.ActionUntil, now) {
-			action = "expired"
-		} else if task.MembershipGeneration != "" {
-			current, currentErr := s.membershipSessionCurrent(ctx, task.ChatID, task.UserID, task.MembershipGeneration)
-			if currentErr != nil {
-				if err := rescheduleJoinProtectionCleanupRedis(ctx, s.redis, task.Member, now.Add(time.Minute)); err != nil {
-					s.logger.Error("reschedule join protection cleanup after membership lookup failure", zap.Error(err), zap.Int64("chat_id", task.ChatID), zap.Int64("user_id", task.UserID))
-				}
-				continue
-			}
-			if !current {
-				if err := removeJoinProtectionCleanupRedis(ctx, s.redis, task.Member, task.ChatID); err != nil {
-					s.logger.Error("remove superseded join protection cleanup", zap.Error(err), zap.Int64("chat_id", task.ChatID), zap.Int64("user_id", task.UserID))
-				}
-				s.logger.Info("superseded join protection cleanup discarded", zap.String("event", "join_protection_cleanup_superseded"), zap.Int64("chat_id", task.ChatID), zap.Int64("user_id", task.UserID), zap.String("membership_generation", task.MembershipGeneration))
-				continue
-			}
-			if task.Action == joinProtectionActionTemporaryBan || task.Action == joinProtectionActionTemporaryRestrict {
-				actionErr = s.applyJoinProtectionTemporaryAction(chat, user, task.Action, task.ActionUntil)
-			} else {
-				action, actionErr = s.applyVerificationFailAction(chat, user, task.Action)
-			}
-		} else if task.Action == joinProtectionActionTemporaryBan || task.Action == joinProtectionActionTemporaryRestrict {
-			actionErr = s.applyJoinProtectionTemporaryAction(chat, user, task.Action, task.ActionUntil)
-		} else {
-			action, actionErr = s.applyVerificationFailAction(chat, user, task.Action)
-		}
-		if actionErr != nil && !isTerminalTelegramCleanupError(actionErr) {
-			if s.exemptUser(ctx, chat, user) {
-				if err := rescheduleJoinProtectionCleanupRedis(ctx, s.redis, task.Member, time.Now().Add(time.Minute)); err != nil {
-					return err
-				}
-				continue
-			}
-			if task.Action == joinProtectionActionTemporaryBan {
-				_ = s.temporaryRestrictJoinFloodUser(chat, user, task.ActionUntil)
-			} else if task.Action != joinProtectionActionTemporaryRestrict {
-				_ = s.restrictJoinFloodUserFallback(chat, user)
-			}
-			cleanupPolicy := config.DefaultJoinProtectionPolicy
-			if loadedPolicy, policyErr := s.LoadGuardPolicy(ctx, task.ChatID); policyErr == nil {
-				cleanupPolicy = loadedPolicy.JoinProtection
-			}
-			s.openTelegramCleanupCooldown(ctx, chat, cleanupPolicy, actionErr)
-			_, retryAt := s.allowTelegramCleanup(ctx, task.ChatID, time.Now())
-			if retryAt.IsZero() {
-				retryAt = time.Now().Add(5 * time.Minute)
-			}
-			if err := rescheduleJoinProtectionCleanupRedis(ctx, s.redis, task.Member, retryAt); err != nil {
-				s.logger.Error("reschedule failed join protection cleanup", zap.Error(err), zap.Int64("chat_id", task.ChatID), zap.Int64("user_id", task.UserID))
-			}
-			continue
-		}
-		if actionErr != nil {
-			action = "already_absent"
-		}
-		marked, err := completeJoinProtectionCleanupRedis(ctx, s.redis, task.Member, action)
-		if err != nil || !marked {
-			if err == nil {
-				err = fmt.Errorf("cleanup task was removed before result persisted")
-			}
-			return fmt.Errorf("persist redis cleanup result: %w", err)
-		}
-		s.markTelegramCleanupSuccess(ctx, task.ChatID)
-		if err := s.settleRedisJoinCleanup(ctx, task, action); err != nil {
-			if rescheduleErr := rescheduleJoinProtectionCleanupRedis(ctx, s.redis, task.Member, time.Now().Add(time.Minute)); rescheduleErr != nil {
-				return errors.Join(err, rescheduleErr)
-			}
-			s.logger.Error("settle completed redis cleanup", zap.Error(err), zap.String("member", task.Member))
-			continue
-		}
-
-		s.logger.Info(
-			"redis join protection cleanup completed",
-			zap.String("event", "join_protection_redis_cleanup_completed"),
-			zap.Int64("chat_id", task.ChatID),
-			zap.Int64("user_id", task.UserID),
-			zap.String("action", action),
-		)
 	}
 	return nil
 }
@@ -1078,6 +1172,7 @@ func (s *Service) settleRedisJoinCleanup(ctx context.Context, task joinProtectio
 	_, err := s.queries.RecordVerificationCleanup(ctx, store.VerificationCleanupSettlement{
 		Key: key, ChatID: task.ChatID, UserID: task.UserID, Username: stringPtr(task.Username),
 		Rule: rule, Matched: stringPtr(task.Reason), Action: action,
+		NotifyRedis: task.NotificationVersion == "1", MembershipGeneration: task.MembershipGeneration, ActionUntil: task.ActionUntil,
 	})
 	if err != nil {
 		return err
@@ -1202,7 +1297,8 @@ func (s *Service) handleJoinProtectionCleanupExpiry(
 		if s.exemptUser(ctx, chat, user) {
 			return verificationExpiryRetry(time.Now().Add(time.Minute), "group exemption active"), nil
 		}
-		if err := s.applyJoinProtectionTemporaryAction(chat, user, payload.Action, payload.ActionUntil); err != nil {
+		// HandleVerificationExpiry owns the subject gate through settlement.
+		if err := s.applyJoinProtectionTemporaryActionLocked(chat, user, payload.Action, payload.ActionUntil); err != nil {
 			if isTerminalTelegramCleanupError(err) {
 				action = "already_absent"
 			} else {
@@ -1216,7 +1312,7 @@ func (s *Service) handleJoinProtectionCleanupExpiry(
 	_, err := s.queries.RecordVerificationCleanup(ctx, store.VerificationCleanupSettlement{
 		Key: verificationCleanupKey(pending), PendingID: &pending.ID, ChatID: pending.ChatID,
 		UserID: pending.UserID, Username: pending.Username,
-		Rule: "join_protection_deferred_action_cleanup", Matched: stringPtr(payload.Reason), Action: action,
+		Rule: "join_protection_deferred_action_cleanup", Matched: stringPtr(payload.Reason), Action: action, MembershipGeneration: payload.MembershipGeneration, ActionUntil: payload.ActionUntil,
 	})
 	if err != nil {
 		return VerificationExpiryResult{}, fmt.Errorf("persist completed join protection cleanup: %w", err)
@@ -1238,11 +1334,26 @@ func (s *Service) handleJoinProtectionCleanupExpiry(
 }
 
 func (s *Service) handleVerificationPromptFailure(ctx context.Context, chat *tele.Chat, user *tele.User, policy config.GuardPolicy, promptErr error, membershipGeneration string) error {
+	release, err := s.AcquireModerationReview(ctx, chat.ID, user.ID)
+	if err != nil {
+		return err
+	}
+	defer release()
 	if s.exemptUser(ctx, chat, user) {
 		return nil
 	}
 	if chat == nil || user == nil {
 		return nil
+	}
+	if membershipGeneration != "" {
+		id := fmt.Sprintf("verification_prompt_failed:%d:%d:%s", chat.ID, user.ID, membershipGeneration)
+		exists, err := s.queries.ModerationCaseExists(ctx, id)
+		if err != nil {
+			return err
+		}
+		if exists {
+			return nil
+		}
 	}
 	payload, _ := json.Marshal(map[string]string{"reason": "verification_prompt_failed", "membership_generation": membershipGeneration})
 	payload, snapshotErr := withVerificationFailActionSnapshot(payload, policy.Verify.FailAction)
@@ -1326,11 +1437,15 @@ func (s *Service) handleVerificationPromptFailure(ctx context.Context, chat *tel
 			if s.exemptUser(ctx, chat, user) {
 				return "", errExemptPending
 			}
-			return s.applyVerificationFailAction(chat, user, policy.Verify.FailAction)
+			return s.applyVerificationFailActionLocked(chat, user, policy.Verify.FailAction)
 		},
 		persist: persistCleanup,
 	})
 	if cleanupErr == nil {
+		if membershipGeneration != "" && (action == "ban" || action == "kick" || action == "mute") {
+			id := fmt.Sprintf("%d:%d:%s", chat.ID, user.ID, membershipGeneration)
+			_ = s.recordSubjectCase(ctx, chat, user, "verification_prompt_failed", id, action, "executed", "验证任务未能建立，已执行入群处理", map[string]any{"membership_generation": membershipGeneration, "rule": "verification_prompt_failed"})
+		}
 		s.markTelegramCleanupSuccess(ctx, chat.ID)
 		if _, err := s.queries.InsertViolation(ctx, store.InsertViolationParams{
 			ChatID:   chat.ID,
@@ -1345,6 +1460,14 @@ func (s *Service) handleVerificationPromptFailure(ctx context.Context, chat *tel
 		return nil
 	}
 
+	var applied *actionAppliedError
+	if errors.As(cleanupErr, &applied) && membershipGeneration != "" {
+		id := fmt.Sprintf("%d:%d:%s", chat.ID, user.ID, membershipGeneration)
+		if err := s.recordSubjectCase(ctx, chat, user, "verification_prompt_failed", id, "kick", "partial", "已移出群聊，重新入群权限尚待管理员确认", map[string]any{"membership_generation": membershipGeneration, "rule": "verification_prompt_failed"}); err != nil {
+			return errors.Join(cleanupErr, err)
+		}
+		return nil
+	}
 	s.openTelegramCleanupCooldown(ctx, chat, policy.JoinProtection, cleanupErr)
 	if cleanupPersisted {
 		return nil

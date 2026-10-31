@@ -121,6 +121,8 @@ func main() {
 		}
 	}()
 
+	moderationNotifications := worker.NewModerationNotifications(logger, queries, cfg.BotToken, cfg.PublicBaseURL)
+	go moderationNotifications.Run(workerCtx)
 	expiryWorker := worker.NewVerificationExpiry(logger, queries, botService)
 	go expiryWorker.Run(workerCtx)
 	joinProtectionRecoveryWorker := worker.NewJoinProtectionRecovery(logger, botService)

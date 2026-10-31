@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 
@@ -27,14 +28,14 @@ func (s *Service) handleUngraduatedInviteServiceMessage(ctx context.Context, msg
 	return s.handleUngraduatedInvite(ctx, msg.Chat, msg.Sender, msg.UsersJoined, msg, policy, "new_chat_members")
 }
 
-func (s *Service) handleUngraduatedInviteChatMember(ctx context.Context, update *tele.ChatMemberUpdate, target *tele.User, policy config.GuardPolicy) bool {
+func (s *Service) handleUngraduatedInviteChatMember(ctx context.Context, update *tele.ChatMemberUpdate, target *tele.User, policy config.GuardPolicy, generations ...string) bool {
 	if update == nil || update.Chat == nil || target == nil {
 		return false
 	}
-	return s.handleUngraduatedInvite(ctx, update.Chat, update.Sender, []tele.User{*target}, nil, policy, "chat_member")
+	return s.handleUngraduatedInvite(ctx, update.Chat, update.Sender, []tele.User{*target}, nil, policy, "chat_member", generations...)
 }
 
-func (s *Service) handleUngraduatedInvite(ctx context.Context, chat *tele.Chat, inviter *tele.User, targets []tele.User, serviceMessage *tele.Message, policy config.GuardPolicy, source string) bool {
+func (s *Service) handleUngraduatedInvite(ctx context.Context, chat *tele.Chat, inviter *tele.User, targets []tele.User, serviceMessage *tele.Message, policy config.GuardPolicy, source string, generations ...string) bool {
 	if s == nil || s.queries == nil || chat == nil || inviter == nil || !ungraduatedInviteRestrictionEnabled(policy) {
 		return false
 	}
@@ -104,25 +105,64 @@ func (s *Service) handleUngraduatedInvite(ctx context.Context, chat *tele.Chat, 
 	}
 
 	successfulKicks := 0
+	partialKicks := 0
 	pausedDuringAction := false
 	for i := range blockedTargets {
 		target := blockedTargets[i]
 		if s.exemptUser(ctx, chat, inviter) || s.exemptUser(ctx, chat, &target) {
 			continue
 		}
-		if err := s.kickUser(chat, &target); err != nil {
+		identity := ""
+		if len(generations) > 0 && generations[0] != "" {
+			identity = "generation:" + generations[0]
+		} else if serviceMessage != nil && serviceMessage.ID > 0 {
+			identity = fmt.Sprintf("message:%d", serviceMessage.ID)
+		}
+		caseID := fmt.Sprintf("%d:%d:%s", chat.ID, target.ID, identity)
+		release, gateErr := s.AcquireModerationReview(ctx, chat.ID, target.ID)
+		if gateErr != nil {
+			continue
+		}
+		ownership := map[string]any{"inviter_user_id": inviter.ID, "source": source, "join_identity": identity}
+		if identity != "" && !target.IsBot {
+			known, err := s.queries.ModerationCaseExists(ctx, "ungraduated_invite:"+caseID)
+			if err != nil {
+				if s.logger != nil {
+					s.logger.Warn("check invite case failed", zap.Error(err))
+				}
+				release()
+				continue
+			}
+			if known {
+				successfulKicks++
+				release()
+				continue
+			}
+		}
+		if err := s.kickUserLocked(chat, &target); err != nil {
+			var applied *actionAppliedError
+			if identity != "" && !target.IsBot && errors.As(err, &applied) {
+				if caseErr := s.recordSubjectCase(ctx, chat, &target, "ungraduated_invite", caseID, "kick", "partial", "已移出群聊，重新入群权限尚待管理员确认", ownership); caseErr == nil {
+					partialKicks++
+				}
+			}
 			if errors.Is(err, errActionsPaused) {
 				pausedDuringAction = true
 			}
 			if s.logger != nil {
 				s.logger.Warn("kick user invited by ungraduated inviter failed", zap.Error(err), zap.Int64("chat_id", chat.ID), zap.Int64("inviter_user_id", inviter.ID), zap.Int64("target_user_id", target.ID), zap.Bool("target_is_bot", target.IsBot))
 			}
+			release()
 			if pausedDuringAction {
 				break
 			}
 			continue
 		}
 		successfulKicks++
+		if identity != "" {
+			_ = s.recordSubjectCase(ctx, chat, &target, "ungraduated_invite", caseID, "kick", "executed", "因群邀请规则，已移出群聊", ownership)
+		}
+		release()
 		if s.logger != nil {
 			s.logger.Info("kicked user invited by ungraduated inviter", zap.Int64("chat_id", chat.ID), zap.Int64("inviter_user_id", inviter.ID), zap.Int64("target_user_id", target.ID), zap.Bool("target_is_bot", target.IsBot), zap.String("trust_status", trust.Status), zap.String("source", source))
 		}
@@ -136,19 +176,19 @@ func (s *Service) handleUngraduatedInvite(ctx context.Context, chat *tele.Chat, 
 
 	if successfulKicks != len(blockedTargets) {
 		prefix := "failed:"
-		if successfulKicks > 0 || serviceMessageDeleted {
+		if successfulKicks > 0 || partialKicks > 0 || serviceMessageDeleted {
 			prefix = "partial_failed:"
 		}
 		if pausedDuringAction {
 			prefix = "skipped_paused:"
-			if successfulKicks > 0 || serviceMessageDeleted {
+			if successfulKicks > 0 || partialKicks > 0 || serviceMessageDeleted {
 				prefix = "partial_paused:"
 			}
 		}
 		action = prefix + plannedAction
 	}
 	s.recordUngraduatedInviteViolation(ctx, chat, inviter, blockedTargets, action, source, trust)
-	return successfulKicks == len(blockedTargets)
+	return successfulKicks+partialKicks == len(blockedTargets)
 }
 
 func (s *Service) inviteTargetsForRestriction(inviter *tele.User, targets []tele.User) []tele.User {

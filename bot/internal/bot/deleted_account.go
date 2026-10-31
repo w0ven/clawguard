@@ -3,6 +3,7 @@ package bot
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"unicode"
 
@@ -122,6 +123,7 @@ func (s *Service) handleDeletedAccountJoin(
 	user *tele.User,
 	policy config.GuardPolicy,
 	actionsPaused bool,
+	generations ...string,
 ) (bool, error) {
 	if chat == nil || user == nil {
 		return false, nil
@@ -139,6 +141,11 @@ func (s *Service) handleDeletedAccountJoin(
 		return true, nil
 	}
 
+	release, err := s.AcquireModerationReview(ctx, chat.ID, user.ID)
+	if err != nil {
+		return true, err
+	}
+	defer release()
 	actionRollback, actionOK := s.acquireUserActionLock(chat.ID, user.ID)
 	if !actionOK {
 		if s.logger != nil {
@@ -147,7 +154,7 @@ func (s *Service) handleDeletedAccountJoin(
 		return true, nil
 	}
 
-	if err := s.banUser(chat, user); err != nil {
+	if err := s.banUserWithOwnershipLocked(chat, user, false); err != nil {
 		actionRollback()
 		if errors.Is(err, errActionsPaused) {
 			s.recordDeletedAccountJoinViolation(ctx, chat, user, result.MatchedRule, "skipped_paused:ban")
@@ -175,6 +182,10 @@ func (s *Service) handleDeletedAccountJoin(
 		}
 	}
 
+	if len(generations) > 0 && generations[0] != "" {
+		id := fmt.Sprintf("%d:%d:%s", chat.ID, user.ID, generations[0])
+		_ = s.recordSubjectCase(ctx, chat, user, "deleted_account_join", id, "ban", "executed", "入群账号命中群规则，已被封禁", map[string]any{"membership_generation": generations[0], "rule": deletedAccountRule})
+	}
 	s.recordDeletedAccountJoinViolation(ctx, chat, user, result.MatchedRule, "ban")
 	s.writeModerationAudit(ctx, "filter", chat, user, "deleted_account_ban", "显示名或用户名命中 Deleted Account", map[string]any{
 		"scene":   "join",

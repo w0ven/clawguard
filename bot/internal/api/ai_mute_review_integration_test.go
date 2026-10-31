@@ -50,7 +50,7 @@ func (t *muteTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 			<-release
 		}
 		if fail {
-			return nil, fmt.Errorf("injected unmute failure")
+			return &http.Response{StatusCode: 403, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"ok":false,"error_code":403,"description":"Forbidden: insufficient rights"}`))}, nil
 		}
 		t.mu.Lock()
 		t.restricted = false
@@ -117,13 +117,19 @@ func TestAIMuteReviewIntegration(t *testing.T) {
 	done := make(chan *httptest.ResponseRecorder, 1)
 	go func() { done <- call() }()
 	<-started
-	rec = call()
-	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "正在执行") || tr.count() != 2 {
+	second := make(chan *httptest.ResponseRecorder, 1)
+	go func() { second <- call() }()
+	select {
+	case got := <-second:
 		close(release)
-		t.Fatalf("concurrent claim %d %s %d", rec.Code, rec.Body, tr.count())
+		t.Fatalf("concurrent subject was not serialized: %d %s", got.Code, got.Body)
+	case <-time.After(30 * time.Millisecond):
 	}
 	close(release)
 	rec = <-done
+	if got := <-second; got.Code != 200 || tr.count() != 2 {
+		t.Fatalf("concurrent completion %d %s calls=%d", got.Code, got.Body, tr.count())
+	}
 	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"unmute_performed":true`) {
 		t.Fatalf("retry %d %s", rec.Code, rec.Body)
 	}
@@ -189,22 +195,29 @@ func TestAIMuteReviewIntegration(t *testing.T) {
 	done = make(chan *httptest.ResponseRecorder, 1)
 	go func() { done <- call() }()
 	<-started
-	if err = svc.BanChatUser(ctx, -100, 123); err != nil {
+	banDone := make(chan error, 1)
+	go func() { banDone <- svc.BanChatUser(ctx, -100, 123) }()
+	select {
+	case e := <-banDone:
 		close(release)
-		t.Fatal(err)
+		t.Fatalf("ban did not wait for review: %v", e)
+	case <-time.After(30 * time.Millisecond):
 	}
 	close(release)
 	rec = <-done
-	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "冲突") || strings.Contains(rec.Body.String(), `"unmute_performed":true`) {
-		t.Fatalf("later ban conflict %d %s", rec.Code, rec.Body)
+	if e := <-banDone; e != nil {
+		t.Fatal(e)
+	}
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"unmute_performed":true`) {
+		t.Fatalf("review before later ban %d %s", rec.Code, rec.Body)
 	}
 	tr.mu.Lock()
 	tr.started, tr.release = nil, nil
 	tr.mu.Unlock()
 	before = tr.count()
 	rec = call()
-	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "冲突") || tr.count() != before {
-		t.Fatalf("conflict repeat %d %s", rec.Code, rec.Body)
+	if rec.Code != 200 || strings.Contains(rec.Body.String(), `"unmute_performed":true`) || tr.count() != before {
+		t.Fatalf("completed review repeated after later ban %d %s", rec.Code, rec.Body)
 	}
 	var other string
 	if err = fx.pool.QueryRow(ctx, `SELECT status FROM user_trust WHERE chat_id=-200 AND user_id=123`).Scan(&other); err != nil || other != "banned" {

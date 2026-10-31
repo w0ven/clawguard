@@ -6,8 +6,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -41,7 +43,20 @@ func (x *reviewRecordingTransport) RoundTrip(r *http.Request) (*http.Response, e
 		<-release
 	}
 	if fail {
-		return nil, fmt.Errorf("simulated telegram failure")
+		return &http.Response{StatusCode: 403, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"ok":false,"error_code":403,"description":"Forbidden: insufficient rights"}`))}, nil
+	}
+	if strings.HasSuffix(r.URL.Path, "/getChatMember") {
+		raw, _ := io.ReadAll(r.Body)
+		r.Body = io.NopCloser(strings.NewReader(string(raw)))
+		var p struct {
+			UserID string `json:"user_id"`
+		}
+		_ = json.Unmarshal(raw, &p)
+		user, _ := strconv.ParseInt(p.UserID, 10, 64)
+		if user >= 700 {
+			body := fmt.Sprintf(`{"ok":true,"result":{"user":{"id":%d,"first_name":"fixture"},"status":"kicked"}}`, user)
+			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
+		}
 	}
 	return (exemptTelegramTransport{}).RoundTrip(r)
 }
@@ -105,6 +120,22 @@ func TestReviewUnbanAndScopedAudit(t *testing.T) {
 		stats, e := fx.queries.GetScopedAdminStats(ctx, nil)
 		if e != nil || stats.GroupsCount != 0 || stats.TodayViolations != 0 || stats.ActiveVerifications != 0 {
 			t.Fatalf("empty scope %+v %v", stats, e)
+		}
+	})
+	t.Run("notification_scope_and_pagination", func(t *testing.T) {
+		for _, chat := range []int64{-100, -200} {
+			_, e := fx.queries.RecordModerationCase(ctx, store.ModerationCaseInput{SourceKey: fmt.Sprintf("scope:%d", chat), SourceKind: "test", SourceID: fmt.Sprint(chat), ChatID: chat, UserID: 12345, Action: "warn", Result: "executed"})
+			if e != nil {
+				t.Fatal(e)
+			}
+		}
+		rec := request("GET", "/api/admin/moderation-notifications?chat_id=-100&limit=1", "", scoped)
+		if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"user_id":12345`) {
+			t.Fatalf("allowed: %d %s", rec.Code, rec.Body)
+		}
+		rec = request("GET", "/api/admin/moderation-notifications?chat_id=-200", "", scoped)
+		if rec.Code != 403 || strings.Contains(rec.Body.String(), "12345") {
+			t.Fatalf("cross-group: %d %s", rec.Code, rec.Body)
 		}
 	})
 	t.Run("web_unban_clears_group_ban_and_does_not_reban", func(t *testing.T) {
@@ -326,13 +357,19 @@ func TestReviewUnbanAndScopedAudit(t *testing.T) {
 			close(release)
 			t.Fatalf("user row remained locked over Telegram: %v", e)
 		}
-		rec = call(blocked)
-		if rec.Code != 409 {
+		second := make(chan *httptest.ResponseRecorder, 1)
+		go func() { second <- call(blocked) }()
+		select {
+		case x := <-second:
 			close(release)
-			t.Fatalf("concurrent claim =%d %s", rec.Code, rec.Body)
+			t.Fatalf("review not serialized: %d %s", x.Code, x.Body)
+		case <-time.After(30 * time.Millisecond):
 		}
 		close(release)
 		rec = <-result
+		if x := <-second; x.Code != 200 || strings.Contains(x.Body.String(), `"unban_performed":true`) {
+			t.Fatalf("second review %d %s", x.Code, x.Body)
+		}
 		if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"unban_performed":true`) {
 			t.Fatalf("blocked review=%d %s", rec.Code, rec.Body)
 		}
@@ -351,16 +388,22 @@ func TestReviewUnbanAndScopedAudit(t *testing.T) {
 		case <-time.After(3 * time.Second):
 			t.Fatal("telegram was not reached")
 		}
-		if e = svc.BanChatUser(ctx, -100, 782); e != nil {
+		banDone := make(chan error, 1)
+		go func() { banDone <- svc.BanChatUser(ctx, -100, 782) }()
+		select {
+		case e := <-banDone:
 			close(release)
-			t.Fatal(e)
+			t.Fatalf("later ban was not serialized: %v", e)
+		case <-time.After(30 * time.Millisecond):
 		}
 		close(release)
 		rec = <-result
-		if rec.Code != 200 || !strings.Contains(rec.Body.String(), "冲突") || strings.Contains(rec.Body.String(), `"unban_performed":true`) {
-			t.Fatalf("manual ban conflict=%d %s", rec.Code, rec.Body)
+		if e = <-banDone; e != nil {
+			t.Fatal(e)
 		}
-		assertStatus(-100, 782, "banned")
+		if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"unban_performed":true`) {
+			t.Fatalf("review preceding later ban=%d %s", rec.Code, rec.Body)
+		}
 		var override string
 		if e = fx.pool.QueryRow(ctx, `SELECT admin_override FROM ai_decisions WHERE id=$1`, conflicting).Scan(&override); e != nil || override != "false_positive" {
 			t.Fatalf("conflict review not saved: %q %v", override, e)
@@ -370,8 +413,8 @@ func TestReviewUnbanAndScopedAudit(t *testing.T) {
 		transport.mu.Unlock()
 		beforeConflict := len(transport.calls())
 		rec = call(conflicting)
-		if rec.Code != 200 || !strings.Contains(rec.Body.String(), "冲突") {
-			t.Fatalf("conflict retry=%d %s", rec.Code, rec.Body)
+		if rec.Code != 200 || strings.Contains(rec.Body.String(), `"unban_performed":true`) {
+			t.Fatalf("completed retry=%d %s", rec.Code, rec.Body)
 		}
 		for _, method := range transport.calls()[beforeConflict:] {
 			if strings.HasSuffix(method, "/unbanChatMember") {

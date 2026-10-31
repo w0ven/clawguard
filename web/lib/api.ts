@@ -10,6 +10,8 @@ export class ApiError extends Error {
   }
 }
 
+const pendingModerationRequests = new Map<string, string>();
+
 export async function apiFetch<T>(
   input: string,
   init?: RequestInit,
@@ -20,6 +22,16 @@ export async function apiFetch<T>(
     "Content-Type": "application/json",
     ...((init?.headers ?? {}) as Record<string, string>),
   };
+  const moderationRequest = method === "POST" && /^\/api\/admin\/(?:un)?ban(?:\?|$)/.test(input) && typeof window !== "undefined";
+  const requestScope = `${csrfToken}:${input}`;
+  if (moderationRequest && !headers["Idempotency-Key"]) {
+    let key = pendingModerationRequests.get(requestScope);
+    if (!key) {
+      key = crypto.randomUUID();
+      pendingModerationRequests.set(requestScope, key);
+    }
+    headers["Idempotency-Key"] = key;
+  }
   if (csrfToken && !["GET", "HEAD", "OPTIONS"].includes(method)) {
     headers["X-CSRF-Token"] = csrfToken;
   }
@@ -29,6 +41,10 @@ export async function apiFetch<T>(
     credentials: "include",
     headers,
   });
+
+  if (moderationRequest && response.status !== 409 && response.status !== 503) {
+    pendingModerationRequests.delete(requestScope);
+  }
 
   if (response.status === 401) {
     if (typeof window !== "undefined" && window.location.pathname !== "/") {

@@ -20,10 +20,12 @@ var ErrDualCaptchaUnavailable = errors.New("dual verification is unavailable")
 var ErrDualCaptchaConflict = errors.New("verification could not safely restore permissions; contact an administrator")
 
 type dualCaptchaGenerationKey struct{}
+type dualCaptchaStartTimeKey struct{}
 
 type dualCaptchaPayload struct {
 	Token                string `json:"token"`
 	MembershipGeneration string `json:"membership_generation"`
+	MiniApp              bool   `json:"miniapp,omitempty"`
 }
 
 func (s *Service) startDualCaptchaVerification(ctx context.Context, chat *tele.Chat, user *tele.User, policy config.GuardPolicy) error {
@@ -35,15 +37,15 @@ func (s *Service) startDualCaptchaVerification(ctx context.Context, chat *tele.C
 	if err != nil {
 		return err
 	}
-	payload, err := json.Marshal(dualCaptchaPayload{Token: token, MembershipGeneration: generation})
+	payload, err := json.Marshal(dualCaptchaPayload{Token: token, MembershipGeneration: generation, MiniApp: true})
 	if err != nil {
 		return err
 	}
-	verifyURL := strings.TrimRight(s.cfg.PublicBaseURL, "/") + "/verify/dual#" + token
+	verifyURL := "https://t.me/" + strings.TrimPrefix(s.cfg.BotUsername, "@") + "?start=v_" + token
 	markup := &tele.ReplyMarkup{}
-	button := markup.URL("打开验证页", verifyURL)
+	button := markup.URL("开始验证", verifyURL)
 	markup.Inline(markup.Row(button), s.adminVerificationRow(markup, user.ID))
-	prompt := fmt.Sprintf("%s 你好，请在 %s 内完成两项人机验证", mentionHTML(user), formatTimeout(policy.Verify.TimeoutSeconds))
+	prompt := fmt.Sprintf("欢迎加入 %s\n请在 %s 内完成验证，验证前暂时无法发言。点击下方按钮，到机器人私聊继续。", mentionHTML(user), formatTimeout(policy.Verify.TimeoutSeconds))
 	sent, err := s.sendOrEditVerificationText(ctx, chat, s.existingVerificationMessageID(ctx, chat.ID, user.ID), prompt, markup)
 	if err != nil {
 		return err
@@ -56,17 +58,36 @@ func (s *Service) startDualCaptchaVerification(ctx context.Context, chat *tele.C
 }
 
 func (s *Service) VerifyDualCaptcha(ctx context.Context, token, cfResponse, hResponse, ip string) error {
-	if !s.cfg.DualCaptchaConfigured() {
+	return s.verifyDualCaptchaForUser(ctx, token, cfResponse, hResponse, ip, 0, false)
+}
+
+func (s *Service) VerifyMiniAppDualCaptcha(ctx context.Context, token, cfResponse, hResponse, ip string, userID int64) error {
+	if userID <= 0 {
+		return pgx.ErrNoRows
+	}
+	return s.verifyDualCaptchaForUser(ctx, token, cfResponse, hResponse, ip, userID, false)
+}
+
+// RecoverMiniAppDualCaptcha only resumes a previously verified join task.
+func (s *Service) RecoverMiniAppDualCaptcha(ctx context.Context, token string, userID int64) error {
+	if userID <= 0 {
+		return pgx.ErrNoRows
+	}
+	return s.verifyDualCaptchaForUser(ctx, token, "", "", "", userID, true)
+}
+
+func (s *Service) verifyDualCaptchaForUser(ctx context.Context, token, cfResponse, hResponse, ip string, userID int64, recoverOnly bool) error {
+	if !recoverOnly && !s.cfg.DualCaptchaConfigured() {
 		return ErrDualCaptchaUnavailable
 	}
-	if len(token) != 36 || strings.TrimSpace(cfResponse) == "" || strings.TrimSpace(hResponse) == "" || len(cfResponse) > 2048 || len(hResponse) > 8192 {
+	if len(token) != 36 || (!recoverOnly && (strings.TrimSpace(cfResponse) == "" || strings.TrimSpace(hResponse) == "")) || len(cfResponse) > 2048 || len(hResponse) > 8192 {
 		return errDualProvider
 	}
 	claim, err := generateVerificationToken()
 	if err != nil {
 		return ErrDualCaptchaUnavailable
 	}
-	pending, state, err := s.queries.ClaimDualCaptcha(ctx, token, claim)
+	pending, state, err := s.queries.ClaimDualCaptchaForUser(ctx, token, claim, userID)
 	if errors.Is(err, store.ErrDualCaptchaConflict) {
 		return ErrDualCaptchaConflict
 	}
@@ -77,6 +98,9 @@ func (s *Service) VerifyDualCaptcha(ctx context.Context, token, cfResponse, hRes
 	var payload dualCaptchaPayload
 	if json.Unmarshal(pending.Payload, &payload) != nil || payload.Token != token || payload.MembershipGeneration == "" {
 		return ErrDualCaptchaConflict
+	}
+	if recoverOnly && state != "verified" && state != "applying" {
+		return errDualProvider
 	}
 	if state == "validating" {
 		u, err := url.Parse(s.cfg.PublicBaseURL)
@@ -92,6 +116,13 @@ func (s *Service) VerifyDualCaptcha(ctx context.Context, token, cfResponse, hRes
 		}
 		state = "verified"
 	}
+	// Serialize the safety checks, Telegram permission change and durable finish
+	// with administrative review and new penalties for this same subject.
+	release, err := s.AcquireModerationReview(ctx, pending.ChatID, pending.UserID)
+	if err != nil {
+		return ErrDualCaptchaUnavailable
+	}
+	defer release()
 	current, err := s.membershipSessionCurrent(ctx, pending.ChatID, pending.UserID, payload.MembershipGeneration)
 	if err != nil {
 		return ErrDualCaptchaUnavailable
@@ -233,6 +264,9 @@ func (s *Service) finishDualCaptcha(ctx context.Context, pending store.PendingVe
 	ok, err := s.queries.FinishDualCaptcha(ctx, pending.ID, claim)
 	if err != nil || !ok {
 		return ErrDualCaptchaConflict
+	}
+	if payload.MiniApp {
+		s.notifyMiniAppVerification(pending.ID, pending.UserID)
 	}
 	s.ensureRuntimeGuards()
 	s.joinProtector.ReleasePending(chat.ID)

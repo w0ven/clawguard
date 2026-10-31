@@ -16,6 +16,16 @@ import (
 // reviewAIMute uses a durable claim and never keeps a DB transaction over Telegram.
 // Mismatched or historical restrictions are deliberately left to an administrator.
 func (s *Server) reviewAIMute(ctx context.Context, d store.AIDecision) (bool, string) {
+	release, err := s.botService.AcquireModerationReview(ctx, d.ChatID, d.UserID)
+	if err != nil {
+		return false, "处理正在进行，请稍后重试"
+	}
+	defer release()
+	return s.reviewAIMuteLocked(ctx, d, true)
+}
+
+// reviewAIMuteLocked requires the subject gate to remain held through settlement.
+func (s *Server) reviewAIMuteLocked(ctx context.Context, d store.AIDecision, notify bool) (bool, string) {
 	q := s.botService.Queries()
 	raw := make([]byte, 16)
 	if _, e := rand.Read(raw); e != nil {
@@ -54,6 +64,10 @@ func (s *Server) reviewAIMute(ctx context.Context, d store.AIDecision) (bool, st
 			warning = "原禁言复核已完成，本次仅保存结论；后续限制不会自动解除，如存在请人工核查"
 			return nil
 		}
+		if hasClaim && claim.State == "dispatching" {
+			warning = "Telegram 操作结果不明，请人工核查，系统不会自动重试"
+			return nil
+		}
 		if hasClaim && claim.State == "conflict" {
 			warning = "禁言复核与后续限制冲突，请人工核查"
 			return nil
@@ -71,7 +85,7 @@ func (s *Server) reviewAIMute(ctx context.Context, d store.AIDecision) (bool, st
 			warning = "禁言复核正在执行，请稍后重试"
 			return nil
 		}
-		if e = tx.ClaimAIMuteReview(ctx, d.ChatID, d.UserID, d.ID, token); e != nil {
+		if e = tx.ClaimAIMuteReview(ctx, d.ChatID, d.UserID, d.ID, token, notify); e != nil {
 			return e
 		}
 		dispatch = true
@@ -130,9 +144,16 @@ func (s *Server) reviewAIMute(ctx context.Context, d store.AIDecision) (bool, st
 		if !valid {
 			return false, "禁言复核与后续操作冲突，请人工核查"
 		}
-		if e = s.botService.UnmuteChatUser(ctx, d.ChatID, d.UserID); e != nil {
-			_ = q.ReleaseAIMuteClaim(ctx, d.ID, token)
-			return false, "解除禁言失败，请重试"
+		marked, e := q.UpdateAIMuteClaim(ctx, d.ID, token, "dispatching")
+		if e != nil || !marked {
+			return false, "保存操作状态失败，请重试"
+		}
+		if e = s.botService.ReviewUnmuteNoLock(ctx, d.ChatID, d.UserID); e != nil {
+			if telegramDefinitivelyRejected(e) {
+				_ = q.ReleaseAIMuteClaim(ctx, d.ID, token)
+				return false, "解除禁言失败，请重试"
+			}
+			return false, "Telegram 操作结果不明，请人工核查"
 		}
 		ok, e := q.UpdateAIMuteClaim(ctx, d.ID, token, "telegram_done")
 		if e != nil {
@@ -173,6 +194,11 @@ func (s *Server) reviewAIMute(ctx context.Context, d store.AIDecision) (bool, st
 		ok, e = tx.UpdateAIMuteClaim(ctx, d.ID, token, "completed")
 		if e != nil || !ok {
 			return fmt.Errorf("settle mute claim: %w", e)
+		}
+		if cl.NotifyEligible {
+			if e = recordAIReviewReversal(ctx, tx, d, "unmute"); e != nil {
+				return e
+			}
 		}
 		performed = true
 		return nil

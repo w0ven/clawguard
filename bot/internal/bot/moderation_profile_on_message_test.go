@@ -484,14 +484,15 @@ func assertTelegramRequestParam(t *testing.T, transport *telegramMockTransport, 
 }
 
 type moderationProfileMatchMockDB struct {
-	mu          sync.Mutex
-	now         time.Time
-	userTrust   store.UserTrust
-	systemState store.SystemState
-	aiDecisions []store.InsertAIDecisionParams
-	violations  []store.InsertViolationParams
-	profileLogs []store.InsertProfileCheckLogParams
-	warnings    []store.Warning
+	mu            sync.Mutex
+	now           time.Time
+	userTrust     store.UserTrust
+	systemState   store.SystemState
+	aiDecisions   []store.InsertAIDecisionParams
+	violations    []store.InsertViolationParams
+	profileLogs   []store.InsertProfileCheckLogParams
+	warnings      []store.Warning
+	warningEvents map[string]int64
 
 	failTrustSideEffects bool
 	trustSideEffects     int
@@ -539,7 +540,45 @@ func (db *moderationProfileMatchMockDB) recordTrustSideEffectLocked() pgx.Row {
 	return nil
 }
 
+type mockWarningTx struct {
+	pgx.Tx
+	db *moderationProfileMatchMockDB
+}
+
+func (db *moderationProfileMatchMockDB) Begin(context.Context) (pgx.Tx, error) {
+	return &mockWarningTx{db: db}, nil
+}
+func (t *mockWarningTx) Commit(context.Context) error   { return nil }
+func (t *mockWarningTx) Rollback(context.Context) error { return nil }
+func (t *mockWarningTx) QueryRow(ctx context.Context, q string, args ...any) pgx.Row {
+	return t.db.QueryRow(ctx, q, args...)
+}
+func (t *mockWarningTx) Query(ctx context.Context, q string, args ...any) (pgx.Rows, error) {
+	return t.db.Query(ctx, q, args...)
+}
+func (t *mockWarningTx) Exec(ctx context.Context, q string, args ...any) (pgconn.CommandTag, error) {
+	return t.db.Exec(ctx, q, args...)
+}
+
 func (db *moderationProfileMatchMockDB) Exec(_ context.Context, query string, args ...any) (pgconn.CommandTag, error) {
+	if strings.Contains(query, "INSERT INTO moderation_warning_escalations") {
+		return pgconn.NewCommandTag("INSERT 0 1"), nil
+	}
+	if strings.Contains(query, "UPDATE moderation_warning_escalations") {
+		return pgconn.NewCommandTag("UPDATE 1"), nil
+	}
+	if strings.Contains(query, "pg_advisory_xact_lock") {
+		return pgconn.NewCommandTag("SELECT 1"), nil
+	}
+	if strings.Contains(query, "INSERT INTO moderation_warning_events") {
+		db.mu.Lock()
+		defer db.mu.Unlock()
+		if db.warningEvents == nil {
+			db.warningEvents = map[string]int64{}
+		}
+		db.warningEvents[args[0].(string)] = args[1].(int64)
+		return pgconn.NewCommandTag("INSERT 0 1"), nil
+	}
 	if strings.Contains(query, "INSERT INTO group_ban_records") {
 		return pgconn.NewCommandTag("INSERT 0 1"), nil
 	}
@@ -585,6 +624,18 @@ func (db *moderationProfileMatchMockDB) Query(_ context.Context, query string, a
 
 func (db *moderationProfileMatchMockDB) QueryRow(_ context.Context, query string, args ...any) pgx.Row {
 	switch {
+	case strings.Contains(query, "FROM moderation_warning_events"):
+		db.mu.Lock()
+		id, ok := db.warningEvents[args[0].(string)]
+		db.mu.Unlock()
+		if !ok {
+			return mockErrorRow{err: pgx.ErrNoRows}
+		}
+		return mockScanRow(id)
+	case strings.Contains(query, "INSERT INTO moderation_cases"):
+		return mockScanRow(int64(1))
+	case strings.Contains(query, "FROM moderation_cases"):
+		return mockScanRow(false)
 	case strings.Contains(query, "FROM group_exempt_users"):
 		return mockScanRow(false, false)
 	case strings.Contains(query, "FROM authorized_groups"):
@@ -1001,6 +1052,7 @@ type telegramMockTransport struct {
 	bio             string
 	failBanUserID   int64
 	failBanUserBody string
+	failUnban       bool
 	methods         []string
 	bodies          []string
 }
@@ -1038,8 +1090,12 @@ func (t *telegramMockTransport) RoundTrip(req *http.Request) (*http.Response, er
 	}
 	failBan := method == "kickChatMember" && t.failBanUserID != 0 && strings.Contains(requestBody, fmt.Sprintf(`"user_id":"%d"`, t.failBanUserID))
 	failBody := t.failBanUserBody
+	failUnban := t.failUnban && method == "unbanChatMember"
 	t.mu.Unlock()
 
+	if failUnban {
+		return nil, fmt.Errorf("mock unban network failure")
+	}
 	if failBan {
 		if failBody == "" {
 			failBody = `{"ok":false,"description":"mock ban failed"}`

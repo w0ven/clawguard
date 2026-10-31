@@ -7,8 +7,9 @@ type AIMuteOwner struct {
 	Token, State      string
 }
 type AIMuteClaim struct {
-	Token, State string
-	LeaseActive  bool
+	Token, State   string
+	LeaseActive    bool
+	NotifyEligible bool
 }
 
 func (q *Queries) ReserveAIMute(ctx context.Context, chat, user, decision, until int64, token string) error {
@@ -30,11 +31,11 @@ func (q *Queries) LockAIMuteOwner(ctx context.Context, chat, user int64) (AIMute
 }
 func (q *Queries) LockAIMuteClaim(ctx context.Context, id int64) (AIMuteClaim, error) {
 	var v AIMuteClaim
-	err := q.db.QueryRow(ctx, `SELECT token,state,lease_until>now() FROM ai_mute_review_claims WHERE decision_id=$1 FOR UPDATE`, id).Scan(&v.Token, &v.State, &v.LeaseActive)
+	err := q.db.QueryRow(ctx, `SELECT token,state,lease_until>now(),notify_eligible FROM ai_mute_review_claims WHERE decision_id=$1 FOR UPDATE`, id).Scan(&v.Token, &v.State, &v.LeaseActive, &v.NotifyEligible)
 	return v, err
 }
-func (q *Queries) ClaimAIMuteReview(ctx context.Context, chat, user, id int64, token string) error {
-	_, err := q.db.Exec(ctx, `INSERT INTO ai_mute_review_claims(decision_id,token,state,lease_until) VALUES($1,$2,'claimed',now()+interval '5 minutes') ON CONFLICT(decision_id) DO UPDATE SET token=excluded.token,state='claimed',lease_until=excluded.lease_until`, id, token)
+func (q *Queries) ClaimAIMuteReview(ctx context.Context, chat, user, id int64, token string, notify bool) error {
+	_, err := q.db.Exec(ctx, `INSERT INTO ai_mute_review_claims(decision_id,token,state,lease_until,notify_eligible) VALUES($1,$2,'claimed',now()+interval '5 minutes',$3) ON CONFLICT(decision_id) DO UPDATE SET token=excluded.token,state='claimed',lease_until=excluded.lease_until,notify_eligible=excluded.notify_eligible`, id, token, notify)
 	if err != nil {
 		return err
 	}
@@ -42,7 +43,7 @@ func (q *Queries) ClaimAIMuteReview(ctx context.Context, chat, user, id int64, t
 	return err
 }
 func (q *Queries) UpdateAIMuteClaim(ctx context.Context, id int64, token, state string) (bool, error) {
-	tag, err := q.db.Exec(ctx, `UPDATE ai_mute_review_claims SET state=$3 WHERE decision_id=$1 AND token=$2 AND state IN ('claimed','telegram_done')`, id, token, state)
+	tag, err := q.db.Exec(ctx, `UPDATE ai_mute_review_claims SET state=$3 WHERE decision_id=$1 AND token=$2 AND state IN ('claimed','dispatching','telegram_done')`, id, token, state)
 	return tag.RowsAffected() == 1, err
 }
 func (q *Queries) SetAIMuteOwnerState(ctx context.Context, chat, user, id int64, state string) (bool, error) {
@@ -50,6 +51,6 @@ func (q *Queries) SetAIMuteOwnerState(ctx context.Context, chat, user, id int64,
 	return tag.RowsAffected() == 1, err
 }
 func (q *Queries) ReleaseAIMuteClaim(ctx context.Context, id int64, token string) error {
-	_, err := q.db.Exec(ctx, `UPDATE ai_mute_review_claims SET lease_until=now()-interval '1 second' WHERE decision_id=$1 AND token=$2 AND state='claimed'`, id, token)
+	_, err := q.db.Exec(ctx, `UPDATE ai_mute_review_claims SET state='claimed',lease_until=now()-interval '1 second' WHERE decision_id=$1 AND token=$2 AND state IN ('claimed','dispatching')`, id, token)
 	return err
 }

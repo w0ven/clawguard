@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 
 	"github.com/jackc/pgx/v5"
@@ -9,6 +10,12 @@ import (
 
 var ErrDualCaptchaBusy = errors.New("verification already in progress")
 var ErrDualCaptchaConflict = errors.New("verification requires manual review")
+
+func (q *Queries) DualCaptchaState(ctx context.Context, pendingID int64) (string, error) {
+	var state string
+	err := q.db.QueryRow(ctx, `SELECT COALESCE((SELECT state FROM dual_captcha_claims WHERE pending_id=$1),'')`, pendingID).Scan(&state)
+	return state, err
+}
 
 func (q *Queries) DualCaptchaPassed(ctx context.Context, pendingID int64) (bool, error) {
 	var passed bool
@@ -24,6 +31,11 @@ func (q *Queries) GetActiveDualCaptcha(ctx context.Context, token string) (Pendi
 // ClaimDualCaptcha atomically leases the current active instance, sharing the
 // pending lease with the expiry worker. No transaction is held over network IO.
 func (q *Queries) ClaimDualCaptcha(ctx context.Context, pendingToken, claimToken string) (PendingVerification, string, error) {
+	return q.ClaimDualCaptchaForUser(ctx, pendingToken, claimToken, 0)
+}
+
+// miniAppUser is zero only for legacy web links created before Mini App rollout.
+func (q *Queries) ClaimDualCaptchaForUser(ctx context.Context, pendingToken, claimToken string, miniAppUser int64) (PendingVerification, string, error) {
 	var pending PendingVerification
 	var state string
 	err := q.Transact(ctx, func(tx *Queries) error {
@@ -32,6 +44,12 @@ func (q *Queries) ClaimDualCaptcha(ctx context.Context, pendingToken, claimToken
 		pending, err = scanPendingVerification(row)
 		if err != nil {
 			return err
+		}
+		var mode struct {
+			MiniApp bool `json:"miniapp"`
+		}
+		if err = json.Unmarshal(pending.Payload, &mode); err != nil || (mode.MiniApp && (miniAppUser == 0 || pending.UserID != miniAppUser)) || (!mode.MiniApp && miniAppUser != 0) {
+			return pgx.ErrNoRows
 		}
 		if pending.LeaseUntil != nil {
 			var active bool
@@ -103,6 +121,10 @@ func (q *Queries) FinishDualCaptcha(ctx context.Context, id int64, claim string)
 	err := q.Transact(ctx, func(tx *Queries) error {
 		tag, err := tx.db.Exec(ctx, `UPDATE dual_captcha_claims SET state='completed',updated_at=now() WHERE pending_id=$1 AND token=$2 AND state='applying' AND lease_until>now()`, id, claim)
 		if err != nil || tag.RowsAffected() != 1 {
+			return err
+		}
+		_, err = tx.db.Exec(ctx, `INSERT INTO miniapp_verification_notifications(pending_id,user_id) SELECT id,user_id FROM pending_verifications WHERE id=$1 AND payload->>'miniapp'='true' ON CONFLICT DO NOTHING`, id)
+		if err != nil {
 			return err
 		}
 		tag, err = tx.db.Exec(ctx, `DELETE FROM pending_verifications WHERE id=$1 AND lease_owner=$2 AND lease_until>now()`, id, claim)

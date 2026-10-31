@@ -33,25 +33,26 @@ func (q *Queries) InsertFalsePositiveReview(ctx context.Context, id int64) (bool
 }
 
 type AIReviewClaim struct {
-	Token, State string
-	LeaseActive  bool
+	Token, State   string
+	LeaseActive    bool
+	NotifyEligible bool
 }
 
 func (q *Queries) GetAIReviewClaim(ctx context.Context, id int64) (AIReviewClaim, error) {
 	var v AIReviewClaim
-	err := q.db.QueryRow(ctx, `SELECT token,state,lease_until>now() FROM ai_unban_review_claims WHERE decision_id=$1 FOR UPDATE`, id).Scan(&v.Token, &v.State, &v.LeaseActive)
+	err := q.db.QueryRow(ctx, `SELECT token,state,lease_until>now(),notify_eligible FROM ai_unban_review_claims WHERE decision_id=$1 FOR UPDATE`, id).Scan(&v.Token, &v.State, &v.LeaseActive, &v.NotifyEligible)
 	return v, err
 }
-func (q *Queries) ClaimAIReview(ctx context.Context, id int64, token string) error {
-	_, err := q.db.Exec(ctx, `INSERT INTO ai_unban_review_claims(decision_id,token,state,lease_until) VALUES($1,$2,'claimed',now()+interval '2 minutes') ON CONFLICT(decision_id) DO UPDATE SET token=excluded.token,state='claimed',lease_until=excluded.lease_until,updated_at=now()`, id, token)
+func (q *Queries) ClaimAIReview(ctx context.Context, id int64, token string, notify bool) error {
+	_, err := q.db.Exec(ctx, `INSERT INTO ai_unban_review_claims(decision_id,token,state,lease_until,notify_eligible) VALUES($1,$2,'claimed',now()+interval '2 minutes',$3) ON CONFLICT(decision_id) DO UPDATE SET token=excluded.token,state='claimed',lease_until=excluded.lease_until,notify_eligible=excluded.notify_eligible,updated_at=now()`, id, token, notify)
 	return err
 }
 func (q *Queries) SetAIReviewClaimState(ctx context.Context, id int64, token, state string) (bool, error) {
-	tag, err := q.db.Exec(ctx, `UPDATE ai_unban_review_claims SET state=$3,updated_at=now() WHERE decision_id=$1 AND token=$2 AND state IN ('claimed','telegram_done')`, id, token, state)
+	tag, err := q.db.Exec(ctx, `UPDATE ai_unban_review_claims SET state=$3,updated_at=now() WHERE decision_id=$1 AND token=$2 AND state IN ('claimed','dispatching','telegram_done')`, id, token, state)
 	return tag.RowsAffected() == 1, err
 }
 func (q *Queries) DeleteAIReviewClaim(ctx context.Context, id int64, token string) error {
-	_, err := q.db.Exec(ctx, `DELETE FROM ai_unban_review_claims WHERE decision_id=$1 AND token=$2 AND state='claimed'`, id, token)
+	_, err := q.db.Exec(ctx, `DELETE FROM ai_unban_review_claims WHERE decision_id=$1 AND token=$2 AND state IN ('claimed','dispatching')`, id, token)
 	return err
 }
 func (q *Queries) HasFalsePositiveReview(ctx context.Context, id int64) (bool, error) {

@@ -1,6 +1,13 @@
 package bot
 
 import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"html"
+	"strings"
+	"time"
+
 	tele "gopkg.in/telebot.v3"
 )
 
@@ -19,9 +26,64 @@ func (s *Service) handleStartCommand(c tele.Context) error {
 		DisableWebPagePreview: true,
 	}
 	if chat.Type == tele.ChatPrivate {
+		if c.Sender() == nil || c.Sender().ID != chat.ID {
+			return nil
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		if err := s.queries.RecordPrivateStart(ctx, chat.ID); err != nil {
+			return c.Send("暂时无法开启私聊，请稍后发送 /start 重试。")
+		}
+		if strings.HasPrefix(c.Data(), "v_") {
+			return s.sendMiniAppVerificationCard(ctx, c, strings.TrimPrefix(c.Data(), "v_"))
+		}
+		markup := &tele.ReplyMarkup{}
+		markup.Inline(markup.Row(markup.WebApp("我的处理记录", &tele.WebApp{URL: strings.TrimRight(s.cfg.PublicBaseURL, "/") + "/appeal/mini"})))
+		opts.ReplyMarkup = markup
 		return c.Send(privateStartText(), opts)
 	}
 	return c.Send(groupStartText(), opts)
+}
+
+func (s *Service) sendMiniAppVerificationCard(ctx context.Context, c tele.Context, token string) error {
+	if len(token) != 36 {
+		return c.Send("验证已失效，请返回群聊查看最新验证卡。")
+	}
+	pending, err := s.queries.GetActiveDualCaptcha(ctx, token)
+	if err != nil || pending.UserID != c.Sender().ID {
+		return c.Send("验证已失效或不属于当前账号，请本人返回群聊操作。")
+	}
+	var payload dualCaptchaPayload
+	if json.Unmarshal(pending.Payload, &payload) != nil || !payload.MiniApp || payload.MembershipGeneration == "" {
+		return c.Send("验证已失效，请返回群聊查看最新验证卡。")
+	}
+	current, err := s.membershipSessionCurrent(ctx, pending.ChatID, pending.UserID, payload.MembershipGeneration)
+	if err != nil || !current {
+		return c.Send("验证已失效，请返回群聊查看最新验证卡。")
+	}
+	group, err := s.queries.GetGroupByChatID(ctx, pending.ChatID)
+	if err != nil {
+		return c.Send("验证暂不可用，请稍后重试。")
+	}
+	state, err := s.queries.DualCaptchaState(ctx, pending.ID)
+	if err != nil {
+		return c.Send("验证暂不可用，请稍后重试。")
+	}
+	if state == "conflict" {
+		return c.Send("验证状态需要核查，请联系群管理员。")
+	}
+	seconds := int(time.Until(pending.ExpiresAt).Seconds())
+	timeStatus := fmt.Sprintf("剩余时间：约 %d 秒", seconds)
+	if seconds <= 0 {
+		if state != "verified" && state != "applying" {
+			return c.Send("验证已超时，请返回群聊查看最新验证卡。")
+		}
+		timeStatus = "验证已完成，正在等待解除本次限制。"
+	}
+	markup := &tele.ReplyMarkup{}
+	markup.Inline(markup.Row(markup.WebApp("打开验证", &tele.WebApp{URL: strings.TrimRight(s.cfg.PublicBaseURL, "/") + "/verify/mini?task=" + token})))
+	text := fmt.Sprintf("<b>入群验证卡</b>\n目标群组：%s\n待验身份：%s (ID: %d)\n%s\n\n时间从入群时起算，跳转不重置计时。", html.EscapeString(group.Title), html.EscapeString(c.Sender().FirstName), c.Sender().ID, timeStatus)
+	return c.Send(text, &tele.SendOptions{ParseMode: tele.ModeHTML, ReplyMarkup: markup})
 }
 
 // handleHelpCommand 回复 /help。群内和私聊都输出完整命令说明。
