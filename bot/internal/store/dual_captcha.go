@@ -11,6 +11,12 @@ import (
 var ErrDualCaptchaBusy = errors.New("verification already in progress")
 var ErrDualCaptchaConflict = errors.New("verification requires manual review")
 
+func (q *Queries) DualCaptchaState(ctx context.Context, pendingID int64) (string, error) {
+	var state string
+	err := q.db.QueryRow(ctx, `SELECT COALESCE((SELECT state FROM dual_captcha_claims WHERE pending_id=$1),'')`, pendingID).Scan(&state)
+	return state, err
+}
+
 func (q *Queries) DualCaptchaPassed(ctx context.Context, pendingID int64) (bool, error) {
 	var passed bool
 	err := q.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM dual_captcha_claims WHERE pending_id=$1 AND state IN ('verified','applying','conflict','completed'))`, pendingID).Scan(&passed)

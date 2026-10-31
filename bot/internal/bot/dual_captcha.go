@@ -58,21 +58,29 @@ func (s *Service) startDualCaptchaVerification(ctx context.Context, chat *tele.C
 }
 
 func (s *Service) VerifyDualCaptcha(ctx context.Context, token, cfResponse, hResponse, ip string) error {
-	return s.verifyDualCaptchaForUser(ctx, token, cfResponse, hResponse, ip, 0)
+	return s.verifyDualCaptchaForUser(ctx, token, cfResponse, hResponse, ip, 0, false)
 }
 
 func (s *Service) VerifyMiniAppDualCaptcha(ctx context.Context, token, cfResponse, hResponse, ip string, userID int64) error {
 	if userID <= 0 {
 		return pgx.ErrNoRows
 	}
-	return s.verifyDualCaptchaForUser(ctx, token, cfResponse, hResponse, ip, userID)
+	return s.verifyDualCaptchaForUser(ctx, token, cfResponse, hResponse, ip, userID, false)
 }
 
-func (s *Service) verifyDualCaptchaForUser(ctx context.Context, token, cfResponse, hResponse, ip string, userID int64) error {
-	if !s.cfg.DualCaptchaConfigured() {
+// RecoverMiniAppDualCaptcha only resumes a previously verified join task.
+func (s *Service) RecoverMiniAppDualCaptcha(ctx context.Context, token string, userID int64) error {
+	if userID <= 0 {
+		return pgx.ErrNoRows
+	}
+	return s.verifyDualCaptchaForUser(ctx, token, "", "", "", userID, true)
+}
+
+func (s *Service) verifyDualCaptchaForUser(ctx context.Context, token, cfResponse, hResponse, ip string, userID int64, recoverOnly bool) error {
+	if !recoverOnly && !s.cfg.DualCaptchaConfigured() {
 		return ErrDualCaptchaUnavailable
 	}
-	if len(token) != 36 || strings.TrimSpace(cfResponse) == "" || strings.TrimSpace(hResponse) == "" || len(cfResponse) > 2048 || len(hResponse) > 8192 {
+	if len(token) != 36 || (!recoverOnly && (strings.TrimSpace(cfResponse) == "" || strings.TrimSpace(hResponse) == "")) || len(cfResponse) > 2048 || len(hResponse) > 8192 {
 		return errDualProvider
 	}
 	claim, err := generateVerificationToken()
@@ -90,6 +98,9 @@ func (s *Service) verifyDualCaptchaForUser(ctx context.Context, token, cfRespons
 	var payload dualCaptchaPayload
 	if json.Unmarshal(pending.Payload, &payload) != nil || payload.Token != token || payload.MembershipGeneration == "" {
 		return ErrDualCaptchaConflict
+	}
+	if recoverOnly && state != "verified" && state != "applying" {
+		return errDualProvider
 	}
 	if state == "validating" {
 		u, err := url.Parse(s.cfg.PublicBaseURL)

@@ -14,6 +14,7 @@ import (
 )
 
 var ErrInvalidWebAppData = errors.New("invalid Telegram Mini App identity")
+var ErrWebAppDataExpired = errors.New("expired Telegram Mini App identity")
 
 // WebAppIdentity is derived only from the signed initData, never initDataUnsafe.
 type WebAppIdentity struct {
@@ -61,15 +62,18 @@ func VerifyWebAppData(raw, botToken string, now time.Time, maxAge time.Duration)
 		return invalid, ErrInvalidWebAppData
 	}
 	date := time.Unix(unix, 0)
-	if date.After(now.Add(30*time.Second)) || now.Sub(date) > maxAge {
-		return invalid, ErrInvalidWebAppData
-	}
 	var user struct {
 		ID    int64 `json:"id"`
 		IsBot bool  `json:"is_bot"`
 	}
 	if err := json.Unmarshal([]byte(values.Get("user")), &user); err != nil || user.ID <= 0 || user.IsBot {
 		return invalid, ErrInvalidWebAppData
+	}
+	if date.After(now.Add(30 * time.Second)) {
+		return invalid, ErrInvalidWebAppData
+	}
+	if now.Sub(date) > maxAge {
+		return invalid, ErrWebAppDataExpired
 	}
 	return WebAppIdentity{UserID: user.ID, AuthDate: date}, nil
 }

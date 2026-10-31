@@ -23,6 +23,7 @@ func (s *Server) registerVerifyRoutes() {
 	s.echo.GET("/api/verify/capabilities", s.handleVerifyCapabilities, s.apiRateLimit(s.ipRateLimitKey("verify:capabilities_ip"), turnstileVerifyIPLimit, apiRateLimitWindow))
 	s.echo.POST("/api/verify/mini/config", s.handleDualCaptchaConfig, s.apiRateLimit(s.ipRateLimitKey("verify:mini_ip"), turnstileVerifyIPLimit, apiRateLimitWindow))
 	s.echo.POST("/api/verify/mini/submit", s.handleDualCaptcha, s.apiRateLimit(s.ipRateLimitKey("verify:mini_ip"), turnstileVerifyIPLimit, apiRateLimitWindow))
+	s.echo.POST("/api/verify/mini/recover", s.handleDualCaptcha, s.apiRateLimit(s.ipRateLimitKey("verify:mini_ip"), turnstileVerifyIPLimit, apiRateLimitWindow))
 	s.echo.POST("/api/verify/dual/config", s.handleDualCaptchaConfig,
 		s.apiRateLimit(s.ipRateLimitKey("verify:dual_ip"), turnstileVerifyIPLimit, apiRateLimitWindow))
 	s.echo.POST("/api/verify/dual/submit", s.handleDualCaptcha,
@@ -86,9 +87,6 @@ func (s *Server) handleVerifyCapabilities(c echo.Context) error {
 
 func (s *Server) handleDualCaptchaConfig(c echo.Context) error {
 	c.Response().Header().Set("Cache-Control", "no-store")
-	if !s.cfg.DualCaptchaConfigured() {
-		return c.JSON(http.StatusServiceUnavailable, map[string]string{"error": "双重验证未配置"})
-	}
 	var payload struct {
 		Token    string `json:"token"`
 		InitData string `json:"init_data"`
@@ -120,6 +118,9 @@ func (s *Server) handleDualCaptchaConfig(c echo.Context) error {
 	result := map[string]any{"turnstile_sitekey": s.cfg.TurnstileSiteKey, "hcaptcha_sitekey": s.cfg.HCaptchaSiteKey}
 	if mini {
 		identity, err := auth.VerifyWebAppData(payload.InitData, s.cfg.BotToken, time.Now(), 10*time.Minute)
+		if errors.Is(err, auth.ErrWebAppDataExpired) {
+			return c.JSON(http.StatusForbidden, map[string]string{"error": "身份已过期，请关闭页面并从机器人私聊重新打开。"})
+		}
 		if err != nil || identity.UserID != pending.UserID {
 			return c.JSON(http.StatusForbidden, map[string]string{"error": "无法验证当前账号，请本人从机器人私聊打开。"})
 		}
@@ -131,11 +132,22 @@ func (s *Server) handleDualCaptchaConfig(c echo.Context) error {
 		result["user_id"] = pending.UserID
 		result["username"] = pending.Username
 		result["expires_at"] = pending.ExpiresAt
-		passed, err := s.botService.Queries().DualCaptchaPassed(c.Request().Context(), pending.ID)
+		state, err := s.botService.Queries().DualCaptchaState(c.Request().Context(), pending.ID)
 		if err != nil {
 			return c.JSON(http.StatusServiceUnavailable, map[string]string{"error": "验证暂不可用"})
 		}
-		result["recovery_pending"] = passed
+		if state == "conflict" {
+			return c.JSON(http.StatusConflict, map[string]string{"error": "验证状态需要核查，请联系群管理员。"})
+		}
+		result["recovery_pending"] = state == "verified" || state == "applying"
+		remaining := time.Until(pending.ExpiresAt).Milliseconds()
+		if remaining < 0 {
+			remaining = 0
+		}
+		result["remaining_ms"] = remaining
+	}
+	if !s.cfg.DualCaptchaConfigured() && result["recovery_pending"] != true {
+		return c.JSON(http.StatusServiceUnavailable, map[string]string{"error": "双重验证未配置"})
 	}
 	return c.JSON(http.StatusOK, result)
 }
@@ -150,19 +162,27 @@ func (s *Server) handleDualCaptcha(c echo.Context) error {
 		HResponse  string `json:"h_response"`
 		InitData   string `json:"init_data"`
 	}
-	if err := json.NewDecoder(req.Body).Decode(&payload); err != nil || len(payload.Token) != 36 || strings.TrimSpace(payload.CFResponse) == "" || strings.TrimSpace(payload.HResponse) == "" || len(payload.CFResponse) > 2048 || len(payload.HResponse) > 8192 {
+	recoverOnly := c.Path() == "/api/verify/mini/recover"
+	if err := json.NewDecoder(req.Body).Decode(&payload); err != nil || len(payload.Token) != 36 || (!recoverOnly && (strings.TrimSpace(payload.CFResponse) == "" || strings.TrimSpace(payload.HResponse) == "")) || len(payload.CFResponse) > 2048 || len(payload.HResponse) > 8192 {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "请完成并重新提交两项验证"})
 	}
 	if !s.allowDualCaptchaToken(c, payload.Token) {
 		return c.JSON(http.StatusTooManyRequests, map[string]string{"error": "请求过于频繁，请稍后重试"})
 	}
 	var err error
-	if c.Path() == "/api/verify/mini/submit" {
+	if c.Path() == "/api/verify/mini/submit" || recoverOnly {
 		identity, identityErr := auth.VerifyWebAppData(payload.InitData, s.cfg.BotToken, time.Now(), 10*time.Minute)
+		if errors.Is(identityErr, auth.ErrWebAppDataExpired) {
+			return c.JSON(http.StatusForbidden, map[string]string{"error": "身份已过期，请关闭页面并从机器人私聊重新打开。"})
+		}
 		if identityErr != nil {
 			return c.JSON(http.StatusForbidden, map[string]string{"error": "无法验证当前账号，请本人从机器人私聊打开。"})
 		}
-		err = s.botService.VerifyMiniAppDualCaptcha(req.Context(), payload.Token, payload.CFResponse, payload.HResponse, c.RealIP(), identity.UserID)
+		if recoverOnly {
+			err = s.botService.RecoverMiniAppDualCaptcha(req.Context(), payload.Token, identity.UserID)
+		} else {
+			err = s.botService.VerifyMiniAppDualCaptcha(req.Context(), payload.Token, payload.CFResponse, payload.HResponse, c.RealIP(), identity.UserID)
+		}
 	} else {
 		err = s.botService.VerifyDualCaptcha(req.Context(), payload.Token, payload.CFResponse, payload.HResponse, c.RealIP())
 	}

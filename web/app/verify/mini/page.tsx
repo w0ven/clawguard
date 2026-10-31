@@ -1,14 +1,21 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { DualCaptchaVerifyClient } from "@/components/dual-captcha-verify-client";
 import { telegramWebApp } from "@/lib/telegram";
 
 export default function MiniVerificationPage() {
   const [state, setState] = useState<{ token: string; data: string } | null>(null);
   const [error, setError] = useState("");
+  const task = useRef<string | null>(null);
   useEffect(() => {
-    const token = window.location.hash.slice(1);
+    if (task.current === null) {
+      const url = new URL(window.location.href);
+      task.current = url.searchParams.get("task") ?? "";
+      url.searchParams.delete("task");
+      window.history.replaceState(window.history.state, "", url.pathname + url.search + url.hash);
+    }
+    const token = task.current;
     let disposed = false;
     let unsubscribe = () => {};
     const script = document.createElement("script");

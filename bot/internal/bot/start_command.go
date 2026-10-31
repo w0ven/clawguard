@@ -62,17 +62,23 @@ func (s *Service) sendMiniAppVerificationCard(ctx context.Context, c tele.Contex
 	if err != nil {
 		return c.Send("验证暂不可用，请稍后重试。")
 	}
+	state, err := s.queries.DualCaptchaState(ctx, pending.ID)
+	if err != nil {
+		return c.Send("验证暂不可用，请稍后重试。")
+	}
+	if state == "conflict" {
+		return c.Send("验证状态需要核查，请联系群管理员。")
+	}
 	seconds := int(time.Until(pending.ExpiresAt).Seconds())
 	timeStatus := fmt.Sprintf("剩余时间：约 %d 秒", seconds)
 	if seconds <= 0 {
-		passed, err := s.queries.DualCaptchaPassed(ctx, pending.ID)
-		if err != nil || !passed {
+		if state != "verified" && state != "applying" {
 			return c.Send("验证已超时，请返回群聊查看最新验证卡。")
 		}
 		timeStatus = "验证已完成，正在等待解除本次限制。"
 	}
 	markup := &tele.ReplyMarkup{}
-	markup.Inline(markup.Row(markup.WebApp("打开验证", &tele.WebApp{URL: strings.TrimRight(s.cfg.PublicBaseURL, "/") + "/verify/mini#" + token})))
+	markup.Inline(markup.Row(markup.WebApp("打开验证", &tele.WebApp{URL: strings.TrimRight(s.cfg.PublicBaseURL, "/") + "/verify/mini?task=" + token})))
 	text := fmt.Sprintf("<b>入群验证卡</b>\n目标群组：%s\n待验身份：%s (ID: %d)\n%s\n\n时间从入群时起算，跳转不重置计时。", html.EscapeString(group.Title), html.EscapeString(c.Sender().FirstName), c.Sender().ID, timeStatus)
 	return c.Send(text, &tele.SendOptions{ParseMode: tele.ModeHTML, ReplyMarkup: markup})
 }

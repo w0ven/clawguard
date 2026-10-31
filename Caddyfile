@@ -12,6 +12,7 @@
     header @non_mini_verify X-Frame-Options "SAMEORIGIN"
     header @mini_verify -X-Frame-Options
     header @mini_verify Content-Security-Policy "frame-ancestors 'self' https://web.telegram.org"
+    header @mini_verify Referrer-Policy "no-referrer"
 
     @runtime_health path /healthz /readyz
     handle @runtime_health {

@@ -83,6 +83,26 @@ func TestMiniAppIdentityAndLegacyIsolation(t *testing.T) {
 			}
 		})
 	}
+	if w := request("/api/verify/mini/config", body(miniSignedData(222, time.Now().Add(-11*time.Minute), cfg.BotToken))); w.Code != 403 || !strings.Contains(w.Body.String(), "关闭页面") {
+		t.Fatalf("expired identity: %d %s", w.Code, w.Body.String())
+	}
+	for name, signed := range map[string]string{"missing": "", "other": miniSignedData(223, time.Now(), cfg.BotToken), "expired": miniSignedData(222, time.Now().Add(-11*time.Minute), cfg.BotToken), "valid_unverified": data} {
+		if w := request("/api/verify/mini/recover", body(signed)); w.Code == 200 {
+			t.Fatalf("%s recovery bypass", name)
+		}
+	}
+	if _, err = fx.pool.Exec(ctx, `INSERT INTO dual_captcha_claims(pending_id,token,state,lease_until) VALUES($1,'fixture','conflict',now()) ON CONFLICT(pending_id) DO UPDATE SET state='conflict',lease_until=now()`, p.ID); err != nil {
+		t.Fatal(err)
+	}
+	if w := request("/api/verify/mini/config", body(data)); w.Code != 409 || !strings.Contains(w.Body.String(), "联系群管理员") {
+		t.Fatalf("conflict: %d %s", w.Code, w.Body.String())
+	}
+	if w := request("/api/verify/mini/recover", body(data)); w.Code != 409 {
+		t.Fatalf("conflict recovery: %d %s", w.Code, w.Body.String())
+	}
+	if _, err = fx.pool.Exec(ctx, `DELETE FROM dual_captcha_claims WHERE pending_id=$1`, p.ID); err != nil {
+		t.Fatal(err)
+	}
 	badSubmit := request("/api/verify/mini/submit", fmt.Sprintf(`{"token":%q,"init_data":%q,"cf_response":"x","h_response":"y"}`, token, miniSignedData(223, time.Now(), cfg.BotToken)))
 	if badSubmit.Code == 200 {
 		t.Fatal("other user submitted")
