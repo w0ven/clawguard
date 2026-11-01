@@ -257,7 +257,7 @@ func TestVerificationInitialUnknownNeverStartsPunitiveCleanupIntegration(t *test
 	tr.mu.Unlock()
 	chat, user := &tele.Chat{ID: -90001}, &tele.User{ID: 109, FirstName: "fixture"}
 	err := s.startVerification(chat, user, nil, "u109")
-	if !errors.Is(err, errCleanupManualReview) {
+	if err != nil {
 		t.Fatalf("unknown=%v calls=%v", err, tr.Methods())
 	}
 	key := membershipCleanupKey("verification_start", chat.ID, user.ID, "u109")
@@ -271,8 +271,44 @@ func TestVerificationInitialUnknownNeverStartsPunitiveCleanupIntegration(t *test
 	restarted := restartedCleanupService(ctx, s)
 	restarted.policySnapshots.Store(int64(-90001), p)
 	err = restarted.startVerification(chat, user, nil, "u109")
-	if !errors.Is(err, errCleanupManualReview) || countString(tr.Methods(), "restrictChatMember") != 1 || countString(tr.Methods(), "kickChatMember") != 0 {
+	if err != nil || countString(tr.Methods(), "restrictChatMember") != 1 || countString(tr.Methods(), "kickChatMember") != 0 || countString(tr.Methods(), "sendMessage") != 1 {
 		t.Fatalf("restart=%v calls=%v", err, tr.Methods())
+	}
+	for _, body := range tr.RequestBodies() {
+		if strings.Contains(body, "新人入群验证启动失败") && (!strings.Contains(body, "109") || strings.Contains(body, "telegram.test") || strings.Contains(body, "ok\\\":true")) {
+			t.Fatalf("unsafe warning: %s", body)
+		}
+	}
+}
+
+func TestVerificationStartNoticeFailureCanRetryIntegration(t *testing.T) {
+	ctx := context.Background()
+	_, q, s, tr := settlementFixture(t)
+	p := keywordReplyPolicy("", 0)
+	p.Verify.Enabled, p.Verify.Method, p.JoinProtection.Enabled = true, "button", false
+	s.policySnapshots.Store(int64(-90001), p)
+	s.policySnapshotAt.Store(int64(-90001), time.Now())
+	tr.mu.Lock()
+	tr.failRestrictUserID, tr.failRestrictBody = 110, `{"ok":true}`
+	tr.mu.Unlock()
+	chat, user := &tele.Chat{ID: -90001}, &tele.User{ID: 110}
+	s.sender = &fakeTelegramSender{errs: []error{errors.New("warning delivery failed")}}
+	if err := s.startVerification(chat, user, nil, "u110"); err == nil {
+		t.Fatal("failed notice did not leave the update retryable")
+	}
+	key := membershipCleanupKey("verification_start_notice", chat.ID, user.ID, "u110")
+	if state, _, err := q.CleanupDispatchState(ctx, key); err != nil || state != "" {
+		t.Fatalf("failed notice recorded as delivered: %q %v", state, err)
+	}
+	s.sender = s.bot
+	if err := s.startVerification(chat, user, nil, "u110"); err != nil {
+		t.Fatal(err)
+	}
+	if state, result, err := q.CleanupDispatchState(ctx, key); err != nil || state != "completed" || result != "sent" {
+		t.Fatalf("notice state %q %q %v", state, result, err)
+	}
+	if countString(tr.Methods(), "restrictChatMember") != 1 || countString(tr.Methods(), "sendMessage") != 1 {
+		t.Fatalf("calls=%v", tr.Methods())
 	}
 }
 

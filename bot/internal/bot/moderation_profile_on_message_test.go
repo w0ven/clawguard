@@ -1132,7 +1132,7 @@ func (t *telegramMockTransport) RoundTrip(req *http.Request) (*http.Response, er
 			memberRole = "administrator"
 		}
 		body = fmt.Sprintf(`{"ok":true,"result":{"user":{"id":1,"is_bot":false,"first_name":"fixture"},"status":%q,"is_member":true}}`, memberRole)
-	case "sendMessage":
+	case "sendMessage", "editMessageReplyMarkup":
 		body = `{"ok":true,"result":{"message_id":999,"chat":{"id":-100123,"type":"supergroup"}}}`
 	}
 

@@ -4,10 +4,58 @@ import (
 	"context"
 	"errors"
 	tele "gopkg.in/telebot.v3"
+	"io"
+	"net"
+	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestVerificationRequestNotSentRequiresTypedDial(t *testing.T) {
+	dial := &net.OpError{Op: "dial", Net: "tcp", Err: &net.DNSError{Err: "timeout", Name: "example", IsTimeout: true}}
+	read := &net.OpError{Op: "read", Net: "tcp", Err: context.DeadlineExceeded}
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"dns dial", &url.Error{Op: "Post", URL: "https://example", Err: dial}, true},
+		{"connect refused", &url.Error{Op: "Post", URL: "https://example", Err: &net.OpError{Op: "dial", Net: "tcp4", Err: errors.New("refused")}}, true},
+		{"read timeout", &url.Error{Op: "Post", URL: "https://example", Err: read}, false},
+		{"EOF", &url.Error{Op: "Post", URL: "https://example", Err: io.EOF}, false},
+		{"timeout alone", &url.Error{Op: "Post", URL: "https://example", Err: context.DeadlineExceeded}, false},
+		{"fake text", errors.New("dial tcp: i/o timeout"), false},
+		{"missing URL wrapper", dial, false},
+		{"cancelled", &url.Error{Op: "Post", Err: &net.OpError{Op: "dial", Net: "tcp", Err: context.Canceled}}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := verificationRequestNotSent(tc.err); got != tc.want {
+				t.Fatalf("got %v want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestVerificationActualConnectFailureIsTyped(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	if err := ln.Close(); err != nil {
+		t.Fatal(err)
+	}
+	b, err := tele.NewBot(tele.Settings{Token: "123:TEST", URL: "http://" + addr, Offline: true, Client: &http.Client{Timeout: time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = telegramConfirmedRestrict(b, &tele.Chat{ID: -1}, &tele.ChatMember{User: &tele.User{ID: 1}, Rights: tele.NoRights()})
+	if !verificationRequestNotSent(err) {
+		t.Fatalf("actual connection error not recognized: %T %v", err, err)
+	}
+}
 
 func TestVerificationNetworkRecovery(t *testing.T) {
 	reset := errors.New("telebot: Post: read: connection reset by peer")
@@ -65,5 +113,11 @@ func TestVerificationFailureNotice(t *testing.T) {
 	other := verificationStartFailureNotice(errors.New("user not found"))
 	if strings.Contains(other, "请检查 bot 是否拥有") {
 		t.Fatal(other)
+	}
+	technical := verificationStartFailureNotice(errors.New("Post https://api.telegram.org/bot123:secret/restrictChatMember: dial tcp 149.154.166.110:443: i/o timeout"))
+	for _, value := range []string{"https://", "149.154", "restrictChatMember", "secret", "i/o timeout"} {
+		if strings.Contains(technical, value) {
+			t.Fatalf("technical error leaked in group notice: %s", technical)
+		}
 	}
 }

@@ -11,6 +11,9 @@ import (
 var errCleanupManualReview = errors.New("Telegram 清理结果不明，请管理员人工核查")
 var errCleanupNotDispatched = errors.New("cleanup dispatch not sent")
 
+const verificationStartNotSentResult = "verification_start_not_sent_manual"
+const verificationStartOwnershipUnknownResult = "verification_start_membership_changed_manual"
+
 func membershipCleanupKey(kind string, chatID, userID int64, generation string) string {
 	if generation == "" {
 		return ""
@@ -33,12 +36,25 @@ func (s *Service) guardedCleanup(ctx context.Context, key string, chatID, userID
 		return "", errors.Join(err, errCleanupNotDispatched)
 	}
 	if !claimed {
+		if action == "verification_start" && result == verificationStartNotSentResult {
+			return "", errors.Join(errCleanupNotDispatched, errCleanupManualReview)
+		}
+		if action == "verification_start" && result == verificationStartOwnershipUnknownResult {
+			return "", errCleanupManualReview
+		}
 		if result != "" {
 			return result, nil
 		}
 		return "", errCleanupManualReview
 	}
 	result, err = execute()
+	var notSent *verificationStartNotSentError
+	if action == "verification_start" && errors.As(err, &notSent) {
+		if e := s.queries.CompleteCleanupDispatch(ctx, key, verificationStartNotSentResult); e != nil {
+			return "", errors.Join(err, e, errCleanupManualReview)
+		}
+		return "", errors.Join(err, errCleanupNotDispatched, errCleanupManualReview)
+	}
 	var partial *actionAppliedError
 	if errors.As(err, &partial) {
 		if e := s.queries.CompleteCleanupDispatch(ctx, key, "partial_kick"); e != nil {
