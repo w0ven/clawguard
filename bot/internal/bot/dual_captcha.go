@@ -163,7 +163,7 @@ func (s *Service) verifyDualCaptchaForUser(ctx context.Context, token, cfRespons
 			return s.markDualCaptchaConflict(ctx, pending.ID, claim)
 		}
 		if dualPermissionsMatch(member, target) {
-			return s.finishDualCaptcha(ctx, pending, claim, chat, user)
+			return s.finishDualCaptcha(ctx, pending, claim, chat, user, policy.Feedback.VerifyPass.AutoDeleteSeconds)
 		}
 	}
 	if member.Role != tele.Restricted || member.RestrictedUntil != 0 || member.CanSendMessages || member.CanSendOther || member.CanSendPolls || member.CanSendAudios || member.CanSendDocuments || member.CanSendPhotos || member.CanSendVideos || member.CanSendVoiceNotes || member.CanSendVideoNotes || member.CanInviteUsers || member.CanPinMessages || member.CanChangeInfo || member.CanManageTopics || member.CanAddPreviews {
@@ -202,7 +202,7 @@ func (s *Service) verifyDualCaptchaForUser(ctx context.Context, token, cfRespons
 	if err := telegramConfirmedRestrict(s.bot, chat, &tele.ChatMember{User: user, Rights: target.Rights}); err != nil {
 		return ErrDualCaptchaUnavailable
 	}
-	return s.finishDualCaptcha(ctx, pending, claim, chat, user)
+	return s.finishDualCaptcha(ctx, pending, claim, chat, user, policy.Feedback.VerifyPass.AutoDeleteSeconds)
 }
 
 func (s *Service) markDualCaptchaConflict(ctx context.Context, id int64, claim string) error {
@@ -246,7 +246,7 @@ func dualPermissionsMatch(member *tele.ChatMember, target dualPermissionTarget) 
 		a.CanChangeInfo == b.CanChangeInfo && a.CanManageTopics == b.CanManageTopics
 }
 
-func (s *Service) finishDualCaptcha(ctx context.Context, pending store.PendingVerification, claim string, chat *tele.Chat, user *tele.User) error {
+func (s *Service) finishDualCaptcha(ctx context.Context, pending store.PendingVerification, claim string, chat *tele.Chat, user *tele.User, autoDeleteSeconds int) error {
 	var payload dualCaptchaPayload
 	if json.Unmarshal(pending.Payload, &payload) != nil || payload.MembershipGeneration == "" {
 		return ErrDualCaptchaConflict
@@ -271,7 +271,7 @@ func (s *Service) finishDualCaptcha(ctx context.Context, pending store.PendingVe
 	s.ensureRuntimeGuards()
 	s.joinProtector.ReleasePending(chat.ID)
 	if !s.sendWelcomeMessage(ctx, chat, user, &pending) {
-		s.finalizeVerificationPrompt(chat, pending, verificationResultHTML(user, "passed"))
+		s.finalizeVerificationPrompt(chat, pending, verificationResultHTML(user, "passed"), autoDeleteSeconds)
 	}
 	return nil
 }

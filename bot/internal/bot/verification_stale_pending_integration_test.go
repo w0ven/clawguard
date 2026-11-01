@@ -32,7 +32,7 @@ func TestStaleVerificationCannotConsumeOrPunishNewPendingIntegration(t *testing.
 	if err := s.completeVerification(ctx, chat, user, old, "admin_pass"); !errors.Is(err, pgx.ErrNoRows) {
 		t.Fatalf("stale approval: %v", err)
 	}
-	if err := s.failVerificationImmediately(ctx, chat, user, old, "ban", "verify_admin_reject"); !errors.Is(err, pgx.ErrNoRows) {
+	if err := s.failVerificationImmediately(ctx, chat, user, old, "ban", "verify_admin_reject", 0); !errors.Is(err, pgx.ErrNoRows) {
 		t.Fatalf("stale rejection: %v", err)
 	}
 	still, err := q.GetPendingVerification(ctx, store.GetPendingVerificationParams{ChatID: chat.ID, UserID: user.ID})
@@ -55,7 +55,7 @@ func TestExpiredVerificationCannotActAfterLockWaitIntegration(t *testing.T) {
 	if err := s.completeVerification(ctx, chat, user, p, "admin_pass"); !errors.Is(err, pgx.ErrNoRows) {
 		t.Fatalf("expired pass: %v", err)
 	}
-	if err := s.failVerificationImmediately(ctx, chat, user, p, "ban", "verify_admin_reject"); !errors.Is(err, pgx.ErrNoRows) {
+	if err := s.failVerificationImmediately(ctx, chat, user, p, "ban", "verify_admin_reject", 0); !errors.Is(err, pgx.ErrNoRows) {
 		t.Fatalf("expired reject: %v", err)
 	}
 	still, err := q.GetPendingVerification(ctx, store.GetPendingVerificationParams{ChatID: chat.ID, UserID: user.ID})

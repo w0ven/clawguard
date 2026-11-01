@@ -90,6 +90,7 @@ func TestFinalizeVerificationPromptDeletesMathImage(t *testing.T) {
 		&tele.Chat{ID: -1001},
 		store.PendingVerification{Method: "math_image", JoinMessageID: &messageID},
 		"❌ 验证失败",
+		5,
 	)
 	if !containsString(transport.Methods(), "deleteMessage") {
 		t.Fatalf("methods = %v, want deleteMessage", transport.Methods())

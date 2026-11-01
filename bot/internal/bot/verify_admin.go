@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"go.uber.org/zap"
@@ -80,7 +81,11 @@ func (s *Service) sendOrEditVerificationPhoto(
 	return s.bot.Send(chat, photo, opts)
 }
 
-func (s *Service) finalizeVerificationPrompt(chat *tele.Chat, pending store.PendingVerification, html string) {
+func (s *Service) finalizeVerificationPrompt(chat *tele.Chat, pending store.PendingVerification, html string, autoDeleteSeconds int) {
+	s.finalizeVerificationPromptWithScheduler(chat, pending, html, autoDeleteSeconds, s.runDelayed)
+}
+
+func (s *Service) finalizeVerificationPromptWithScheduler(chat *tele.Chat, pending store.PendingVerification, html string, autoDeleteSeconds int, schedule func(time.Duration, func())) {
 	if chat == nil || pending.JoinMessageID == nil || *pending.JoinMessageID <= 0 {
 		return
 	}
@@ -105,6 +110,15 @@ func (s *Service) finalizeVerificationPrompt(chat *tele.Chat, pending store.Pend
 			zap.Int64("chat_id", chat.ID),
 			zap.Int64("message_id", *pending.JoinMessageID),
 		)
+	}
+	// Capture this particular card, not the user's current pending task. Even
+	// if editing failed, its verification has ended and the old card must go.
+	if autoDeleteSeconds > 0 {
+		schedule(time.Duration(autoDeleteSeconds)*time.Second, func() {
+			if err := normalizeTelegramActionError("delete", s.deleteDelayedMessage(msg)); err != nil && s.logger != nil {
+				s.logger.Debug("auto delete verification result failed", zap.Error(err), zap.Int64("chat_id", chat.ID), zap.Int("message_id", msg.ID))
+			}
+		})
 	}
 }
 
@@ -199,7 +213,7 @@ func (s *Service) handleVerifyAdmin(c tele.Context) error {
 		s.logger.Warn("load policy for admin reject", zap.Error(polErr), zap.Int64("chat_id", chat.ID))
 		policy = config.DefaultPolicy
 	}
-	if err := s.failVerificationImmediately(context.Background(), chat, user, pending, policy.Verify.FailAction, "verify_admin_reject"); err != nil {
+	if err := s.failVerificationImmediately(context.Background(), chat, user, pending, policy.Verify.FailAction, "verify_admin_reject", policy.Feedback.VerifyFail.AutoDeleteSeconds); err != nil {
 		s.logger.Error("admin reject verification failed", zap.Error(err), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
 		return c.Respond(&tele.CallbackResponse{Text: "拒绝入群失败，请稍后重试", ShowAlert: true})
 	}

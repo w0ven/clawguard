@@ -360,7 +360,7 @@ func TestVerificationPartialKickDoesNotRepeatIntegration(t *testing.T) {
 	tr.mu.Lock()
 	tr.failUnban = true
 	tr.mu.Unlock()
-	err = s.failVerificationImmediately(ctx, chat, user, p, "kick", "verify_wrong")
+	err = s.failVerificationImmediately(ctx, chat, user, p, "kick", "verify_wrong", 0)
 	if err == nil {
 		t.Fatal("expected unban failure")
 	}
@@ -369,7 +369,7 @@ func TestVerificationPartialKickDoesNotRepeatIntegration(t *testing.T) {
 		t.Fatalf("result=%s err=%v", result, err)
 	}
 	before := countString(tr.Methods(), "kickChatMember")
-	err = s.failVerificationImmediately(ctx, chat, user, p, "kick", "verify_wrong")
+	err = s.failVerificationImmediately(ctx, chat, user, p, "kick", "verify_wrong", 0)
 	if err == nil || countString(tr.Methods(), "kickChatMember") != before {
 		t.Fatalf("retry dispatched another ban: %v %v", err, tr.Methods())
 	}
