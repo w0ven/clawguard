@@ -1984,7 +1984,7 @@ func (s *Service) handleVerifyMath(c tele.Context) error {
 	}
 
 	if selectedAnswer != math.Answer {
-		if err := s.failVerificationImmediately(context.Background(), chat, sender, pending, policy.Verify.FailAction, "verify_math_wrong"); err != nil {
+		if err := s.failVerificationImmediately(context.Background(), chat, sender, pending, policy.Verify.FailAction, "verify_math_wrong", policy.Feedback.VerifyFail.AutoDeleteSeconds); err != nil {
 			s.logger.Error("kick math verification failure", zap.Error(err), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", sender.ID))
 			return c.Respond(&tele.CallbackResponse{Text: "处理失败，请联系管理员", ShowAlert: true})
 		}
@@ -2055,7 +2055,7 @@ func (s *Service) handleVerifyRandom(c tele.Context) error {
 	}
 
 	if payload.Value != random.CorrectEmoji {
-		if err := s.failVerificationImmediately(context.Background(), chat, sender, pending, policy.Verify.FailAction, "verify_random_wrong"); err != nil {
+		if err := s.failVerificationImmediately(context.Background(), chat, sender, pending, policy.Verify.FailAction, "verify_random_wrong", policy.Feedback.VerifyFail.AutoDeleteSeconds); err != nil {
 			s.logger.Error("kick random verification failure", zap.Error(err), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", sender.ID))
 			return c.Respond(&tele.CallbackResponse{Text: "处理失败，请联系管理员", ShowAlert: true})
 		}
@@ -2125,7 +2125,7 @@ func (s *Service) completeVerification(ctx context.Context, chat *tele.Chat, use
 		kind = strings.TrimSpace(resultKind[0])
 	}
 	if !s.sendWelcomeMessage(context.Background(), chat, user, &pending) {
-		s.finalizeVerificationPrompt(chat, pending, verificationResultHTML(user, kind))
+		s.finalizeVerificationPrompt(chat, pending, verificationResultHTML(user, kind), policy.Feedback.VerifyPass.AutoDeleteSeconds)
 	}
 
 	// 验证通过反馈（默认关）
@@ -2311,7 +2311,7 @@ func (s *Service) HandleVerificationExpiry(ctx context.Context, pending store.Pe
 			if pendingReservesJoinProtectionSlot(pending.Method) {
 				s.joinProtector.ReleasePending(pending.ChatID)
 			}
-			s.finalizeVerificationPrompt(chat, pending, verificationResultHTML(user, "timeout"))
+			s.finalizeVerificationPrompt(chat, pending, verificationResultHTML(user, "timeout"), policy.Feedback.VerifyFail.AutoDeleteSeconds)
 			s.sendActionFeedback(chat, nil, policy.Feedback.VerifyFail, map[string]string{
 				"user":         feedbackUserLabel(user, policy.Feedback.VerifyFail.ParseMode),
 				"user_mention": feedbackUserMention(user, policy.Feedback.VerifyFail.ParseMode), "reason": "验证超时",
@@ -2349,7 +2349,7 @@ func (s *Service) deleteProcessedPendingVerification(ctx context.Context, pendin
 	return s.queries.DeletePendingVerificationInstance(ctx, pending)
 }
 
-func (s *Service) failVerificationImmediately(ctx context.Context, chat *tele.Chat, user *tele.User, pending store.PendingVerification, failAction, rule string) error {
+func (s *Service) failVerificationImmediately(ctx context.Context, chat *tele.Chat, user *tele.User, pending store.PendingVerification, failAction, rule string, autoDeleteSeconds int) error {
 	release, err := s.AcquireModerationReview(ctx, chat.ID, user.ID)
 	if err != nil {
 		return err
@@ -2391,8 +2391,6 @@ func (s *Service) failVerificationImmediately(ctx context.Context, chat *tele.Ch
 		return fmt.Errorf("record verification case: %w", err)
 	}
 
-	s.finalizeVerificationPrompt(chat, pending, verificationResultHTML(user, verificationFailKind(rule)))
-
 	deleted, err := s.queries.DeletePendingVerificationInstance(ctx, pending)
 	if err != nil {
 		return fmt.Errorf("delete failed pending verification: %w", err)
@@ -2400,6 +2398,7 @@ func (s *Service) failVerificationImmediately(ctx context.Context, chat *tele.Ch
 	if deleted == 0 {
 		return nil
 	}
+	s.finalizeVerificationPrompt(chat, pending, verificationResultHTML(user, verificationFailKind(rule)), autoDeleteSeconds)
 	s.ensureRuntimeGuards()
 	s.joinProtector.ReleasePending(pending.ChatID)
 

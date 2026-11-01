@@ -110,7 +110,7 @@ func TestGroupExemptionBotPathsIntegration(t *testing.T) {
 	}
 	// Failed automatic verification does not report a fictitious action and
 	// preserves the pending record; explicit admin rejection remains effective.
-	if err = s.failVerificationImmediately(ctx, msg.Chat, msg.Sender, pending, "kick", "verify_math_wrong"); !errors.Is(err, errExemptPending) {
+	if err = s.failVerificationImmediately(ctx, msg.Chat, msg.Sender, pending, "kick", "verify_math_wrong", 0); !errors.Is(err, errExemptPending) {
 		t.Fatalf("automatic failure: %v", err)
 	}
 	if err = s.completeVerification(ctx, msg.Chat, msg.Sender, pending); !errors.Is(err, errExemptPending) {
@@ -123,7 +123,7 @@ func TestGroupExemptionBotPathsIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	beforeReject := countString(transport.Methods(), "kickChatMember")
-	if err = s.failVerificationImmediately(ctx, msg.Chat, msg.Sender, pending, "kick", "verify_admin_reject"); err != nil {
+	if err = s.failVerificationImmediately(ctx, msg.Chat, msg.Sender, pending, "kick", "verify_admin_reject", 0); err != nil {
 		t.Fatalf("manual rejection: %v", err)
 	}
 	if countString(transport.Methods(), "kickChatMember") != beforeReject+1 {
