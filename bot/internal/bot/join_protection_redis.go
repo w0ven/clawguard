@@ -2,6 +2,7 @@ package bot
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -338,6 +339,64 @@ func membershipGenerationForUpdate(updateID int, update *tele.ChatMemberUpdate) 
 		timestamp = update.Unixtime
 	}
 	return fmt.Sprintf("t%d-%d", timestamp, joinProtectionEventSequence.Add(1))
+}
+
+// Verification join generations normally carry Telegram's monotonic update ID.
+// Unknown encodings are deliberately not ordered against a different session.
+var claimVerificationSessionScript = redis.NewScript(`
+local current = redis.call('GET', KEYS[1])
+local incoming = ARGV[1]
+if current and current ~= incoming then
+  local a = string.match(current, '^u(%d+)$')
+  local b = string.match(incoming, '^u(%d+)$')
+  if not a or not b or not tonumber(a) or not tonumber(b) or tonumber(a) > 9007199254740991 or tonumber(b) > 9007199254740991 then return -1 end
+  if tonumber(b) <= tonumber(a) then return 0 end
+end
+redis.call('SET', KEYS[1], incoming, 'PX', ARGV[2])
+return 1
+`)
+
+func verificationGenerationNewer(old, next string) bool {
+	if !strings.HasPrefix(old, "u") || !strings.HasPrefix(next, "u") {
+		return false
+	}
+	a, errA := strconv.ParseUint(old[1:], 10, 64)
+	b, errB := strconv.ParseUint(next[1:], 10, 64)
+	return errA == nil && errB == nil && a <= 9007199254740991 && b <= 9007199254740991 && b > a
+}
+
+var errVerificationSessionUnordered = errors.New("membership generations cannot be safely ordered")
+
+func (s *Service) claimVerificationMembershipSession(ctx context.Context, chatID, userID int64, generation string) (bool, error) {
+	if s.redis != nil {
+		n, err := claimVerificationSessionScript.Run(ctx, s.redis, []string{membershipSessionKey(chatID, userID)}, generation, membershipSessionTTL.Milliseconds()).Int()
+		if err == nil && n == -1 {
+			return false, errVerificationSessionUnordered
+		}
+		return n == 1, err
+	}
+	key := membershipSessionMapKey(chatID, userID)
+	for {
+		old, loaded := s.membershipSessions.LoadOrStore(key, generation)
+		if !loaded || old == generation {
+			return true, nil
+		}
+		previous, ok := old.(string)
+		if !ok {
+			return false, errVerificationSessionUnordered
+		}
+		a, e1 := strconv.ParseUint(strings.TrimPrefix(previous, "u"), 10, 64)
+		b, e2 := strconv.ParseUint(strings.TrimPrefix(generation, "u"), 10, 64)
+		if !strings.HasPrefix(previous, "u") || !strings.HasPrefix(generation, "u") || e1 != nil || e2 != nil || a > 9007199254740991 || b > 9007199254740991 {
+			return false, errVerificationSessionUnordered
+		}
+		if !verificationGenerationNewer(previous, generation) {
+			return false, nil
+		}
+		if s.membershipSessions.CompareAndSwap(key, previous, generation) {
+			return true, nil
+		}
+	}
 }
 
 func (s *Service) rememberMembershipSession(ctx context.Context, chatID, userID int64, generation string) error {

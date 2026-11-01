@@ -71,6 +71,8 @@ type Service struct {
 	runtimeGuardsOnce  sync.Once
 	joinProtector      *joinProtector
 	cleanupBreaker     *telegramCleanupBreaker
+
+	verificationStartBot *tele.Bot
 }
 
 type buttonPayload struct {
@@ -223,6 +225,13 @@ func New(ctx context.Context, cfg config.Config, logger *zap.Logger, queries *st
 		return nil, fmt.Errorf("new telebot: %w", err)
 	}
 
+	// This client is only used for verification-start restriction/recovery.
+	// Redirects are disabled: otherwise a dial failure after a redirected POST
+	// would not prove that the original request was never sent.
+	startBot, err := tele.NewBot(tele.Settings{Token: cfg.BotToken, URL: b.URL, Offline: true, Client: verificationStartHTTPClient()})
+	if err != nil {
+		return nil, fmt.Errorf("new verification-start bot: %w", err)
+	}
 	lifecycleCtx, lifecycleCancel := context.WithCancel(context.Background())
 
 	svc := &Service{
@@ -243,6 +252,8 @@ func New(ctx context.Context, cfg config.Config, logger *zap.Logger, queries *st
 		joinProtector:   newJoinProtector(),
 		cleanupBreaker:  newTelegramCleanupBreaker(),
 		startedAt:       time.Now().UTC(),
+
+		verificationStartBot: startBot,
 	}
 
 	svc.aiProviders = providers
@@ -1028,25 +1039,42 @@ func (s *Service) startVerificationAt(chat *tele.Chat, user *tele.User, joinEven
 		return nil
 	}
 
-	if !s.acquireVerificationJoinLock(chat.ID, user.ID) {
+	if membershipGeneration != "" {
+		current, err := s.claimVerificationMembershipSession(ctx, chat.ID, user.ID, membershipGeneration)
+		if err != nil && !errors.Is(err, errVerificationSessionUnordered) {
+			return fmt.Errorf("claim verification membership session: %w", err)
+		}
+		if !current {
+			// Do not raise a verification-start alarm when verification is not
+			// active. A conflicting session still cannot authorize new action.
+			if !policy.Verify.Enabled || actionsPaused {
+				s.logger.Warn("join generation conflict while verification inactive", zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
+				return nil
+			}
+			// Update IDs usually increase, but Telegram may reseed them after a
+			// long idle period. A conflicting session cannot be safely ordered.
+			cause := errors.Join(errVerificationSessionUnordered, err)
+			key := membershipCleanupKey("verification_start", chat.ID, user.ID, membershipGeneration)
+			_, dispatchErr := s.guardedCleanup(ctx, key, chat.ID, user.ID, "verification_start", func() (string, error) {
+				return "", &verificationStartNotSentError{cause}
+			})
+			if dispatchErr != nil && !errors.Is(dispatchErr, errCleanupManualReview) {
+				return dispatchErr
+			}
+			s.logger.Warn("verification join generation conflict requires review", zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID), zap.String("generation", membershipGeneration))
+			return s.sendVerificationStartFailureNotice(ctx, chat, user, membershipGeneration, cause)
+		}
+	}
+	if !s.acquireVerificationJoinLock(chat.ID, user.ID, membershipGeneration) {
 		s.logger.Debug("skip duplicate join event", zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
 		return nil
-	}
-	if err := s.rememberMembershipSession(ctx, chat.ID, user.ID, membershipGeneration); err != nil {
-		if s.logger != nil {
-			s.logger.Warn("persist membership session failed", zap.Error(err), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID), zap.String("generation", membershipGeneration))
-		}
-		if policy.Verify.Enabled && policy.Verify.Method == "turnstile_hcaptcha" {
-			s.releaseVerificationJoinLock(ctx, chat.ID, user.ID)
-			return err
-		}
 	}
 
 	subject := joinProtectionSubject{}
 	if policy.JoinProtection.Enabled {
 		subject = s.joinProtectionSubjectForUser(ctx, chat.ID, user.ID)
 		if subject.Trusted {
-			s.releaseVerificationJoinLock(ctx, chat.ID, user.ID)
+			s.releaseVerificationJoinLock(ctx, chat.ID, user.ID, membershipGeneration)
 			s.logger.Info("trusted member bypassed join protection", zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
 			return nil
 		}
@@ -1074,7 +1102,7 @@ func (s *Service) startVerificationAt(chat *tele.Chat, user *tele.User, joinEven
 			s.logger.Warn("join protection action skipped because telegram actions are paused", zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
 		} else if err := s.handleJoinProtectionAction(ctx, chat, user, policy.JoinProtection, action, membershipGeneration, time.Now()); err != nil {
 			s.logger.Error("handle join protection action failed", zap.Error(err), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID), zap.String("action", action))
-			s.releaseVerificationJoinLock(ctx, chat.ID, user.ID)
+			s.releaseVerificationJoinLock(ctx, chat.ID, user.ID, membershipGeneration)
 			return err
 		}
 		if decision.Notify {
@@ -1130,26 +1158,67 @@ func (s *Service) startVerificationAt(chat *tele.Chat, user *tele.User, joinEven
 	release, lockErr := s.AcquireModerationReview(ctx, chat.ID, user.ID)
 	if lockErr != nil {
 		s.joinProtector.ReleasePending(chat.ID)
+		s.releaseVerificationJoinLock(ctx, chat.ID, user.ID, membershipGeneration)
 		return lockErr
 	}
 	defer release() // release is idempotent; also protect panic/early-return paths.
-	_, restrictErr := s.guardedCleanup(ctx, membershipCleanupKey("verification_start", chat.ID, user.ID, membershipGeneration), chat.ID, user.ID, "verification_start", func() (string, error) {
-		return "restricted", telegramConfirmedRestrict(s.bot, chat, &member)
+	if membershipGeneration != "" {
+		current, err := s.membershipSessionCurrent(ctx, chat.ID, user.ID, membershipGeneration)
+		if err != nil {
+			s.joinProtector.ReleasePending(chat.ID)
+			s.releaseVerificationJoinLock(ctx, chat.ID, user.ID, membershipGeneration)
+			return err
+		}
+		if !current {
+			s.joinProtector.ReleasePending(chat.ID)
+			s.releaseVerificationJoinLock(ctx, chat.ID, user.ID, membershipGeneration)
+			return nil // a newer join owns the session; never restrict the old one
+		}
+	}
+	startKey := membershipCleanupKey("verification_start", chat.ID, user.ID, membershipGeneration)
+	dispatchResult, restrictErr := s.guardedCleanup(ctx, startKey, chat.ID, user.ID, "verification_start", func() (string, error) {
+		return "restricted", s.restrictVerificationStartWithRecovery(ctx, chat, user, &member, membershipGeneration)
 	})
 	if err := restrictErr; err != nil {
 		release()
 		s.joinProtector.ReleasePending(chat.ID)
 		readable := normalizeTelegramActionError("restrict", err)
 		s.logger.Error("restrict new member", zap.Error(readable), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
-		s.sendBotPermissionWarningToChat(chat, verificationStartFailureNotice(readable))
+		noticeErr := s.sendVerificationStartFailureNotice(ctx, chat, user, membershipGeneration, readable)
 		if errors.Is(err, errCleanupManualReview) {
-			return readable
+			s.releaseVerificationJoinLock(ctx, chat.ID, user.ID, membershipGeneration)
+			key := membershipCleanupKey("verification_start", chat.ID, user.ID, membershipGeneration)
+			if noticeErr == nil && key != "" && s.queries != nil {
+				pending, stateErr := s.queries.HasPendingVerificationStartDispatch(ctx, key, chat.ID, user.ID)
+				if stateErr == nil && pending {
+					// The durable dispatch and delivered warning require human review;
+					// webhook replay cannot safely settle an unknown outcome.
+					return nil
+				}
+			}
+			return errors.Join(readable, noticeErr)
 		}
 		if cleanupErr := s.handleVerificationPromptFailure(ctx, chat, user, policy, readable, membershipGeneration); cleanupErr != nil {
-			s.releaseVerificationJoinLock(ctx, chat.ID, user.ID)
+			s.releaseVerificationJoinLock(ctx, chat.ID, user.ID, membershipGeneration)
 			return errors.Join(readable, cleanupErr)
 		}
 		return nil
+	}
+	if membershipGeneration != "" {
+		current, err := s.membershipSessionCurrent(ctx, chat.ID, user.ID, membershipGeneration)
+		if err != nil || !current {
+			s.joinProtector.ReleasePending(chat.ID)
+			s.releaseVerificationJoinLock(ctx, chat.ID, user.ID, membershipGeneration)
+			cause := errors.Join(errors.New("membership changed during verification restriction"), err)
+			if dispatchResult == "restricted" {
+				if markErr := s.queries.MarkVerificationStartMembershipConflict(ctx, startKey, chat.ID, user.ID); markErr != nil {
+					return errors.Join(cause, markErr)
+				}
+			}
+			release()
+			s.logger.Error("verification restriction requires membership review", zap.Error(cause), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
+			return s.sendVerificationStartFailureNotice(ctx, chat, user, membershipGeneration, cause)
+		}
 	}
 	s.logger.Info("verification step completed",
 		zap.Int64("chat_id", chat.ID),
@@ -1174,7 +1243,7 @@ func (s *Service) startVerificationAt(chat *tele.Chat, user *tele.User, joinEven
 	if err := promptErr; err != nil {
 		s.joinProtector.ReleasePending(chat.ID)
 		if cleanupErr := s.handleVerificationPromptFailure(ctx, chat, user, policy, err, membershipGeneration); cleanupErr != nil {
-			s.releaseVerificationJoinLock(ctx, chat.ID, user.ID)
+			s.releaseVerificationJoinLock(ctx, chat.ID, user.ID, membershipGeneration)
 			return errors.Join(err, cleanupErr)
 		}
 		return nil
@@ -1729,8 +1798,16 @@ func (s *Service) storePendingVerification(ctx context.Context, chatID int64, us
 	return nil
 }
 
-func (s *Service) acquireVerificationJoinLock(chatID, userID int64) bool {
+func verificationJoinLockKey(chatID, userID int64, generation ...string) string {
 	key := fmt.Sprintf("clawguard:verify:lock:%d:%d", chatID, userID)
+	if len(generation) != 0 && generation[0] != "" {
+		key += ":" + generation[0]
+	}
+	return key
+}
+
+func (s *Service) acquireVerificationJoinLock(chatID, userID int64, generation ...string) bool {
+	key := verificationJoinLockKey(chatID, userID, generation...)
 	_, ok := s.acquireActionDedupeLock(
 		key,
 		10*time.Second,
@@ -1742,8 +1819,8 @@ func (s *Service) acquireVerificationJoinLock(chatID, userID int64) bool {
 	return ok
 }
 
-func (s *Service) releaseVerificationJoinLock(ctx context.Context, chatID, userID int64) {
-	key := fmt.Sprintf("clawguard:verify:lock:%d:%d", chatID, userID)
+func (s *Service) releaseVerificationJoinLock(ctx context.Context, chatID, userID int64, generation ...string) {
+	key := verificationJoinLockKey(chatID, userID, generation...)
 	if s.redis != nil {
 		if err := s.redis.Del(ctx, key).Err(); err != nil && s.logger != nil {
 			s.logger.Warn("release verification join lock via redis failed", zap.Error(err), zap.Int64("chat_id", chatID), zap.Int64("user_id", userID))
