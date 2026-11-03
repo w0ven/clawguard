@@ -46,11 +46,14 @@ type Service struct {
 	lifecycleCtx       context.Context
 	lifecycleCancel    context.CancelFunc
 	wg                 sync.WaitGroup
-	verifyBtn          tele.Btn
-	verifyMathBtn      tele.Btn
-	verifyRandBtn      tele.Btn
-	verifyAdminBtn     tele.Btn
-	startedAt          time.Time
+	verifyBtn             tele.Btn
+	verifyMathBtn         tele.Btn
+	verifyRandBtn         tele.Btn
+	verifyAdminBtn        tele.Btn
+	requireUsernameBtn    tele.Btn
+	appealAdminBtn        tele.Btn
+	appealDecisionHandler func(ctx context.Context, adminTelegramID, appealID int64, action string) (*store.AppealReview, string, error)
+	startedAt             time.Time
 	lastUpdateAt       atomic.Value
 	lastAIOKAt         atomic.Value
 	lastAIFailAt       atomic.Value
@@ -209,6 +212,8 @@ func New(ctx context.Context, cfg config.Config, logger *zap.Logger, queries *st
 	verifyMathBtn := tele.Btn{Unique: "verify_math"}
 	verifyRandBtn := tele.Btn{Unique: "verify_random"}
 	verifyAdminBtn := tele.Btn{Unique: "verify_admin"}
+	requireUsernameBtn := tele.Btn{Unique: "req_uname_unmute"}
+	appealAdminBtn := tele.Btn{Unique: "appeal_admin_act"}
 
 	b, err := tele.NewBot(tele.Settings{
 		Token:       cfg.BotToken,
@@ -245,11 +250,13 @@ func New(ctx context.Context, cfg config.Config, logger *zap.Logger, queries *st
 		sendLimiter:     NewSendLimiter(),
 		lifecycleCtx:    lifecycleCtx,
 		lifecycleCancel: lifecycleCancel,
-		verifyBtn:       verifyBtn,
-		verifyMathBtn:   verifyMathBtn,
-		verifyRandBtn:   verifyRandBtn,
-		verifyAdminBtn:  verifyAdminBtn,
-		joinProtector:   newJoinProtector(),
+		verifyBtn:          verifyBtn,
+		verifyMathBtn:      verifyMathBtn,
+		verifyRandBtn:      verifyRandBtn,
+		verifyAdminBtn:     verifyAdminBtn,
+		requireUsernameBtn: requireUsernameBtn,
+		appealAdminBtn:     appealAdminBtn,
+		joinProtector:      newJoinProtector(),
 		cleanupBreaker:  newTelegramCleanupBreaker(),
 		startedAt:       time.Now().UTC(),
 
@@ -440,6 +447,25 @@ func (s *Service) SendHTMLPrivateMessage(telegramID int64, text string) error {
 }
 
 func (s *Service) registerHandlers() {
+	if s.verifyBtn.Unique == "" {
+		s.verifyBtn.Unique = "verify_human"
+	}
+	if s.verifyMathBtn.Unique == "" {
+		s.verifyMathBtn.Unique = "verify_math"
+	}
+	if s.verifyRandBtn.Unique == "" {
+		s.verifyRandBtn.Unique = "verify_random"
+	}
+	if s.verifyAdminBtn.Unique == "" {
+		s.verifyAdminBtn.Unique = "verify_admin"
+	}
+	if s.requireUsernameBtn.Unique == "" {
+		s.requireUsernameBtn.Unique = "req_uname_unmute"
+	}
+	if s.appealAdminBtn.Unique == "" {
+		s.appealAdminBtn.Unique = "appeal_admin_act"
+	}
+
 	s.bot.Handle(tele.OnUserJoined, func(c tele.Context) error {
 		return s.runHandler("user_joined", c, s.handleUserJoined)
 	})
@@ -466,6 +492,14 @@ func (s *Service) registerHandlers() {
 
 	s.bot.Handle(&s.verifyAdminBtn, func(c tele.Context) error {
 		return s.runHandler("verify_admin", c, s.handleVerifyAdmin)
+	})
+
+	s.bot.Handle(&s.requireUsernameBtn, func(c tele.Context) error {
+		return s.runHandler("require_username_unmute", c, s.handleRequireUsernameUnmute)
+	})
+
+	s.bot.Handle(&s.appealAdminBtn, func(c tele.Context) error {
+		return s.runHandler("appeal_admin", c, s.handleAppealAdminCallback)
 	})
 
 	s.bot.Handle(tele.OnText, func(c tele.Context) error {

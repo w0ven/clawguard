@@ -55,6 +55,9 @@ func NewServer(cfg config.Config, logger *zap.Logger, botService *bot.Service, s
 		scheduler:      scheduled,
 		appealVerifier: botService.VerifyAppealProviders,
 	}
+	if botService != nil {
+		botService.SetAppealDecisionHandler(server.handleBotAppealDecision)
+	}
 
 	e.GET("/healthz", server.healthz)
 	e.GET("/readyz", server.readyz)

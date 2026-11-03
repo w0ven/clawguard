@@ -636,6 +636,8 @@ func (db *moderationProfileMatchMockDB) QueryRow(_ context.Context, query string
 		return mockScanRow(int64(1))
 	case strings.Contains(query, "FROM moderation_cases"):
 		return mockScanRow(false)
+	case strings.Contains(query, "FROM ai_mute_ownership"):
+		return mockScanRow(true)
 	case strings.Contains(query, "FROM group_exempt_users"):
 		return mockScanRow(false, false)
 	case strings.Contains(query, "FROM authorized_groups"):
@@ -929,6 +931,10 @@ func (db *moderationProfileMatchMockDB) QueryRow(_ context.Context, query string
 			trust.Notes,
 			trust.IsBot,
 		)
+	case strings.Contains(query, "FROM pending_verifications"):
+		return mockErrorRow{err: pgx.ErrNoRows}
+	case strings.Contains(query, "FROM ai_mute_ownership"):
+		return mockScanRow(true)
 	default:
 		return mockErrorRow{err: fmt.Errorf("unexpected query: %s", query)}
 	}
