@@ -183,6 +183,15 @@ func validatePartialPolicy(policy GuardPolicy) error {
 	if policy.Filter.NewUser.MaxMessagesPerMinute < 0 {
 		return fmt.Errorf("filter.new_user.max_messages_per_minute must not be negative")
 	}
+	if policy.Filter.RequireUsername.Scope != "" && !oneOf(policy.Filter.RequireUsername.Scope, "ungraduated", "all") {
+		return fmt.Errorf("filter.require_username.scope has unsupported value %q", policy.Filter.RequireUsername.Scope)
+	}
+	if policy.Filter.RequireUsername.MuteSeconds != 0 && (policy.Filter.RequireUsername.MuteSeconds < 60 || policy.Filter.RequireUsername.MuteSeconds > 86400) {
+		return fmt.Errorf("filter.require_username.mute_seconds must be between 60 and 86400")
+	}
+	if policy.Filter.RequireUsername.AutoDeleteSeconds < 0 || policy.Filter.RequireUsername.AutoDeleteSeconds > 86400 {
+		return fmt.Errorf("filter.require_username.auto_delete_seconds must be between 0 and 86400")
+	}
 	if policy.AntiSpam.RateLimit.MessagesPer10s < 0 {
 		return fmt.Errorf("anti_spam.rate_limit.messages_per_10s must not be negative")
 	}
@@ -246,6 +255,15 @@ func ValidateGuardPolicy(policy GuardPolicy) error {
 	}
 	if !IsFilterAction(policy.Filter.Usernames.Action) {
 		return fmt.Errorf("filter.usernames.action has unsupported value %q", policy.Filter.Usernames.Action)
+	}
+	if !oneOf(policy.Filter.RequireUsername.Scope, "ungraduated", "all") {
+		return fmt.Errorf("filter.require_username.scope has unsupported value %q", policy.Filter.RequireUsername.Scope)
+	}
+	if policy.Filter.RequireUsername.MuteSeconds < 60 || policy.Filter.RequireUsername.MuteSeconds > 86400 {
+		return fmt.Errorf("filter.require_username.mute_seconds must be between 60 and 86400")
+	}
+	if policy.Filter.RequireUsername.AutoDeleteSeconds < 0 || policy.Filter.RequireUsername.AutoDeleteSeconds > 86400 {
+		return fmt.Errorf("filter.require_username.auto_delete_seconds must be between 0 and 86400")
 	}
 	if !oneOf(policy.Filter.NonTextMessages, "off", "delete", "delete_warn", "ai_review") {
 		return fmt.Errorf("filter.non_text_messages has unsupported value %q", policy.Filter.NonTextMessages)

@@ -107,8 +107,9 @@ type FilterConfig struct {
 	Keywords                 FilterKeywordPolicy        `json:"keywords"`
 	Regex                    FilterRegexPolicy          `json:"regex"`
 	Links                    FilterLinksPolicy          `json:"links"`
-	Usernames                FilterUsernamePolicy       `json:"usernames"`
-	DeletedAccount           FilterDeletedAccountPolicy `json:"deleted_account"`
+	Usernames                FilterUsernamePolicy        `json:"usernames"`
+	RequireUsername          FilterRequireUsernamePolicy `json:"require_username"`
+	DeletedAccount           FilterDeletedAccountPolicy  `json:"deleted_account"`
 	NewUser                  FilterNewUserPolicy        `json:"new_user"`
 	NonTextMessages          string                     `json:"non_text_messages"`
 	OtherBotsAction          string                     `json:"other_bots_action"` // "audit" | "kick" | "ban" | "off"
@@ -147,6 +148,13 @@ type FilterUsernamePolicy struct {
 	Enabled   bool     `json:"enabled"`
 	Blacklist []string `json:"blacklist"`
 	Action    string   `json:"action"`
+}
+
+type FilterRequireUsernamePolicy struct {
+	Enabled           bool   `json:"enabled"`
+	Scope             string `json:"scope"`
+	MuteSeconds       int    `json:"mute_seconds"`
+	AutoDeleteSeconds int    `json:"auto_delete_seconds"`
 }
 
 type FilterNewUserPolicy struct {
@@ -315,6 +323,12 @@ var DefaultPolicy = GuardPolicy{
 		Usernames: FilterUsernamePolicy{
 			Enabled: false,
 			Action:  "delete_warn",
+		},
+		RequireUsername: FilterRequireUsernamePolicy{
+			Enabled:           true,
+			Scope:             "ungraduated",
+			MuteSeconds:       600,
+			AutoDeleteSeconds: 180,
 		},
 		DeletedAccount: FilterDeletedAccountPolicy{
 			Enabled: true,
@@ -600,6 +614,16 @@ func applyFilterDefaults(policy *FilterConfig) {
 	}
 	if policy.Usernames.Action == "" {
 		policy.Usernames.Action = DefaultPolicy.Filter.Usernames.Action
+	}
+	policy.RequireUsername.Scope = strings.TrimSpace(strings.ToLower(policy.RequireUsername.Scope))
+	if policy.RequireUsername.Scope == "" {
+		policy.RequireUsername.Scope = DefaultPolicy.Filter.RequireUsername.Scope
+	}
+	if policy.RequireUsername.MuteSeconds <= 0 {
+		policy.RequireUsername.MuteSeconds = DefaultPolicy.Filter.RequireUsername.MuteSeconds
+	}
+	if policy.RequireUsername.AutoDeleteSeconds < 0 {
+		policy.RequireUsername.AutoDeleteSeconds = DefaultPolicy.Filter.RequireUsername.AutoDeleteSeconds
 	}
 	if policy.NewUser.DurationHours <= 0 {
 		policy.NewUser.DurationHours = DefaultPolicy.Filter.NewUser.DurationHours

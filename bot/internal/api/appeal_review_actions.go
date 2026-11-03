@@ -248,3 +248,157 @@ func (s *Server) appealBanFailureState(ctx context.Context, id int64) (string, s
 	}
 	return "manual_review", "审核通过，原封禁状态需人工核查，未确认解除"
 }
+
+func (s *Server) handleBotAppealDecision(ctx context.Context, adminTelegramID, id int64, action string) (*store.AppealReview, string, error) {
+	q := s.botService.Queries()
+	if q == nil {
+		return nil, "申诉处理服务暂未就绪", errors.New("queries unavailable")
+	}
+
+	admin, err := q.GetAdminByTelegramID(ctx, adminTelegramID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			isCfgAdmin := false
+			for _, cfgID := range s.cfg.AdminTelegramIDs {
+				if cfgID != 0 && cfgID == adminTelegramID {
+					isCfgAdmin = true
+					break
+				}
+			}
+			if !isCfgAdmin {
+				return nil, "仅管理员可处理申诉", errors.New("unauthorized admin")
+			}
+			admin = store.Admin{
+				ID:         adminTelegramID,
+				TelegramID: adminTelegramID,
+				Role:       "owner",
+				GroupScope: []byte(`[]`),
+			}
+		} else {
+			return nil, "暂时无法验证管理员身份，请稍后重试", err
+		}
+	}
+
+	scope, global := adminScopeFilter(admin)
+	v, err := q.GetAppealReview(ctx, id, global, scope)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, "该申诉不存在或不在您的管理范围内", err
+	}
+	if err != nil {
+		return nil, "申诉记录暂不可用，请稍后重试", err
+	}
+
+	release, err := s.botService.AcquireModerationReview(ctx, v.ChatID, v.UserID)
+	if err != nil {
+		return &v, "处理正在进行，请稍后重试", err
+	}
+	defer release()
+
+	retry := action == "retry"
+	decision := action
+	note := ""
+	switch action {
+	case "approve":
+		note = "管理员通过 Bot 私信审核通过"
+	case "uphold":
+		note = "管理员通过 Bot 私信审核维持原处理"
+	case "retry":
+		decision = ""
+	default:
+		return &v, "操作类型无效", errors.New("invalid action")
+	}
+
+	shouldExecute := false
+	err = q.Transact(ctx, func(tx *store.Queries) error {
+		current, txErr := tx.LockAppealReview(ctx, id, global, scope)
+		if txErr != nil {
+			return txErr
+		}
+		v = current
+		if retry {
+			if current.Decision == nil || *current.Decision != "approve" || (current.Status != "failed" && current.Status != "executing") {
+				return errAppealConflict
+			}
+			shouldExecute = true
+			return nil
+		}
+		if current.Decision != nil {
+			if *current.Decision != decision {
+				return errAppealConflict
+			}
+			return nil
+		}
+		if current.Status != "pending" {
+			return errAppealConflict
+		}
+		before, _ := json.Marshal(map[string]any{"appeal_id": id, "status": "pending", "source": "telegram_bot"})
+		after, _ := json.Marshal(map[string]any{"appeal_id": id, "decision": decision, "public_note": note, "source": "telegram_bot"})
+		if txErr = tx.SetAppealDecision(ctx, id, admin.ID, decision, note); txErr != nil {
+			return txErr
+		}
+		if txErr = writeAuditWithQueries(ctx, tx, admin, "appeal", &current.ChatID, "appeal_decision", before, after); txErr != nil {
+			return txErr
+		}
+		if decision == "uphold" {
+			return tx.QueueAppealResult(ctx, id)
+		}
+		shouldExecute = true
+		return nil
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, "该申诉不存在或不在您的管理范围内", err
+	}
+	if errors.Is(err, errAppealConflict) {
+		latest, _ := q.GetAppealReview(ctx, id, global, scope)
+		return &latest, "该申诉已由其他管理员或在其他入口处理，卡片已刷新", err
+	}
+	if err != nil {
+		return &v, "保存审核结果失败，请稍后重试", err
+	}
+
+	if shouldExecute {
+		state, result := s.executeAppealLocked(ctx, v)
+		err = q.Transact(ctx, func(tx *store.Queries) error {
+			current, txErr := tx.LockAppealReview(ctx, id, global, scope)
+			if txErr != nil {
+				return txErr
+			}
+			if current.Status == "completed" || current.Status == "manual_review" {
+				return nil
+			}
+			if txErr = tx.SetAppealExecutionResult(ctx, id, state, result); txErr != nil {
+				return txErr
+			}
+			before, _ := json.Marshal(map[string]any{"appeal_id": id, "status": current.Status, "source": "telegram_bot"})
+			after, _ := json.Marshal(map[string]any{"appeal_id": id, "status": state, "execution_result": result, "source": "telegram_bot"})
+			if txErr = writeAuditWithQueries(ctx, tx, admin, "appeal", &current.ChatID, "appeal_execution", before, after); txErr != nil {
+				return txErr
+			}
+			if state == "completed" || state == "manual_review" {
+				return tx.QueueAppealResult(ctx, id)
+			}
+			return nil
+		})
+		if err != nil {
+			latest, _ := q.GetAppealReview(ctx, id, global, scope)
+			return &latest, "审核决定已保存，但执行结果未结算，请点击重试或前往后台核查", err
+		}
+	}
+
+	latest, err := q.GetAppealReview(ctx, id, global, scope)
+	if err != nil {
+		return &v, "已处理，请稍后刷新查看状态", nil
+	}
+	alertText := "✅ 已驳回申诉，将私信通知用户"
+	if latest.Decision != nil && *latest.Decision == "approve" {
+		switch latest.Status {
+		case "completed":
+			alertText = "✅ 申诉已通过，处罚已解除"
+		case "manual_review":
+			alertText = "⚠️ 申诉已通过，但原限制需人工核查"
+		default:
+			alertText = "⚠️ 申诉已记录通过，解除步骤未完成，可点击重试"
+		}
+	}
+	return &latest, alertText, nil
+}

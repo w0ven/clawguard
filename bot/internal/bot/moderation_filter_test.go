@@ -116,7 +116,7 @@ func TestApplyFilterChecksWhilePausedDoesNotRestrictUngraduatedPermissions(t *te
 		ID:     9005,
 		Photo:  &tele.Photo{},
 		Chat:   &tele.Chat{ID: chatID, Type: tele.ChatSuperGroup},
-		Sender: &tele.User{ID: userID, FirstName: "Alice"},
+		Sender: &tele.User{ID: userID, Username: "alice", FirstName: "Alice"},
 	}
 
 	handled, err := svc.applyFilterChecks(context.Background(), msg, policy, false, false, true)

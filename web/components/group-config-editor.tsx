@@ -368,6 +368,39 @@ export const fieldDescriptors: FieldDescriptor[] = [
   },
   {
     tab: "filter",
+    path: ["filter", "require_username", "enabled"],
+    label: "强制设置用户名",
+    description:
+      "发言时若未设置 Telegram @用户名，自动删除发言并临时禁言，同时发送『☑️ 自助解禁』按钮，设置用户名后点击即可解除。",
+    kind: "switch",
+  },
+  {
+    tab: "filter",
+    path: ["filter", "require_username", "scope"],
+    label: "作用范围",
+    description: "选择仅对未毕业新人（new/suspicious）生效，还是对全群非管理员成员生效。",
+    kind: "select",
+    options: [
+      { label: "仅未毕业新成员（new / suspicious）", value: "ungraduated" },
+      { label: "全群非管理员成员", value: "all" },
+    ],
+  },
+  {
+    tab: "filter",
+    path: ["filter", "require_username", "mute_seconds"],
+    label: "禁言时长 (秒)",
+    description: "默认 600 秒（10 分钟），范围 60–86400 秒。",
+    kind: "number",
+  },
+  {
+    tab: "filter",
+    path: ["filter", "require_username", "auto_delete_seconds"],
+    label: "提示消息自删 (秒)",
+    description: "0 表示不自动删除；默认 180 秒，用户自助解禁成功后也会立即删除提示。",
+    kind: "number",
+  },
+  {
+    tab: "filter",
     path: ["filter", "deleted_account", "enabled"],
     label: "封禁 Deleted Account",
     description:
@@ -834,6 +867,19 @@ const configFieldGroups: ConfigFieldGroupDescriptor[] = [
     title: "用户名黑名单",
     parentPath: "filter.usernames.enabled",
     childPaths: ["filter.usernames.blacklist", "filter.usernames.action"],
+  },
+  {
+    key: "filter.require_username",
+    tab: "filter",
+    title: "强制设置用户名",
+    parentPath: "filter.require_username.enabled",
+    childPaths: [
+      "filter.require_username.scope",
+      "filter.require_username.mute_seconds",
+      "filter.require_username.auto_delete_seconds",
+    ],
+    description:
+      "拦截无 @用户名 的成员发言：先删除该条消息并临时禁言，群内附上『☑️ 自助解禁』按钮，本人设置用户名后点击即可核验解禁。",
   },
   {
     key: "filter.deleted_account",

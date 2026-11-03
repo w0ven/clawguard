@@ -737,6 +737,17 @@ func (s *Service) applyAIModerationErrorFallback(ctx context.Context, msg *tele.
 func (s *Service) applyFilterChecks(ctx context.Context, msg *tele.Message, policy config.GuardPolicy, isAdmin, isEdited, actionsPaused bool) (bool, error) {
 	result := checkMessage(ctx, msg, policy.Filter, isAdmin)
 	if !result.Hit {
+		if msg != nil && msg.Chat != nil && msg.Sender != nil && !isAdmin && s.queries != nil && policy.Filter.RequireUsername.Enabled && strings.TrimSpace(msg.Sender.Username) == "" {
+			trust, err := s.ensureUserTrust(ctx, msg)
+			if err != nil {
+				return false, fmt.Errorf("load user trust for require_username: %w", err)
+			}
+			if handled, reqErr := s.handleRequireUsernameCheck(ctx, msg, trust, policy, isAdmin, actionsPaused); reqErr != nil {
+				return false, reqErr
+			} else if handled {
+				return true, nil
+			}
+		}
 		var err error
 		result, err = s.checkStatefulFilter(ctx, msg, policy, isAdmin, !isEdited, actionsPaused)
 		if err != nil {

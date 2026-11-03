@@ -245,4 +245,19 @@ func TestAppealReviewExecutionAndRecovery(t *testing.T) {
 	if err = fx.pool.QueryRow(ctx, `SELECT count(*) FROM moderation_notifications WHERE appeal_id=$1 AND event_kind='appeal_result'`, ban).Scan(&notifications); err != nil || notifications != 1 {
 		t.Fatalf("notification %d %v", notifications, err)
 	}
+
+	// Test Bot private admin appeal decision (approve & scope rejection)
+	botApproveAppeal, botCaseID := makeCase(131, "ban", true)
+	outOfScopeAdmin := int64(889900)
+	if _, _, err := srv.handleBotAppealDecision(ctx, outOfScopeAdmin, botApproveAppeal, "approve"); err == nil {
+		t.Fatal("expected unauthorized admin to be rejected")
+	}
+	reviewed, alertText, err := srv.handleBotAppealDecision(ctx, 101, botApproveAppeal, "approve")
+	if err != nil || reviewed == nil || reviewed.Status != "completed" || !strings.Contains(alertText, "申诉已通过") {
+		t.Fatalf("handleBotAppealDecision failed: err=%v reviewed=%+v alert=%q", err, reviewed, alertText)
+	}
+	aBot, e := fx.queries.AppealForUserCase(ctx, botCaseID, 131)
+	if e != nil || aBot.Status != "completed" || !strings.Contains(aBot.PublicNote, "Bot 私信审核通过") {
+		t.Fatalf("bot appeal decision DB state: %+v %v", aBot, e)
+	}
 }

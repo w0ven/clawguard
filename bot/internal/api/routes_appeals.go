@@ -132,5 +132,8 @@ func (s *Server) handleAppealMini(c echo.Context) error {
 		}
 		return c.JSON(409, map[string]string{"error": "验证已过期或提交失败，请刷新验证"})
 	}
+	if s.botService != nil && appeal.ID > 0 {
+		s.botService.NotifyAdminsNewAppeal(ctx, appeal.ID)
+	}
 	return c.JSON(http.StatusOK, map[string]any{"appeal": appeal})
 }
