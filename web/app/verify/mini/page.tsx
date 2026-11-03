@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { Shield, LoaderCircle, AlertCircle } from "lucide-react";
 import { DualCaptchaVerifyClient } from "@/components/dual-captcha-verify-client";
 import { telegramWebApp } from "@/lib/telegram";
 
@@ -40,7 +41,32 @@ export default function MiniVerificationPage() {
     document.head.appendChild(script);
     return () => { disposed = true; unsubscribe(); script.remove(); document.documentElement.style.removeProperty("--mini-safe-top"); document.documentElement.style.removeProperty("--mini-safe-bottom"); };
   }, []);
-  if (error) return <main className="p-6 text-center" role="alert">{error}</main>;
-  if (!state) return <main className="p-6 text-center">正在加载验证…</main>;
+  if (error) {
+    return (
+      <main className="flex min-h-screen items-center justify-center p-6 text-center" role="alert">
+        <div className="glass-panel flex max-w-sm flex-col items-center gap-3 rounded-3xl border border-[var(--border)] p-6 shadow-xl">
+          <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-[var(--danger-soft)] text-[var(--danger)]">
+            <AlertCircle className="h-6 w-6" />
+          </div>
+          <p className="text-sm font-medium text-[var(--danger)]">{error}</p>
+        </div>
+      </main>
+    );
+  }
+  if (!state) {
+    return (
+      <main className="flex min-h-screen items-center justify-center p-6 text-center">
+        <div className="glass-panel flex max-w-sm flex-col items-center gap-3 rounded-3xl border border-[var(--border)] p-6 shadow-xl">
+          <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-[var(--accent)] text-white">
+            <Shield className="h-6 w-6" />
+          </div>
+          <div className="flex items-center gap-2 text-sm text-[var(--text-muted)]">
+            <LoaderCircle className="h-4 w-4 animate-spin" />
+            <span>正在加载验证…</span>
+          </div>
+        </div>
+      </main>
+    );
+  }
   return <DualCaptchaVerifyClient token={state.token} initData={state.data} />;
 }

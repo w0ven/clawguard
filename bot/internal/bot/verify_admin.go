@@ -81,13 +81,13 @@ func (s *Service) sendOrEditVerificationPhoto(
 	return s.bot.Send(chat, photo, opts)
 }
 
-func (s *Service) finalizeVerificationPrompt(chat *tele.Chat, pending store.PendingVerification, html string, autoDeleteSeconds int) {
-	s.finalizeVerificationPromptWithScheduler(chat, pending, html, autoDeleteSeconds, s.runDelayed)
+func (s *Service) finalizeVerificationPrompt(chat *tele.Chat, pending store.PendingVerification, html string, autoDeleteSeconds int) bool {
+	return s.finalizeVerificationPromptWithScheduler(chat, pending, html, autoDeleteSeconds, s.runDelayed)
 }
 
-func (s *Service) finalizeVerificationPromptWithScheduler(chat *tele.Chat, pending store.PendingVerification, html string, autoDeleteSeconds int, schedule func(time.Duration, func())) {
+func (s *Service) finalizeVerificationPromptWithScheduler(chat *tele.Chat, pending store.PendingVerification, html string, autoDeleteSeconds int, schedule func(time.Duration, func())) bool {
 	if chat == nil || pending.JoinMessageID == nil || *pending.JoinMessageID <= 0 {
-		return
+		return false
 	}
 	// Telegram cannot turn a photo message into a text message.  Do not merely
 	// edit the caption of an arithmetic challenge after it has failed: that
@@ -96,7 +96,7 @@ func (s *Service) finalizeVerificationPromptWithScheduler(chat *tele.Chat, pendi
 	// every unsuccessful math-image path removes it here as well.
 	if pending.Method == "math_image" {
 		s.deleteVerificationMessage(chat, pending.JoinMessageID)
-		return
+		return false
 	}
 	msg := s.verificationMessageRef(chat, int(*pending.JoinMessageID))
 	opts := &tele.SendOptions{
@@ -104,12 +104,16 @@ func (s *Service) finalizeVerificationPromptWithScheduler(chat *tele.Chat, pendi
 		DisableWebPagePreview: true,
 		ReplyMarkup:           &tele.ReplyMarkup{},
 	}
-	if _, err := s.bot.Edit(msg, html, opts); err != nil && s.logger != nil {
-		s.logger.Warn("edit verification result failed",
-			zap.Error(err),
-			zap.Int64("chat_id", chat.ID),
-			zap.Int64("message_id", *pending.JoinMessageID),
-		)
+	edited := true
+	if _, err := s.bot.Edit(msg, html, opts); err != nil {
+		edited = false
+		if s.logger != nil {
+			s.logger.Warn("edit verification result failed",
+				zap.Error(err),
+				zap.Int64("chat_id", chat.ID),
+				zap.Int64("message_id", *pending.JoinMessageID),
+			)
+		}
 	}
 	// Capture this particular card, not the user's current pending task. Even
 	// if editing failed, its verification has ended and the old card must go.
@@ -120,6 +124,7 @@ func (s *Service) finalizeVerificationPromptWithScheduler(chat *tele.Chat, pendi
 			}
 		})
 	}
+	return edited
 }
 
 func verificationResultHTML(user *tele.User, kind string) string {
@@ -217,11 +222,13 @@ func (s *Service) handleVerifyAdmin(c tele.Context) error {
 		s.logger.Error("admin reject verification failed", zap.Error(err), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
 		return c.Respond(&tele.CallbackResponse{Text: "拒绝入群失败，请稍后重试", ShowAlert: true})
 	}
-	s.sendActionFeedback(chat, nil, policy.Feedback.VerifyFail, map[string]string{
-		"user":         feedbackUserLabel(user, policy.Feedback.VerifyFail.ParseMode),
-		"user_mention": feedbackUserMention(user, policy.Feedback.VerifyFail.ParseMode),
-		"reason":       "管理员拒绝入群",
-	})
+	if pending.JoinMessageID == nil || *pending.JoinMessageID <= 0 || pending.Method == "math_image" {
+		s.sendActionFeedback(chat, nil, policy.Feedback.VerifyFail, map[string]string{
+			"user":         feedbackUserLabel(user, policy.Feedback.VerifyFail.ParseMode),
+			"user_mention": feedbackUserMention(user, policy.Feedback.VerifyFail.ParseMode),
+			"reason":       "管理员拒绝入群",
+		})
+	}
 	s.logger.Info("admin rejected join verification", zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID), zap.Int64("admin_id", sender.ID))
 	return c.Respond(&tele.CallbackResponse{Text: "已拒绝入群", ShowAlert: false})
 }

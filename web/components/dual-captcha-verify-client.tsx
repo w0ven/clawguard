@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Shield } from "lucide-react";
+import { Shield, CheckCircle2, Clock, UserCheck, AlertTriangle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { telegramWebApp } from "@/lib/telegram";
 
@@ -177,19 +177,154 @@ export function DualCaptchaVerifyClient({ token, initData }: { token: string; in
   }
 
   return (
-    <main className="flex min-h-screen items-center justify-center px-4 py-8" style={{ paddingTop: "max(2rem, env(safe-area-inset-top), var(--mini-safe-top, 0px))", paddingBottom: "max(2rem, env(safe-area-inset-bottom), var(--mini-safe-bottom, 0px))" }}>
-      <div className="flex w-full max-w-sm flex-col items-center gap-5">
-        <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-[var(--accent)] text-white"><Shield /></div>
-        {success ? <div className="text-center"><h1 className="text-xl font-semibold">{mini ? "入群验证已完成" : "验证通过"}</h1><p className="mt-2 text-sm text-[var(--text-muted)]">本次入群验证限制已解除，其他未到期的限制不受影响。</p>{mini && <Button className="mt-4" onClick={() => telegramWebApp()?.close()}>关闭验证页</Button>}</div> : <>
-          <div className="text-center"><h1 className="text-xl font-semibold">{mini ? "入群验证" : "双重人机验证"}</h1><p className="mt-2 text-sm text-[var(--text-muted)]">{details?.recovery_pending ? "验证已完成，请继续解除本次限制。" : "两项都完成后，即可提交验证。"}</p></div>
-          {mini && details && <div className="w-full rounded-lg border p-3 text-sm"><strong>{details.group_title}</strong><p>验证账号：{details.username ? `@${details.username} ` : ""}(ID: {details.user_id})</p><p>剩余时间：{remaining !== null ? `${Math.floor(remaining / 60).toString().padStart(2, "0")}:${(remaining % 60).toString().padStart(2, "0")}` : "--:--"}</p><p className="text-[var(--text-muted)]">请使用本人 Telegram 账号操作。</p></div>}
-          {!details?.recovery_pending && <div className="w-full space-y-3">
-            <p className="text-sm">Cloudflare Turnstile：{cfToken ? "已完成" : "待完成"}</p><div ref={cfContainer} className="min-h-[65px]" />
-            <p className="text-sm">hCaptcha：{hToken ? "已完成" : "待完成"}</p><div ref={hContainer} className="min-h-[65px]" />
-          </div>}
-          {mini && remaining === 0 && !details?.recovery_pending && <p role="alert" className="text-sm text-[var(--danger)]">入群验证已超时，本次验证已关闭。</p>}
-          {error ? <><p role="alert" className="text-center text-sm text-[var(--danger)]">{error}</p><Button onClick={() => setAttempt((n) => n + 1)}>{details?.recovery_pending ? "重试" : "刷新两项重试"}</Button></> : <Button disabled={(!details?.recovery_pending && (!ready || !cfToken || !hToken)) || submitting || (mini && remaining === 0 && !details?.recovery_pending)} onClick={() => void submit()}>{submitting ? "正在处理…" : details?.recovery_pending ? "继续解除限制" : "提交验证"}</Button>}
-        </>}
+    <main
+      className="flex min-h-screen items-center justify-center px-4 py-8"
+      style={{
+        paddingTop: "max(2rem, env(safe-area-inset-top), var(--mini-safe-top, 0px))",
+        paddingBottom: "max(2rem, env(safe-area-inset-bottom), var(--mini-safe-bottom, 0px))",
+      }}
+    >
+      <div className="glass-panel flex w-full max-w-md flex-col items-center gap-5 rounded-3xl border border-[var(--border)] p-6 shadow-xl">
+        <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-[var(--accent)] text-white shadow-md">
+          {success ? <CheckCircle2 className="h-7 w-7" /> : <Shield className="h-7 w-7" />}
+        </div>
+
+        {success ? (
+          <div className="w-full space-y-4 text-center">
+            <div>
+              <span className="inline-block rounded-full bg-[var(--success-soft)] px-3 py-1 text-xs font-semibold text-[var(--success)]">
+                安检已放行
+              </span>
+              <h1 className="mt-2 text-xl font-semibold">
+                {mini ? "入群验证已完成" : "验证通过"}
+              </h1>
+              <p className="mt-2 text-sm text-[var(--text-muted)]">
+                本次入群验证限制已解除，其他未到期的限制不受影响。
+              </p>
+            </div>
+            {mini && (
+              <Button className="w-full" onClick={() => telegramWebApp()?.close()}>
+                关闭验证页
+              </Button>
+            )}
+          </div>
+        ) : (
+          <>
+            <div className="text-center">
+              <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-[var(--accent)]">
+                ClawGuard Security
+              </p>
+              <h1 className="mt-1 text-xl font-semibold">
+                {mini ? "入群验证" : "双重人机验证"}
+              </h1>
+              <p className="mt-1.5 text-sm text-[var(--text-muted)]">
+                {details?.recovery_pending
+                  ? "验证已完成，请继续解除本次限制。"
+                  : "两项都完成后，即可提交验证。"}
+              </p>
+            </div>
+
+            {mini && details && (
+              <div className="w-full space-y-2 rounded-2xl border border-[var(--border)] bg-[var(--surface-2)] p-4 text-sm">
+                <div className="flex items-center justify-between gap-2">
+                  <strong className="truncate text-base">{details.group_title}</strong>
+                  <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-[var(--accent-soft)] px-2.5 py-0.5 font-mono text-xs font-medium text-[var(--accent)]">
+                    <Clock className="h-3.5 w-3.5" />
+                    剩余时间：
+                    {remaining !== null
+                      ? `${Math.floor(remaining / 60).toString().padStart(2, "0")}:${(remaining % 60).toString().padStart(2, "0")}`
+                      : "--:--"}
+                  </span>
+                </div>
+                <p className="flex items-center gap-1.5 text-xs text-[var(--text)]">
+                  <UserCheck className="h-3.5 w-3.5 text-[var(--accent)]" />
+                  验证账号：{details.username ? `@${details.username} ` : ""}(ID: {details.user_id})
+                </p>
+                <p className="text-xs text-[var(--text-muted)]">请使用本人 Telegram 账号操作。</p>
+              </div>
+            )}
+
+            {!details?.recovery_pending && (
+              <div className="w-full space-y-3">
+                <div className="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-3.5">
+                  <div className="mb-2 flex items-center justify-between">
+                    <p className="text-xs font-medium">
+                      Cloudflare Turnstile：{cfToken ? "已完成" : "待完成"}
+                    </p>
+                    <span
+                      className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${
+                        cfToken
+                          ? "bg-[var(--success-soft)] text-[var(--success)]"
+                          : "bg-[var(--surface-2)] text-[var(--text-muted)]"
+                      }`}
+                    >
+                      {cfToken ? "✓ 已通过" : "步骤 1/2"}
+                    </span>
+                  </div>
+                  <div ref={cfContainer} className="min-h-[65px]" />
+                </div>
+
+                <div className="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-3.5">
+                  <div className="mb-2 flex items-center justify-between">
+                    <p className="text-xs font-medium">
+                      hCaptcha：{hToken ? "已完成" : "待完成"}
+                    </p>
+                    <span
+                      className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${
+                        hToken
+                          ? "bg-[var(--success-soft)] text-[var(--success)]"
+                          : "bg-[var(--surface-2)] text-[var(--text-muted)]"
+                      }`}
+                    >
+                      {hToken ? "✓ 已通过" : "步骤 2/2"}
+                    </span>
+                  </div>
+                  <div ref={hContainer} className="min-h-[65px]" />
+                </div>
+              </div>
+            )}
+
+            {mini && remaining === 0 && !details?.recovery_pending && (
+              <p
+                role="alert"
+                className="flex w-full items-center justify-center gap-1.5 rounded-xl bg-[var(--danger-soft)] px-3 py-2 text-sm text-[var(--danger)]"
+              >
+                <AlertTriangle className="h-4 w-4 shrink-0" />
+                入群验证已超时，本次验证已关闭。
+              </p>
+            )}
+
+            {error ? (
+              <div className="w-full space-y-3">
+                <p
+                  role="alert"
+                  className="rounded-xl bg-[var(--danger-soft)] px-3 py-2.5 text-center text-sm text-[var(--danger)]"
+                >
+                  {error}
+                </p>
+                <Button className="w-full" onClick={() => setAttempt((n) => n + 1)}>
+                  {details?.recovery_pending ? "重试" : "刷新两项重试"}
+                </Button>
+              </div>
+            ) : (
+              <Button
+                className="w-full"
+                disabled={
+                  (!details?.recovery_pending && (!ready || !cfToken || !hToken)) ||
+                  submitting ||
+                  (mini && remaining === 0 && !details?.recovery_pending)
+                }
+                onClick={() => void submit()}
+              >
+                {submitting
+                  ? "正在处理…"
+                  : details?.recovery_pending
+                    ? "继续解除限制"
+                    : "提交验证"}
+              </Button>
+            )}
+          </>
+        )}
       </div>
     </main>
   );

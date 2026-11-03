@@ -170,12 +170,20 @@ func TestRequireUsernameFilterAndSelfUnmute(t *testing.T) {
 		t.Fatalf("trusted user should pass in ungraduated scope: handled=%t err=%v", handled, err)
 	}
 
-	// 3. Trusted user without username in "all" scope -> intercepted
+	// 3. Trusted user without username in "all" scope -> intercepted, but duplicate prompt suppressed within window
 	policy.Filter.RequireUsername.Scope = "all"
+	tr.mu.Lock()
+	tr.sentTexts = nil
+	tr.mu.Unlock()
 	handled, err = svc.applyFilterChecks(context.Background(), msgTrusted, policy, false, false, false)
 	if err != nil || !handled {
 		t.Fatalf("trusted user should be intercepted in all scope: handled=%t err=%v", handled, err)
 	}
+	tr.mu.Lock()
+	if len(tr.sentTexts) != 0 {
+		t.Fatalf("expected duplicate require_username prompt to be suppressed within cooldown window, got %v", tr.sentTexts)
+	}
+	tr.mu.Unlock()
 
 	// 4. Self-unmute callback: non-owner click rejected
 	db.mu.Lock()

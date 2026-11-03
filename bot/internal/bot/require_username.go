@@ -160,8 +160,47 @@ func (s *Service) handleRequireUsernameCheck(ctx context.Context, msg *tele.Mess
 	return true, nil
 }
 
+func (s *Service) requireUsernamePromptKey(chatID, userID int64) string {
+	return fmt.Sprintf("clawguard:req_uname:prompt:%d:%d", chatID, userID)
+}
+
+func (s *Service) shouldSendRequireUsernamePrompt(ctx context.Context, chatID, userID int64, window time.Duration) bool {
+	if window <= 0 {
+		window = 10 * time.Minute
+	}
+	key := s.requireUsernamePromptKey(chatID, userID)
+	if s.redis != nil {
+		if ok, err := s.redis.SetNX(ctx, key, "1", window).Result(); err == nil {
+			return ok
+		}
+	}
+	now := time.Now()
+	if raw, loaded := s.requireUsernamePromptUntil.Load(key); loaded {
+		if exp, ok := raw.(time.Time); ok && now.Before(exp) {
+			return false
+		}
+	}
+	s.requireUsernamePromptUntil.Store(key, now.Add(window))
+	return true
+}
+
+func (s *Service) clearRequireUsernamePromptCooldown(ctx context.Context, chatID, userID int64) {
+	key := s.requireUsernamePromptKey(chatID, userID)
+	s.requireUsernamePromptUntil.Delete(key)
+	if s.redis != nil {
+		_ = s.redis.Del(ctx, key).Err()
+	}
+}
+
 func (s *Service) sendRequireUsernamePrompt(ctx context.Context, chat *tele.Chat, user *tele.User, until time.Time, autoDeleteSeconds int) {
 	if chat == nil || user == nil || s.bot == nil {
+		return
+	}
+	cooldown := time.Until(until)
+	if autoDeleteSeconds > 0 && time.Duration(autoDeleteSeconds)*time.Second < cooldown {
+		cooldown = time.Duration(autoDeleteSeconds) * time.Second
+	}
+	if !s.shouldSendRequireUsernamePrompt(ctx, chat.ID, user.ID, cooldown) {
 		return
 	}
 	unique := s.requireUsernameBtn.Unique
@@ -180,6 +219,7 @@ func (s *Service) sendRequireUsernamePrompt(ctx context.Context, chat *tele.Chat
 	}
 	sent, err := s.sendThrottled(ctx, chat, text, opts)
 	if err != nil {
+		s.clearRequireUsernamePromptCooldown(ctx, chat.ID, user.ID)
 		if s.logger != nil {
 			s.logger.Warn("send require_username notice failed", zap.Error(err), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
 		}
@@ -188,6 +228,7 @@ func (s *Service) sendRequireUsernamePrompt(ctx context.Context, chat *tele.Chat
 	if autoDeleteSeconds > 0 && sent != nil {
 		secs := autoDeleteSeconds
 		s.runDelayed(time.Duration(secs)*time.Second, func() {
+			s.clearRequireUsernamePromptCooldown(context.Background(), chat.ID, user.ID)
 			if delErr := normalizeTelegramActionError("delete", s.deleteDelayedMessage(sent)); delErr != nil && s.logger != nil {
 				s.logger.Debug("auto delete require_username notice failed", zap.Error(delErr), zap.Int64("chat_id", chat.ID), zap.Int("message_id", sent.ID))
 			}
@@ -313,6 +354,7 @@ func (s *Service) handleRequireUsernameUnmute(c tele.Context) error {
 	if callback.Message != nil {
 		_ = normalizeTelegramActionError("delete", s.deleteDelayedMessage(callback.Message))
 	}
+	s.clearRequireUsernamePromptCooldown(ctx, chat.ID, sender.ID)
 
 	if s.logger != nil {
 		s.logger.Info("user self-unmuted after setting username",

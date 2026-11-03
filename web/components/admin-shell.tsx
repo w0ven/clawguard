@@ -80,7 +80,7 @@ const navSections: readonly NavSection[] = [
 
 const navItems = navSections.flatMap((section) => section.items);
 const primaryMobileItems = navItems.filter((item) =>
-  ["/dashboard", "/groups", "/violations"].includes(item.href),
+  ["/dashboard", "/groups", "/violations", "/appeals"].includes(item.href),
 );
 
 export function AdminShell({
