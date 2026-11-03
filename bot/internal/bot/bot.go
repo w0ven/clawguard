@@ -46,14 +46,15 @@ type Service struct {
 	lifecycleCtx       context.Context
 	lifecycleCancel    context.CancelFunc
 	wg                 sync.WaitGroup
-	verifyBtn             tele.Btn
-	verifyMathBtn         tele.Btn
-	verifyRandBtn         tele.Btn
-	verifyAdminBtn        tele.Btn
-	requireUsernameBtn    tele.Btn
-	appealAdminBtn        tele.Btn
-	appealDecisionHandler func(ctx context.Context, adminTelegramID, appealID int64, action string) (*store.AppealReview, string, error)
-	startedAt             time.Time
+	verifyBtn                  tele.Btn
+	verifyMathBtn              tele.Btn
+	verifyRandBtn              tele.Btn
+	verifyAdminBtn             tele.Btn
+	requireUsernameBtn         tele.Btn
+	appealAdminBtn             tele.Btn
+	appealDecisionHandler      func(ctx context.Context, adminTelegramID, appealID int64, action string) (*store.AppealReview, string, error)
+	requireUsernamePromptUntil sync.Map
+	startedAt                  time.Time
 	lastUpdateAt       atomic.Value
 	lastAIOKAt         atomic.Value
 	lastAIFailAt       atomic.Value
@@ -2099,11 +2100,13 @@ func (s *Service) handleVerifyMath(c tele.Context) error {
 			s.logger.Error("kick math verification failure", zap.Error(err), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", sender.ID))
 			return c.Respond(&tele.CallbackResponse{Text: "处理失败，请联系管理员", ShowAlert: true})
 		}
-		s.sendActionFeedback(chat, nil, policy.Feedback.VerifyFail, map[string]string{
-			"user":         feedbackUserLabel(sender, policy.Feedback.VerifyFail.ParseMode),
-			"user_mention": feedbackUserMention(sender, policy.Feedback.VerifyFail.ParseMode),
-			"reason":       "答题错误",
-		})
+		if pending.JoinMessageID == nil || *pending.JoinMessageID <= 0 || pending.Method == "math_image" {
+			s.sendActionFeedback(chat, nil, policy.Feedback.VerifyFail, map[string]string{
+				"user":         feedbackUserLabel(sender, policy.Feedback.VerifyFail.ParseMode),
+				"user_mention": feedbackUserMention(sender, policy.Feedback.VerifyFail.ParseMode),
+				"reason":       "答题错误",
+			})
+		}
 		return c.Respond(&tele.CallbackResponse{Text: "答错了，已移出群组", ShowAlert: true})
 	}
 
@@ -2170,11 +2173,13 @@ func (s *Service) handleVerifyRandom(c tele.Context) error {
 			s.logger.Error("kick random verification failure", zap.Error(err), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", sender.ID))
 			return c.Respond(&tele.CallbackResponse{Text: "处理失败，请联系管理员", ShowAlert: true})
 		}
-		s.sendActionFeedback(chat, nil, policy.Feedback.VerifyFail, map[string]string{
-			"user":         feedbackUserLabel(sender, policy.Feedback.VerifyFail.ParseMode),
-			"user_mention": feedbackUserMention(sender, policy.Feedback.VerifyFail.ParseMode),
-			"reason":       "答题错误",
-		})
+		if pending.JoinMessageID == nil || *pending.JoinMessageID <= 0 {
+			s.sendActionFeedback(chat, nil, policy.Feedback.VerifyFail, map[string]string{
+				"user":         feedbackUserLabel(sender, policy.Feedback.VerifyFail.ParseMode),
+				"user_mention": feedbackUserMention(sender, policy.Feedback.VerifyFail.ParseMode),
+				"reason":       "答题错误",
+			})
+		}
 		return c.Respond(&tele.CallbackResponse{Text: "答错了，已移出群组", ShowAlert: true})
 	}
 
@@ -2422,11 +2427,12 @@ func (s *Service) HandleVerificationExpiry(ctx context.Context, pending store.Pe
 			if pendingReservesJoinProtectionSlot(pending.Method) {
 				s.joinProtector.ReleasePending(pending.ChatID)
 			}
-			s.finalizeVerificationPrompt(chat, pending, verificationResultHTML(user, "timeout"), policy.Feedback.VerifyFail.AutoDeleteSeconds)
-			s.sendActionFeedback(chat, nil, policy.Feedback.VerifyFail, map[string]string{
-				"user":         feedbackUserLabel(user, policy.Feedback.VerifyFail.ParseMode),
-				"user_mention": feedbackUserMention(user, policy.Feedback.VerifyFail.ParseMode), "reason": "验证超时",
-			})
+			if !s.finalizeVerificationPrompt(chat, pending, verificationResultHTML(user, "timeout"), policy.Feedback.VerifyFail.AutoDeleteSeconds) {
+				s.sendActionFeedback(chat, nil, policy.Feedback.VerifyFail, map[string]string{
+					"user":         feedbackUserLabel(user, policy.Feedback.VerifyFail.ParseMode),
+					"user_mention": feedbackUserMention(user, policy.Feedback.VerifyFail.ParseMode), "reason": "验证超时",
+				})
+			}
 		}
 		s.markTelegramCleanupSuccess(ctx, pending.ChatID)
 	}
@@ -2917,6 +2923,13 @@ func (s *Service) handleWarnCommand(c tele.Context) error {
 	}
 	policy.Warnings.ActionAtMax = "mute"
 
+	// Delete the /warn command message itself after 3s to keep the chat clean.
+	s.runDelayed(3*time.Second, func() {
+		_ = s.deleteDelayedMessage(&tele.Message{ID: msg.ID, Chat: chat})
+	})
+
+	// Suppress duplicate AdminAction feedback when Warn feedback is enabled;
+	// only fall back to AdminAction if Warn feedback is disabled.
 	count, escalated, err := s.incrWarningForEvent(context.Background(), chat, &tele.User{
 		ID:        target.UserID,
 		IsBot:     target.IsBot,
@@ -2943,13 +2956,7 @@ func (s *Service) handleWarnCommand(c tele.Context) error {
 		return fmt.Errorf("insert manual warn violation: %w", err)
 	}
 
-	text := fmt.Sprintf("已警告 %s，当前 warnings: %d", htmlEscape(target.Display), count)
-	if escalated {
-		text += "\n已触发 warn_threshold，执行 mute"
-	}
-
-	// AdminAction feedback
-	if c.Sender() != nil {
+	if !policy.Feedback.Warn.Enabled && c.Sender() != nil {
 		targetUser := &tele.User{
 			ID:        target.UserID,
 			Username:  target.Username,
@@ -2972,7 +2979,20 @@ func (s *Service) handleWarnCommand(c tele.Context) error {
 		FirstName: target.Display,
 	}, "warn", reason, target.MessageID, msg.ID, "success", "")
 
-	return c.Send(text, &tele.SendOptions{ParseMode: tele.ModeHTML})
+	if !policy.Feedback.Warn.Enabled && !policy.Feedback.AdminAction.Enabled {
+		text := fmt.Sprintf("⚠️ 已警告 %s（累计 %d/%d）", htmlEscape(target.Display), count, policy.Warnings.MaxWarns)
+		if escalated {
+			text += "\n已达到警告上限，执行禁言"
+		}
+		sent, sendErr := s.bot.Send(chat, text, &tele.SendOptions{ParseMode: tele.ModeHTML})
+		if sendErr == nil && sent != nil {
+			s.runDelayed(15*time.Second, func() {
+				_ = s.deleteDelayedMessage(sent)
+			})
+		}
+		return sendErr
+	}
+	return nil
 }
 
 func (s *Service) handleUnbanCommand(c tele.Context) error {
@@ -2985,6 +3005,10 @@ func (s *Service) handleUnbanCommand(c tele.Context) error {
 	if err != nil {
 		return c.Send(redact.ErrorString(err), &tele.SendOptions{ParseMode: tele.ModeHTML})
 	}
+
+	s.runDelayed(3*time.Second, func() {
+		_ = s.deleteDelayedMessage(&tele.Message{ID: msg.ID, Chat: chat})
+	})
 
 	release, err := s.AcquireModerationReview(context.Background(), chat.ID, target.UserID)
 	if err != nil {
@@ -3032,9 +3056,9 @@ func (s *Service) handleUnbanCommand(c tele.Context) error {
 		}),
 		Diff: &diff,
 	})
-	text := "已尝试解封 " + htmlEscape(target.Display)
+	text := "✅ 已处理解封：" + htmlEscape(target.Display)
 	if len(warnings) > 0 {
-		text += "\n安全提示：" + htmlEscape(strings.Join(warnings, "；"))
+		text += "\n说明：" + htmlEscape(strings.Join(warnings, "；"))
 	}
 	s.writeCommandModerationAudit(context.Background(), "unban", c.Sender(), chat, &tele.User{
 		ID:        target.UserID,
@@ -3043,7 +3067,13 @@ func (s *Service) handleUnbanCommand(c tele.Context) error {
 		FirstName: target.Display,
 	}, "unban", "manual_unban", target.MessageID, msg.ID, unbanOutcome, "")
 
-	return c.Send(text, &tele.SendOptions{ParseMode: tele.ModeHTML})
+	sent, sendErr := s.bot.Send(chat, text, &tele.SendOptions{ParseMode: tele.ModeHTML})
+	if sendErr == nil && sent != nil {
+		s.runDelayed(20*time.Second, func() {
+			_ = s.deleteDelayedMessage(sent)
+		})
+	}
+	return sendErr
 }
 
 func (s *Service) handleSpamCommand(c tele.Context) error {

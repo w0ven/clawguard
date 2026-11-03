@@ -50,19 +50,24 @@ export default function MiniAppEntryPage() {
 
   return (
     <main className="miniapp-entry flex min-h-screen items-center justify-center px-6 text-center">
-      <div className="flex max-w-xs flex-col items-center gap-4">
-        <div className="flex h-12 w-12 items-center justify-center rounded-md bg-[var(--accent)] text-white">
-          <Shield className="h-6 w-6" />
+      <div className="glass-panel flex w-full max-w-sm flex-col items-center gap-4 rounded-3xl border border-[var(--border)] p-8 shadow-xl">
+        <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-[var(--accent)] text-white shadow-md">
+          <Shield className="h-7 w-7" />
         </div>
-        <h1 className="text-xl font-semibold">ClawGuard</h1>
+        <div>
+          <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-[var(--accent)]">
+            ClawGuard Control Plane
+          </p>
+          <h1 className="mt-1 text-xl font-semibold">ClawGuard</h1>
+        </div>
         {error ? (
-          <div className="flex items-start gap-2 text-sm text-[var(--danger)]">
+          <div className="flex w-full items-start justify-center gap-2 rounded-2xl bg-[var(--danger-soft)] px-4 py-3 text-sm text-[var(--danger)]">
             <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0" />
             <span>{error}</span>
           </div>
         ) : (
-          <div className="flex items-center gap-2 text-sm text-[var(--text-muted)]">
-            <LoaderCircle className="h-4 w-4 animate-spin" />
+          <div className="flex items-center gap-2 rounded-2xl bg-[var(--surface-2)] px-4 py-2.5 text-sm text-[var(--text-muted)]">
+            <LoaderCircle className="h-4 w-4 animate-spin text-[var(--accent)]" />
             正在验证管理员身份
           </div>
         )}

@@ -2297,13 +2297,90 @@ type FeedbackActionMeta = {
   defaultReplyToMsg: boolean;
 };
 
+const FEEDBACK_PRESETS: Record<
+  "professional" | "community" | "fun",
+  { label: string; description: string; templates: Record<string, string> }
+> = {
+  professional: {
+    label: "✨ 专业安检风（推荐）",
+    description: "结构化展示对象、动作与原因，可点击用户提及",
+    templates: {
+      delete_msg: "🧹 消息已清理 · {user_mention}\n原因：{reason}",
+      mute: "🔇 临时禁言 · {user_mention}\n时长：{duration} · 原因：{reason}",
+      kick: "🚪 移出群聊 · {user_mention}\n原因：{reason}（遵守群规后可重新加入）",
+      ban: "🚫 成员封禁 · {user_mention}\n原因：{reason}",
+      warn: "⚠️ 违规警告 · {user_mention}（{current}/{limit}）\n原因：{reason}",
+      verify_pass: "✅ 入群验证通过 · 欢迎 {user_mention} 加入，请遵守群规理性交流",
+      verify_fail: "⌛ 入群验证未通过 · {user_mention}\n原因：{reason}（已移出群聊，可重新申请）",
+      cas_hit: "🛡 CAS 反垃圾拦截 · {user_mention} 命中黑名单，已移出封禁",
+      trust_graduated: "🎓 信任升级 · {user_mention} 已通过新成员观察期，解锁完整发言权限",
+      admin_action: "🛡 管理员处置 · {admin_mention} 对 {user_mention} 执行了「{action}」\n原因：{reason}",
+    },
+  },
+  community: {
+    label: "🌿 温和社区风",
+    description: "自然友好、单段紧凑，适合综合交流群",
+    templates: {
+      delete_msg: "🧹 已清理 {user_mention} 的一条违规消息（{reason}）。",
+      mute: "🤐 {user_mention} 已被临时禁言 {duration}（原因：{reason}），请遵守群规理性交流。",
+      kick: "👋 {user_mention} 因「{reason}」已被移出群聊，了解群规后欢迎重新申请。",
+      ban: "🚫 {user_mention} 因违反群规已被封禁（原因：{reason}）。",
+      warn: "⚠️ 提醒 {user_mention}：累计警告 {current}/{limit}（原因：{reason}），请注意发言规范。",
+      verify_pass: "🎉 欢迎 {user_mention} 通过入群验证！发言前请先阅读群规。",
+      verify_fail: "⌛ {user_mention} 入群验证未通过（{reason}），已自动移出，真人欢迎重新申请加群。",
+      cas_hit: "🚫 {user_mention} 命中 CAS 反垃圾黑名单，已自动拦截。",
+      trust_graduated: "🎓 恭喜 {user_mention} 完成新人观察期，解锁全部群聊权限！",
+      admin_action: "👮 管理员 {admin_mention} 对 {user_mention} 执行了「{action}」· 原因：{reason}",
+    },
+  },
+  fun: {
+    label: "🎭 趣味执勤风",
+    description: "轻松幽默的群管语气，带可点击昵称提及",
+    templates: {
+      delete_msg: "🧹 {user_mention} 的消息被清扫员扫进垃圾桶了（{reason}）",
+      mute: "🤐 {user_mention} 被贴了 {duration} 的封口胶，冷静思考一下人生（{reason}）",
+      kick: "👢 {user_mention} 被礼送出境，下次再来请文明发言（{reason}）",
+      ban: "🚓 {user_mention} 被正义执法带走调查。\n理由：{reason}",
+      warn: "⚠️ 警告一下 {user_mention}，当前累计 {current}/{limit}。再犯就请喝茶了（{reason}）",
+      verify_pass: "✅ {user_mention} 通过安检，欢迎入群！麻烦看下群规，别在违规榜上见到你",
+      verify_fail: "⌛ {user_mention} 安检未通过（{reason}），已被礼送出境。真人欢迎重新申请加群",
+      cas_hit: "🚫 {user_mention} 已被 CAS 全网通缉，直接押送离场",
+      trust_graduated: "🎓 恭喜 {user_mention} 通过见习期，正式成为群里的老熟人！",
+      admin_action: "👮 {admin_mention} 对 {user_mention} 执行了「{action}」。理由：{reason}",
+    },
+  },
+};
+
+const FEEDBACK_SAMPLE_VARS: Record<string, string> = {
+  "{user}": "143177040",
+  "{user_mention}": "@alice_dev",
+  "{admin}": "10001",
+  "{admin_mention}": "@group_admin",
+  "{duration}": "10分钟",
+  "{reason}": "发送未授权推广链接",
+  "{current}": "1",
+  "{limit}": "3",
+  "{group}": "RFCHOST 官方群",
+  "{days}": "3",
+  "{messages}": "5",
+  "{action}": "警告",
+};
+
+function renderFeedbackPreview(template: string): string {
+  let out = template || "";
+  for (const [k, v] of Object.entries(FEEDBACK_SAMPLE_VARS)) {
+    out = out.split(k).join(v);
+  }
+  return out;
+}
+
 const FEEDBACK_ACTIONS: FeedbackActionMeta[] = [
   {
     key: "delete_msg",
     label: "删除消息",
     description: "命中过滤/AI 时删除消息的反馈（默认关闭，避免刷屏）",
-    vars: "{user} {user_mention} {reason} {group}",
-    defaultTemplate: "🧹 {user} 的消息被清扫员扫进垃圾桶了（{reason}）",
+    vars: "{user_mention} {user} {reason} {group}",
+    defaultTemplate: FEEDBACK_PRESETS.professional.templates.delete_msg,
     defaultEnabled: false,
     defaultAutoDelete: 15,
     defaultReplyToMsg: false,
@@ -2312,9 +2389,8 @@ const FEEDBACK_ACTIONS: FeedbackActionMeta[] = [
     key: "mute",
     label: "禁言",
     description: "禁言用户时的反馈",
-    vars: "{user} {user_mention} {duration} {reason}",
-    defaultTemplate:
-      "🤐 {user} 被贴了 {duration} 的封口胶。冷静一下，思考人生（{reason}）",
+    vars: "{user_mention} {user} {duration} {reason}",
+    defaultTemplate: FEEDBACK_PRESETS.professional.templates.mute,
     defaultEnabled: true,
     defaultAutoDelete: 60,
     defaultReplyToMsg: false,
@@ -2323,8 +2399,8 @@ const FEEDBACK_ACTIONS: FeedbackActionMeta[] = [
     key: "kick",
     label: "踢出",
     description: "踢出用户时的反馈",
-    vars: "{user} {user_mention} {reason}",
-    defaultTemplate: "👢 {user} 被一脚踹出门外。下次再来请文明发言（{reason}）",
+    vars: "{user_mention} {user} {reason}",
+    defaultTemplate: FEEDBACK_PRESETS.professional.templates.kick,
     defaultEnabled: true,
     defaultAutoDelete: 60,
     defaultReplyToMsg: false,
@@ -2333,8 +2409,8 @@ const FEEDBACK_ACTIONS: FeedbackActionMeta[] = [
     key: "ban",
     label: "封禁",
     description: "封禁用户时的反馈",
-    vars: "{user} {user_mention} {reason}",
-    defaultTemplate: "🚓 {user} 被正义执法，带走调查。理由：{reason}",
+    vars: "{user_mention} {user} {reason}",
+    defaultTemplate: FEEDBACK_PRESETS.professional.templates.ban,
     defaultEnabled: true,
     defaultAutoDelete: 60,
     defaultReplyToMsg: false,
@@ -2343,9 +2419,8 @@ const FEEDBACK_ACTIONS: FeedbackActionMeta[] = [
     key: "warn",
     label: "警告",
     description: "警告累加时的反馈（显示当前/上限）",
-    vars: "{user} {user_mention} {current} {limit} {reason}",
-    defaultTemplate:
-      "⚠️ 警告一下 {user}，累计 {current}/{limit}。再犯就请你吃手铐了（{reason}）",
+    vars: "{user_mention} {user} {current} {limit} {reason}",
+    defaultTemplate: FEEDBACK_PRESETS.professional.templates.warn,
     defaultEnabled: true,
     defaultAutoDelete: 60,
     defaultReplyToMsg: true,
@@ -2354,9 +2429,8 @@ const FEEDBACK_ACTIONS: FeedbackActionMeta[] = [
     key: "verify_pass",
     label: "验证通过",
     description: "新人验证通过时的反馈（默认关闭）",
-    vars: "{user} {user_mention} {group}",
-    defaultTemplate:
-      "✅ {user} 通过安检，欢迎入群！麻烦看下群规，别让我下次在违规榜上见到你",
+    vars: "{user_mention} {user} {group}",
+    defaultTemplate: FEEDBACK_PRESETS.professional.templates.verify_pass,
     defaultEnabled: false,
     defaultAutoDelete: 15,
     defaultReplyToMsg: false,
@@ -2365,10 +2439,9 @@ const FEEDBACK_ACTIONS: FeedbackActionMeta[] = [
     key: "verify_fail",
     label: "验证失败/超时",
     description:
-      "新人验证失败或超时被踢时的反馈。{reason} 会注入具体原因（超时未完成验证 / 答题错误 / 个人简介违规：xxx）",
-    vars: "{user} {user_mention} {reason}",
-    defaultTemplate:
-      "⌛ {user} 验证未通过（{reason}），已被礼送出境。真人欢迎重新申请加群",
+      "新人验证失败或超时被踢时的反馈。当原验证卡已被直接编辑为结果提示时不会重复发送，避免双倍消息。",
+    vars: "{user_mention} {user} {reason}",
+    defaultTemplate: FEEDBACK_PRESETS.professional.templates.verify_fail,
     defaultEnabled: true,
     defaultAutoDelete: 60,
     defaultReplyToMsg: false,
@@ -2377,8 +2450,8 @@ const FEEDBACK_ACTIONS: FeedbackActionMeta[] = [
     key: "cas_hit",
     label: "CAS 命中",
     description: "用户命中 CAS 黑名单被封时的反馈",
-    vars: "{user} {user_mention} {reason}",
-    defaultTemplate: "🚫 {user} 已被 CAS 全网通缉，直接押送离场",
+    vars: "{user_mention} {user} {reason}",
+    defaultTemplate: FEEDBACK_PRESETS.professional.templates.cas_hit,
     defaultEnabled: true,
     defaultAutoDelete: 60,
     defaultReplyToMsg: false,
@@ -2386,9 +2459,9 @@ const FEEDBACK_ACTIONS: FeedbackActionMeta[] = [
   {
     key: "trust_graduated",
     label: "信任毕业",
-    description: "用户成为老用户时的反馈（默认关闭）",
-    vars: "{user} {user_mention} {days} {messages}",
-    defaultTemplate: "🎓 恭喜 {user} 通过见习期，正式成为群里的老油条",
+    description: "用户完成观察期成为可信成员时的反馈（默认关闭）",
+    vars: "{user_mention} {user} {days} {messages}",
+    defaultTemplate: FEEDBACK_PRESETS.professional.templates.trust_graduated,
     defaultEnabled: false,
     defaultAutoDelete: 30,
     defaultReplyToMsg: false,
@@ -2397,10 +2470,10 @@ const FEEDBACK_ACTIONS: FeedbackActionMeta[] = [
     key: "admin_action",
     label: "管理员操作",
     description: "/warn /ban /mute 等管理员命令后的反馈",
-    vars: "{admin} {admin_mention} {user} {user_mention} {action} {reason}",
-    defaultTemplate: "👮 {admin} 对 {user} 执行了「{action}」。理由：{reason}",
+    vars: "{admin_mention} {admin} {user_mention} {user} {action} {reason}",
+    defaultTemplate: FEEDBACK_PRESETS.professional.templates.admin_action,
     defaultEnabled: true,
-    defaultAutoDelete: 0,
+    defaultAutoDelete: 30,
     defaultReplyToMsg: false,
   },
 ];
@@ -2452,15 +2525,67 @@ export function FeedbackSection({
     onChange({ ...value, [key]: next });
   }
 
+  function applyPreset(presetKey: "professional" | "community" | "fun") {
+    const preset = FEEDBACK_PRESETS[presetKey];
+    const next = { ...value };
+    for (const meta of FEEDBACK_ACTIONS) {
+      const cur = { ...(next[meta.key] ?? defaultFeedback(meta)) };
+      cur.template = preset.templates[meta.key] ?? meta.defaultTemplate;
+      next[meta.key] = cur;
+    }
+    onChange(next);
+  }
+
   return (
-    <div className="space-y-3">
+    <div className="space-y-4">
+      <Card>
+        <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <CardTitle>动作反馈风格预设</CardTitle>
+            <p className="mt-1 text-xs text-[var(--text-muted)]">
+              一键切换全套群内反馈文案（保留各动作当前的启用开关与自动撤回秒数）。推荐使用{" "}
+              <code>{"{user_mention}"}</code> 显示可点击的用户昵称。
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {(
+              Object.entries(FEEDBACK_PRESETS) as Array<
+                [
+                  "professional" | "community" | "fun",
+                  (typeof FEEDBACK_PRESETS)["professional"],
+                ]
+              >
+            ).map(([k, preset]) => (
+              <Button
+                key={k}
+                type="button"
+                variant="secondary"
+                size="sm"
+                onClick={() => applyPreset(k)}
+              >
+                {preset.label}
+              </Button>
+            ))}
+          </div>
+        </CardHeader>
+      </Card>
       {FEEDBACK_ACTIONS.map((item) => {
         const v = value[item.key] ?? defaultFeedback(item);
+        const varTokens = item.vars.split(/\s+/).filter(Boolean);
         return (
           <Card key={item.key}>
             <CardHeader className="flex-row items-center justify-between">
               <div>
-                <CardTitle>{item.label}</CardTitle>
+                <div className="flex items-center gap-2">
+                  <CardTitle>{item.label}</CardTitle>
+                  <Badge tone={v.enabled ? "info" : "default"}>
+                    {v.enabled
+                      ? v.auto_delete_seconds > 0
+                        ? `${v.auto_delete_seconds}s 自删`
+                        : "常驻保留"
+                      : "已关闭"}
+                  </Badge>
+                </div>
                 <p className="mt-0.5 text-xs text-[var(--text-muted)]">
                   {item.description}
                 </p>
@@ -2475,9 +2600,9 @@ export function FeedbackSection({
             {v.enabled && (
               <CardBody className="space-y-3">
                 <div className="space-y-1.5">
-                  <div className="flex items-center justify-between">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
                     <label className="text-xs font-medium text-[var(--text-muted)]">
-                      回复模板（可用变量：{item.vars}）
+                      回复模板（点击下方标签可插入变量）
                     </label>
                     <button
                       type="button"
@@ -2489,6 +2614,22 @@ export function FeedbackSection({
                       重置为默认
                     </button>
                   </div>
+                  <div className="flex flex-wrap gap-1.5 pb-1">
+                    {varTokens.map((token) => (
+                      <button
+                        key={token}
+                        type="button"
+                        onClick={() =>
+                          updateOne(item.key, {
+                            template: `${v.template || item.defaultTemplate}${token}`,
+                          })
+                        }
+                        className="rounded-md border border-[var(--border)] bg-[var(--surface-2)] px-2 py-0.5 font-mono text-[11px] text-[var(--text-muted)] transition hover:border-[var(--accent)] hover:text-[var(--accent)]"
+                      >
+                        {token}
+                      </button>
+                    ))}
+                  </div>
                   <Textarea
                     value={v.template || item.defaultTemplate}
                     onChange={(e) =>
@@ -2497,6 +2638,14 @@ export function FeedbackSection({
                     className="min-h-[80px] font-mono text-xs"
                     placeholder={item.defaultTemplate}
                   />
+                  <div className="rounded-xl border border-[var(--border)] bg-[var(--surface-2)] px-3 py-2 text-xs">
+                    <span className="mb-1 block text-[10px] font-semibold uppercase tracking-wider text-[var(--text-muted)]">
+                      群内发送效果预览
+                    </span>
+                    <p className="whitespace-pre-wrap text-[var(--text)]">
+                      {renderFeedbackPreview(v.template || item.defaultTemplate)}
+                    </p>
+                  </div>
                 </div>
                 <div className="grid gap-3 md:grid-cols-2">
                   <div className="space-y-1.5">
