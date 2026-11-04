@@ -100,3 +100,61 @@ func TestEffectiveTimeout(t *testing.T) {
 		})
 	}
 }
+
+type cancelParentOnCallClient struct {
+	cancel context.CancelFunc
+	calls  *int
+}
+
+func (c cancelParentOnCallClient) Check(ctx context.Context, _ CheckRequest) (*CheckResult, error) {
+	*c.calls++
+	c.cancel()
+	return nil, ctx.Err()
+}
+
+func (c cancelParentOnCallClient) Probe(context.Context, string) (int, error) { return 0, nil }
+func (c cancelParentOnCallClient) Chat(context.Context, CheckRequest) (*ChatRawResult, error) {
+	return nil, nil
+}
+
+func TestFallbackStopsImmediatelyWhenParentContextCanceled(t *testing.T) {
+	firstRef := NewModelRef("p1", "m1")
+	secondRef := NewModelRef("p2", "m2")
+	thirdRef := NewModelRef("p3", "m3")
+	models := fakeModelRegistry{items: map[ModelRef]Model{
+		firstRef:  {ID: 1, ProviderID: 10, ProviderKey: "p1", ModelKey: "m1", Enabled: true, CapabilityTags: []string{"moderation"}},
+		secondRef: {ID: 2, ProviderID: 20, ProviderKey: "p2", ModelKey: "m2", Enabled: true, CapabilityTags: []string{"moderation"}},
+		thirdRef:  {ID: 3, ProviderID: 30, ProviderKey: "p3", ModelKey: "m3", Enabled: true, CapabilityTags: []string{"moderation"}},
+	}}
+	ctx, cancel := context.WithCancel(context.Background())
+	calls := 0
+	client := cancelParentOnCallClient{cancel: cancel, calls: &calls}
+	providers := moderatorProviderRegistry{clients: map[string]LLMClient{
+		"p1": client,
+		"p2": client,
+		"p3": client,
+	}}
+	observedCore, logs := observer.New(zap.WarnLevel)
+	moderator := NewModerator(context.Background(), zap.New(observedCore), nil, nil, providers, models, NewResolver(models), nil)
+
+	_, err := moderator.checkSingle(ctx, CheckInput{
+		ChatID: 1,
+		UserID: 2,
+		Text:   "hello",
+		Policy: config.AIPolicy{
+			PrimaryModelRef:   firstRef.String(),
+			FallbackModelRefs: []string{secondRef.String(), thirdRef.String()},
+			MaxRetries:        2,
+			TimeoutMs:         1000,
+		},
+	})
+	if !errors.Is(err, ErrModelsExhausted) {
+		t.Fatalf("expected ErrModelsExhausted, got %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("expected fallback loop to stop after 1 call once parent ctx canceled, got %d calls", calls)
+	}
+	if got := logs.FilterMessage("ai call failed, trying next model").Len(); got != 1 {
+		t.Fatalf("expected exactly 1 warn log, got %d", got)
+	}
+}
