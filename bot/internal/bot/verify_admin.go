@@ -108,11 +108,20 @@ func (s *Service) finalizeVerificationPromptWithScheduler(chat *tele.Chat, pendi
 	if _, err := s.bot.Edit(msg, html, opts); err != nil {
 		edited = false
 		if s.logger != nil {
-			s.logger.Warn("edit verification result failed",
-				zap.Error(err),
-				zap.Int64("chat_id", chat.ID),
-				zap.Int64("message_id", *pending.JoinMessageID),
-			)
+			errLower := strings.ToLower(err.Error())
+			if strings.Contains(errLower, "message to edit not found") || strings.Contains(errLower, "message is not modified") {
+				s.logger.Debug("edit verification result skipped",
+					zap.Error(err),
+					zap.Int64("chat_id", chat.ID),
+					zap.Int64("message_id", *pending.JoinMessageID),
+				)
+			} else {
+				s.logger.Warn("edit verification result failed",
+					zap.Error(err),
+					zap.Int64("chat_id", chat.ID),
+					zap.Int64("message_id", *pending.JoinMessageID),
+				)
+			}
 		}
 	}
 	// Capture this particular card, not the user's current pending task. Even

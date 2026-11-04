@@ -387,8 +387,15 @@ func (m *Moderator) checkBatch(ctx context.Context, inputs []CheckInput) ([]Chec
 
 	var lastErr error
 	failureCount := 0
+batchLoop:
 	for attempt := 0; attempt <= policy.MaxRetries; attempt++ {
+		if ctx.Err() != nil {
+			break
+		}
 		for _, ref := range modelChain {
+			if ctx.Err() != nil {
+				break batchLoop
+			}
 			model, ok := m.models.Get(ref)
 			if !ok {
 				lastErr = fmt.Errorf("model %q not found", ref)
@@ -410,7 +417,10 @@ func (m *Moderator) checkBatch(ctx context.Context, inputs []CheckInput) ([]Chec
 			timeout, ok := timeoutWithinContext(ctx, effectiveTimeout(policy.TimeoutMs, model.ProviderTimeout))
 			if !ok {
 				release()
-				return nil, contextDeadlineError(ctx)
+				if lastErr == nil {
+					lastErr = contextDeadlineError(ctx)
+				}
+				break batchLoop
 			}
 			callCtx, cancel := context.WithTimeout(ctx, timeout)
 			result, err := client.Check(callCtx, CheckRequest{
@@ -432,6 +442,9 @@ func (m *Moderator) checkBatch(ctx context.Context, inputs []CheckInput) ([]Chec
 				m.warnAICallFailed(ref, model, attempt, timeout, err)
 				if m.status != nil {
 					m.status.MarkAIFailure(err)
+				}
+				if ctx.Err() != nil {
+					break batchLoop
 				}
 				continue
 			}
@@ -511,8 +524,15 @@ func (m *Moderator) checkSingle(ctx context.Context, input CheckInput) (CheckOut
 
 	var lastErr error
 	failureCount := 0
+singleLoop:
 	for attempt := 0; attempt <= policy.MaxRetries; attempt++ {
+		if ctx.Err() != nil {
+			break
+		}
 		for _, ref := range modelChain {
+			if ctx.Err() != nil {
+				break singleLoop
+			}
 			model, ok := m.models.Get(ref)
 			if !ok {
 				lastErr = fmt.Errorf("model %q not found", ref)
@@ -534,7 +554,10 @@ func (m *Moderator) checkSingle(ctx context.Context, input CheckInput) (CheckOut
 			timeout, ok := timeoutWithinContext(ctx, effectiveTimeout(policy.TimeoutMs, model.ProviderTimeout))
 			if !ok {
 				release()
-				return CheckOutput{}, contextDeadlineError(ctx)
+				if lastErr == nil {
+					lastErr = contextDeadlineError(ctx)
+				}
+				break singleLoop
 			}
 
 			callCtx, cancel := context.WithTimeout(ctx, timeout)
@@ -557,6 +580,9 @@ func (m *Moderator) checkSingle(ctx context.Context, input CheckInput) (CheckOut
 				m.warnAICallFailed(ref, model, attempt, timeout, err)
 				if m.status != nil {
 					m.status.MarkAIFailure(err)
+				}
+				if ctx.Err() != nil {
+					break singleLoop
 				}
 				continue
 			}
