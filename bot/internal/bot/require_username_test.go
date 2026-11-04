@@ -335,3 +335,70 @@ func TestAppealAdminCallbackInteraction(t *testing.T) {
 		t.Fatalf("expected callback alert, got %v", tr.callbacks)
 	}
 }
+
+func TestPendingVerificationSuppressesRequireUsernameConflict(t *testing.T) {
+	const (
+		chatID = int64(-100123)
+		userID = int64(5001)
+	)
+	db := newModerationProfileMatchMockDB(chatID, userID)
+	db.userTrust.Status = "new"
+	db.activePending = &store.PendingVerification{
+		ID:        901,
+		ChatID:    chatID,
+		UserID:    userID,
+		Method:    "turnstile_hcaptcha",
+		Payload:   []byte(`{"token":"pending-tok"}`),
+		ExpiresAt: time.Now().Add(3 * time.Minute),
+		CreatedAt: time.Now(),
+	}
+
+	tr := &requireUsernameTestTransport{}
+	b, err := tele.NewBot(tele.Settings{
+		Token:       "123:TEST",
+		URL:         "http://telegram.test",
+		Synchronous: true,
+		Client:      &http.Client{Transport: tr},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := &Service{
+		bot:         b,
+		sender:      b,
+		sendLimiter: NewSendLimiter(),
+		logger:      zap.NewNop(),
+		queries:     store.New(db),
+	}
+	svc.registerHandlers()
+
+	policy := config.DefaultPolicy
+	policy.Filter.RequireUsername.Enabled = true
+	policy.Filter.RequireUsername.Scope = "ungraduated"
+	policy.Filter.RequireUsername.MuteSeconds = 600
+	cacheDeletedAccountTestSystemState(svc, false)
+	svc.policySnapshots.Store(chatID, policy)
+	svc.policySnapshotAt.Store(chatID, time.Now())
+
+	update := tele.Update{
+		ID: 601,
+		Message: &tele.Message{
+			ID:     601,
+			Text:   "e",
+			Chat:   &tele.Chat{ID: chatID, Type: tele.ChatSuperGroup},
+			Sender: &tele.User{ID: userID, FirstName: "ninglu"},
+		},
+	}
+	if err := svc.ProcessUpdate(update); err != nil {
+		t.Fatalf("ProcessUpdate(pending user message) error = %v", err)
+	}
+
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+	if !containsString(tr.methods, "deleteMessage") {
+		t.Fatalf("expected raced message during pending verification to be deleted, got %v", tr.methods)
+	}
+	if containsString(tr.methods, "restrictChatMember") || len(tr.sentTexts) > 0 {
+		t.Fatalf("expected no conflicting require_username restrict or prompt during pending verification, got methods=%v texts=%v", tr.methods, tr.sentTexts)
+	}
+}

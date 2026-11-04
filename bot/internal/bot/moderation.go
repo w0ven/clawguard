@@ -273,6 +273,10 @@ func (s *Service) handleIncomingMessageWithOptions(c tele.Context, isEdited bool
 		isAdmin = adminStatus
 	}
 
+	if handled := s.deleteMessageWhilePendingVerification(ctx, msg, isAdmin, state.ActionsPaused); handled {
+		return nil
+	}
+
 	handled, err := s.applyFilterChecks(ctx, msg, policy, isAdmin, isEdited, state.ActionsPaused)
 	if err != nil {
 		return err

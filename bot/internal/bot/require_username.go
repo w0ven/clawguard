@@ -26,6 +26,35 @@ func formatRequireUsernameNoticeHTML(user *tele.User, until time.Time) string {
 	return fmt.Sprintf("%s 请先设置用户名后才能发言.\n惩罚: 禁言到 - %s", mention, untilStr)
 }
 
+func (s *Service) hasActivePendingVerification(ctx context.Context, chatID, userID int64) bool {
+	if s == nil || s.queries == nil || chatID == 0 || userID == 0 {
+		return false
+	}
+	_, err := s.queries.GetActivePendingVerification(ctx, store.GetPendingVerificationParams{
+		ChatID: chatID,
+		UserID: userID,
+	})
+	return err == nil
+}
+
+// deleteMessageWhilePendingVerification silently deletes messages sent in the
+// brief window before join verification restriction takes effect, without
+// sending conflicting filter notices or overwriting the verification mute.
+func (s *Service) deleteMessageWhilePendingVerification(ctx context.Context, msg *tele.Message, isAdmin, actionsPaused bool) bool {
+	if s == nil || msg == nil || msg.Chat == nil || msg.Sender == nil || isAdmin {
+		return false
+	}
+	if !s.hasActivePendingVerification(ctx, msg.Chat.ID, msg.Sender.ID) {
+		return false
+	}
+	if !actionsPaused {
+		if err := s.deleteMessage(msg); err != nil && !errors.Is(err, errActionsPaused) && s.logger != nil {
+			s.logger.Debug("delete message during pending verification failed", zap.Error(err), zap.Int64("chat_id", msg.Chat.ID), zap.Int64("user_id", msg.Sender.ID), zap.Int("message_id", msg.ID))
+		}
+	}
+	return true
+}
+
 func (s *Service) requireUsernameApplicable(trust store.UserTrust, policy config.FilterRequireUsernamePolicy) bool {
 	if !policy.Enabled {
 		return false
@@ -91,6 +120,13 @@ func (s *Service) handleRequireUsernameCheck(ctx context.Context, msg *tele.Mess
 		return false, err
 	}
 	defer release()
+
+	// Re-check under the moderation gate in case join verification just created
+	// a pending record while this message was waiting for the lock.
+	if s.hasActivePendingVerification(ctx, msg.Chat.ID, msg.Sender.ID) {
+		_ = s.deleteMessage(msg)
+		return true, nil
+	}
 
 	eventKey := moderationEventKey(msg, "filter", requireUsernameRule, "delete_mute")
 	eventState := s.moderationEventState(ctx, eventKey)

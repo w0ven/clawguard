@@ -493,6 +493,7 @@ type moderationProfileMatchMockDB struct {
 	profileLogs   []store.InsertProfileCheckLogParams
 	warnings      []store.Warning
 	warningEvents map[string]int64
+	activePending *store.PendingVerification
 
 	failTrustSideEffects bool
 	trustSideEffects     int
@@ -932,7 +933,29 @@ func (db *moderationProfileMatchMockDB) QueryRow(_ context.Context, query string
 			trust.IsBot,
 		)
 	case strings.Contains(query, "FROM pending_verifications"):
-		return mockErrorRow{err: pgx.ErrNoRows}
+		db.mu.Lock()
+		pending := db.activePending
+		db.mu.Unlock()
+		if pending == nil {
+			return mockErrorRow{err: pgx.ErrNoRows}
+		}
+		return mockScanRow(
+			pending.ID,
+			pending.ChatID,
+			pending.UserID,
+			pending.Username,
+			pending.FirstName,
+			pending.Method,
+			pending.Payload,
+			pending.JoinMessageID,
+			pending.ExpiresAt,
+			pending.CreatedAt,
+			pending.NextAttemptAt,
+			pending.LeaseUntil,
+			pending.LeaseOwner,
+			pending.AttemptCount,
+			pending.LastError,
+		)
 	case strings.Contains(query, "FROM ai_mute_ownership"):
 		return mockScanRow(true)
 	default:
