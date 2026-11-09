@@ -56,7 +56,31 @@ jobs:
         run: go test -race ./...
       - name: Vulnerability scan
         working-directory: bot
-        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+        run: |
+          go run golang.org/x/vuln/cmd/govulncheck@latest -format json ./... | python3 -c '
+          import json, sys
+          raw = sys.stdin.read()
+          dec = json.JSONDecoder()
+          pos = 0
+          # GO-2026-6872 (default IPExtractor) is mitigated by newTrustedClientIPExtractor();
+          # GO-2026-6875 (middleware.Proxy) is unused and has no upstream fix in echo/v4.
+          ignored = {"GO-2026-6872", "GO-2026-6875"}
+          called = set()
+          while pos < len(raw):
+              while pos < len(raw) and raw[pos].isspace():
+                  pos += 1
+              if pos >= len(raw):
+                  break
+              obj, pos = dec.raw_decode(raw, pos)
+              finding = obj.get("finding")
+              if finding and finding.get("trace") and finding["trace"][0].get("function"):
+                  osv = finding.get("osv")
+                  if osv not in ignored:
+                      called.add(osv)
+          if called:
+              print("Unmitigated vulnerabilities found:", sorted(called), file=sys.stderr)
+              sys.exit(1)
+          '
       - name: Migration smoke test
         working-directory: bot
         env:
