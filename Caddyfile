@@ -1,73 +1,100 @@
+{
+	servers {
+		trusted_proxies static private_ranges
+	}
+}
+
 :80 {
-    header {
-        Strict-Transport-Security "max-age=31536000; includeSubDomains"
-        X-Content-Type-Options "nosniff"
-        Permissions-Policy "geolocation=(), microphone=(), camera=()"
-        -Server
-    }
+	@skip_access_log path /healthz /readyz /webhook/*
+	log_skip @skip_access_log
 
-    @mini_verify path /verify/mini /appeal/mini
-    @non_mini_verify not path /verify/mini /appeal/mini
-    header @non_mini_verify {
-        X-Frame-Options "SAMEORIGIN"
-        Referrer-Policy "strict-origin-when-cross-origin"
-        defer
-    }
-    header @mini_verify {
-        -X-Frame-Options
-        Content-Security-Policy "frame-ancestors 'self' https://web.telegram.org"
-        Referrer-Policy "no-referrer"
-        defer
-    }
+	log {
+		output stdout
+		format filter {
+			wrap json
+			fields {
+				request>headers>Cookie delete
+				request>headers>Authorization delete
+				request>headers>X-Csrf-Token delete
+				request>headers>X-Telegram-Bot-Api-Secret-Token delete
+				resp_headers>Set-Cookie delete
+				request>uri query {
+					replace token REDACTED
+					replace hash REDACTED
+				}
+			}
+		}
+	}
 
-    @runtime_health path /healthz /readyz
-    handle @runtime_health {
-        reverse_proxy bot:8080 {
-            lb_try_duration 5s
-            transport http {
-                dial_timeout 5s
-                response_header_timeout 5s
-            }
-        }
-    }
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Permissions-Policy "geolocation=(), microphone=(), camera=()"
+		-Server
+	}
 
-    handle /webhook/* {
-        reverse_proxy bot:8080 {
-            lb_try_duration 5s
-            transport http {
-                dial_timeout 5s
-                response_header_timeout 30s
-            }
-        }
-    }
+	@mini_verify path /verify/mini /appeal/mini
+	@non_mini_verify not path /verify/mini /appeal/mini
+	header @non_mini_verify {
+		X-Frame-Options "SAMEORIGIN"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		defer
+	}
+	header @mini_verify {
+		-X-Frame-Options
+		Content-Security-Policy "frame-ancestors 'self' https://web.telegram.org"
+		Referrer-Policy "no-referrer"
+		defer
+	}
 
-    handle /api/* {
-        reverse_proxy bot:8080 {
-            lb_try_duration 5s
-            transport http {
-                dial_timeout 5s
-                response_header_timeout 60s
-            }
-        }
-    }
+	@runtime_health path /healthz /readyz
+	handle @runtime_health {
+		reverse_proxy bot:8080 {
+			lb_try_duration 5s
+			transport http {
+				dial_timeout 5s
+				response_header_timeout 5s
+			}
+		}
+	}
 
-    handle /verify/* {
-        reverse_proxy web:3000 {
-            lb_try_duration 5s
-            transport http {
-                dial_timeout 5s
-                response_header_timeout 30s
-            }
-        }
-    }
+	handle /webhook/* {
+		reverse_proxy bot:8080 {
+			lb_try_duration 5s
+			transport http {
+				dial_timeout 5s
+				response_header_timeout 30s
+			}
+		}
+	}
 
-    handle {
-        reverse_proxy web:3000 {
-            lb_try_duration 5s
-            transport http {
-                dial_timeout 5s
-                response_header_timeout 30s
-            }
-        }
-    }
+	handle /api/* {
+		reverse_proxy bot:8080 {
+			lb_try_duration 5s
+			transport http {
+				dial_timeout 5s
+				response_header_timeout 60s
+			}
+		}
+	}
+
+	handle /verify/* {
+		reverse_proxy web:3000 {
+			lb_try_duration 5s
+			transport http {
+				dial_timeout 5s
+				response_header_timeout 30s
+			}
+		}
+	}
+
+	handle {
+		reverse_proxy web:3000 {
+			lb_try_duration 5s
+			transport http {
+				dial_timeout 5s
+				response_header_timeout 30s
+			}
+		}
+	}
 }

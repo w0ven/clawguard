@@ -41,7 +41,7 @@ func TestModerationThinkingOptIn(t *testing.T) {
 				defer srv.Close()
 				ref := NewModelRef("p", "m")
 				models := fakeModelRegistry{items: map[ModelRef]Model{ref: {ID: 1, ProviderID: 1, ProviderKey: "p", ModelKey: "m", Enabled: true, CapabilityTags: []string{"moderation"}}}}
-				providers := moderatorProviderRegistry{clients: map[string]LLMClient{"p": NewOpenAICompatibleClient(srv.URL, "test", time.Second, nil)}}
+				providers := moderatorProviderRegistry{clients: map[string]LLMClient{"p": newOpenAICompatibleClientWithHTTPClient(srv.URL, "test", time.Second, nil, srv.Client())}}
 				moderator := NewModerator(context.Background(), zap.NewNop(), nil, nil, providers, models, NewResolver(models), nil)
 				input := CheckInput{ChatID: 1, UserID: 2, Text: "test", Policy: config.AIPolicy{PrimaryModelRef: ref.String(), TimeoutMs: 1000, DisableThinking: disabled}}
 				var err error

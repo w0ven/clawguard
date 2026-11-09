@@ -15,6 +15,7 @@ import (
 const (
 	telegramLoginIPLimit      = 30
 	telegramLoginUserLimit    = 10
+	magicExchangeIPLimit      = 20
 	logoutIPLimit             = 60
 	turnstileVerifyIPLimit    = 20
 	turnstileVerifyTokenLimit = 5

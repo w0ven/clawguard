@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"html"
+	"net/url"
 	"strings"
 	"time"
 
@@ -36,6 +37,9 @@ func (s *Service) handleStartCommand(c tele.Context) error {
 		}
 		if strings.HasPrefix(c.Data(), "v_") {
 			return s.sendMiniAppVerificationCard(ctx, c, strings.TrimPrefix(c.Data(), "v_"))
+		}
+		if strings.HasPrefix(c.Data(), "weblogin_") {
+			return s.sendWebLoginApprovalCard(ctx, c, strings.TrimPrefix(c.Data(), "weblogin_"))
 		}
 		markup := &tele.ReplyMarkup{}
 		markup.Inline(markup.Row(markup.WebApp("我的处理记录", &tele.WebApp{URL: strings.TrimRight(s.cfg.PublicBaseURL, "/") + "/appeal/mini"})))
@@ -83,6 +87,29 @@ func (s *Service) sendMiniAppVerificationCard(ctx context.Context, c tele.Contex
 	markup := &tele.ReplyMarkup{}
 	markup.Inline(markup.Row(markup.WebApp("打开验证", &tele.WebApp{URL: strings.TrimRight(s.cfg.PublicBaseURL, "/") + "/verify/mini?task=" + token})))
 	text := fmt.Sprintf("<b>入群验证卡</b>\n目标群组：%s\n待验身份：%s (ID: %d)\n%s\n\n时间从入群时起算，跳转不重置计时。", html.EscapeString(group.Title), html.EscapeString(c.Sender().FirstName), c.Sender().ID, timeStatus)
+	return c.Send(text, &tele.SendOptions{ParseMode: tele.ModeHTML, ReplyMarkup: markup})
+}
+
+func (s *Service) sendWebLoginApprovalCard(ctx context.Context, c tele.Context, rawCode string) error {
+	code := strings.ToUpper(strings.TrimSpace(rawCode))
+	if len(code) != 6 {
+		return c.Send("登录核对码格式无效，请返回浏览器重新发起。")
+	}
+	for _, ch := range code {
+		if !((ch >= '2' && ch <= '9') || (ch >= 'A' && ch <= 'Z')) {
+			return c.Send("登录核对码格式无效，请返回浏览器重新发起。")
+		}
+	}
+	if _, err := s.queries.GetAdminByTelegramID(ctx, c.Sender().ID); err != nil {
+		return c.Send("仅管理员可批准后台登录。")
+	}
+	approveURL := s.cfg.AdminWebBaseURL() + "/miniapp?approve=" + url.QueryEscape(code)
+	markup := &tele.ReplyMarkup{}
+	markup.Inline(markup.Row(markup.WebApp("🔐 核对并批准登录 ("+code+")", &tele.WebApp{URL: approveURL})))
+	text := fmt.Sprintf(
+		"<b>浏览器后台登录确认</b>\n\n请求核对码：<code>%s</code>\n\n请先确认你本人正在电脑浏览器上看到相同的 6 位核对码，再点击下方按钮完成 Telegram 官方签名确认。",
+		html.EscapeString(code),
+	)
 	return c.Send(text, &tele.SendOptions{ParseMode: tele.ModeHTML, ReplyMarkup: markup})
 }
 

@@ -2,6 +2,8 @@ package api
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/hmac"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -33,6 +35,15 @@ type Server struct {
 	echo           *echo.Echo
 	scheduler      *scheduler.Scheduler
 	appealVerifier func(context.Context, string, string, string, string) error
+	webAppPubKey   ed25519.PublicKey
+}
+
+func newTrustedClientIPExtractor() echo.IPExtractor {
+	return echo.ExtractIPFromXFFHeader(
+		echo.TrustLoopback(true),
+		echo.TrustLinkLocal(false),
+		echo.TrustPrivateNet(true),
+	)
 }
 
 func NewServer(cfg config.Config, logger *zap.Logger, botService *bot.Service, scheduled *scheduler.Scheduler) *Server {
@@ -40,6 +51,7 @@ func NewServer(cfg config.Config, logger *zap.Logger, botService *bot.Service, s
 	e := echo.New()
 	e.HideBanner = true
 	e.HidePort = true
+	e.IPExtractor = newTrustedClientIPExtractor()
 	e.Use(middleware.RecoverWithConfig(middleware.RecoverConfig{
 		LogErrorFunc: func(c echo.Context, err error, stack []byte) error {
 			logger.Error("http panic recovered", zap.Error(redact.Error(err)), zap.ByteString("stack", []byte(redact.Text(string(stack)))))
@@ -48,12 +60,15 @@ func NewServer(cfg config.Config, logger *zap.Logger, botService *bot.Service, s
 	}))
 
 	server := &Server{
-		cfg:            cfg,
-		logger:         logger,
-		botService:     botService,
-		echo:           e,
-		scheduler:      scheduled,
-		appealVerifier: botService.VerifyAppealProviders,
+		cfg:          cfg,
+		logger:       logger,
+		botService:   botService,
+		echo:         e,
+		scheduler:    scheduled,
+		webAppPubKey: defaultTelegramWebAppPublicKey(),
+	}
+	if botService != nil {
+		server.appealVerifier = botService.VerifyAppealProviders
 	}
 	if botService != nil {
 		botService.SetAppealDecisionHandler(server.handleBotAppealDecision)
@@ -133,11 +148,16 @@ func (s *Server) readyz(c echo.Context) error {
 }
 
 func (s *Server) handleWebhook(c echo.Context) error {
-	if c.Param("secret") != s.cfg.WebhookSecret {
+	expectedPath := s.cfg.WebhookPathToken()
+	expectedHeader := s.cfg.WebhookHeaderToken()
+	if expectedPath == "" || expectedHeader == "" {
+		return c.NoContent(http.StatusNotFound)
+	}
+	if !hmac.Equal([]byte(c.Param("secret")), []byte(expectedPath)) {
 		return c.NoContent(http.StatusNotFound)
 	}
 
-	if c.Request().Header.Get("X-Telegram-Bot-Api-Secret-Token") != s.cfg.WebhookSecret {
+	if !hmac.Equal([]byte(c.Request().Header.Get("X-Telegram-Bot-Api-Secret-Token")), []byte(expectedHeader)) {
 		return c.NoContent(http.StatusUnauthorized)
 	}
 

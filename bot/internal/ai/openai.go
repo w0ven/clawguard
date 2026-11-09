@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -25,24 +24,7 @@ func decodeModelResponse(body io.Reader, result *chatCompletionResponse) error {
 	return json.Unmarshal(raw, result)
 }
 
-var openAIHTTPClient = &http.Client{
-	Timeout: 5 * time.Minute,
-	Transport: &http.Transport{
-		Proxy: http.ProxyFromEnvironment,
-		DialContext: (&net.Dialer{
-			Timeout:   10 * time.Second,
-			KeepAlive: 30 * time.Second,
-		}).DialContext,
-		ForceAttemptHTTP2:     true,
-		MaxIdleConns:          100,
-		MaxIdleConnsPerHost:   10,
-		MaxConnsPerHost:       50,
-		IdleConnTimeout:       90 * time.Second,
-		TLSHandshakeTimeout:   10 * time.Second,
-		ExpectContinueTimeout: 1 * time.Second,
-		ResponseHeaderTimeout: 30 * time.Second,
-	},
-}
+var openAIHTTPClient = newSafeOpenAIHTTPClient()
 
 type OpenAICompatibleClient struct {
 	baseURL        string
@@ -53,15 +35,40 @@ type OpenAICompatibleClient struct {
 }
 
 func NewOpenAICompatibleClient(baseURL, apiKey string, timeout time.Duration, extraHeaders map[string]string) *OpenAICompatibleClient {
+	return newOpenAICompatibleClientWithHTTPClient(baseURL, apiKey, timeout, extraHeaders, openAIHTTPClient)
+}
+
+func newOpenAICompatibleClientWithHTTPClient(baseURL, apiKey string, timeout time.Duration, extraHeaders map[string]string, client *http.Client) *OpenAICompatibleClient {
 	if timeout <= 0 {
 		timeout = 10 * time.Second
+	}
+	if client == nil {
+		client = openAIHTTPClient
 	}
 	return &OpenAICompatibleClient{
 		baseURL:        strings.TrimRight(baseURL, "/"),
 		apiKey:         strings.TrimSpace(apiKey),
 		extraHeaders:   cloneHeaders(extraHeaders),
-		client:         openAIHTTPClient,
+		client:         client,
 		defaultTimeout: timeout,
+	}
+}
+
+func applyExtraHeaders(req *http.Request, extra map[string]string) {
+	for key, value := range extra {
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		if key == "" || value == "" {
+			continue
+		}
+		if strings.ContainsAny(key, "\r\n") || strings.ContainsAny(value, "\r\n") {
+			continue
+		}
+		switch strings.ToLower(key) {
+		case "host", "content-length", "transfer-encoding", "connection":
+			continue
+		}
+		req.Header.Set(key, value)
 	}
 }
 
@@ -121,12 +128,7 @@ func (c *OpenAICompatibleClient) Check(ctx context.Context, req CheckRequest) (*
 	if c.apiKey != "" {
 		httpReq.Header.Set("Authorization", "Bearer "+c.apiKey)
 	}
-	for key, value := range c.extraHeaders {
-		if strings.TrimSpace(key) == "" || strings.TrimSpace(value) == "" {
-			continue
-		}
-		httpReq.Header.Set(key, value)
-	}
+	applyExtraHeaders(httpReq, c.extraHeaders)
 
 	startedAt := time.Now()
 	resp, err := c.client.Do(httpReq)
@@ -217,12 +219,7 @@ func (c *OpenAICompatibleClient) Probe(ctx context.Context, modelKey string) (in
 	if c.apiKey != "" {
 		httpReq.Header.Set("Authorization", "Bearer "+c.apiKey)
 	}
-	for key, value := range c.extraHeaders {
-		if strings.TrimSpace(key) == "" || strings.TrimSpace(value) == "" {
-			continue
-		}
-		httpReq.Header.Set(key, value)
-	}
+	applyExtraHeaders(httpReq, c.extraHeaders)
 
 	startedAt := time.Now()
 	resp, err := c.client.Do(httpReq)
@@ -282,12 +279,7 @@ func (c *OpenAICompatibleClient) Chat(ctx context.Context, req CheckRequest) (*C
 	if c.apiKey != "" {
 		httpReq.Header.Set("Authorization", "Bearer "+c.apiKey)
 	}
-	for key, value := range c.extraHeaders {
-		if strings.TrimSpace(key) == "" || strings.TrimSpace(value) == "" {
-			continue
-		}
-		httpReq.Header.Set(key, value)
-	}
+	applyExtraHeaders(httpReq, c.extraHeaders)
 
 	startedAt := time.Now()
 	resp, err := c.client.Do(httpReq)

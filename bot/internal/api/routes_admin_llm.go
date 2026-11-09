@@ -100,6 +100,7 @@ func (s *Server) handleListLLMProviders(c echo.Context) error {
 }
 
 func (s *Server) handleCreateLLMProvider(c echo.Context) error {
+	admin, _ := currentAdmin(c)
 	var p providerPayload
 	if err := c.Bind(&p); err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid json body"})
@@ -111,6 +112,10 @@ func (s *Server) handleCreateLLMProvider(c echo.Context) error {
 	if p.Key == "" || p.Label == "" || p.Type == "" || p.BaseURL == "" {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "key, label, type and base_url are required"})
 	}
+	normalizedBaseURL, err := ai.ValidateProviderBaseURL(p.BaseURL)
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": redact.ErrorString(err)})
+	}
 	if p.TimeoutMs <= 0 {
 		p.TimeoutMs = 8000
 	}
@@ -118,11 +123,14 @@ func (s *Server) handleCreateLLMProvider(c echo.Context) error {
 	if apiKey == "" {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "api_key required"})
 	}
+	headersJSON, err := validateAndNormalizeExtraHeaders(p.ExtraHeaders)
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": redact.ErrorString(err)})
+	}
 	enc, err := ai.EncryptAPIKey(apiKey)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "encrypt api key failed"})
 	}
-	headersJSON := normalizeExtraHeaders(p.ExtraHeaders)
 	enabled := true
 	if p.Enabled != nil {
 		enabled = *p.Enabled
@@ -139,7 +147,7 @@ func (s *Server) handleCreateLLMProvider(c echo.Context) error {
 		Key:          p.Key,
 		Label:        p.Label,
 		Type:         p.Type,
-		BaseUrl:      p.BaseURL,
+		BaseUrl:      normalizedBaseURL,
 		ApiKeyEnc:    enc,
 		TimeoutMs:    p.TimeoutMs,
 		ExtraHeaders: headersJSON,
@@ -148,11 +156,15 @@ func (s *Server) handleCreateLLMProvider(c echo.Context) error {
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("create provider: %v", err)})
 	}
+	if auditErr := s.writeAudit(ctx, admin, "llm", nil, "create_llm_provider", []byte("null"), mustRawJSON(auditSerializeProvider(created, true))); auditErr != nil {
+		s.logger.Warn("write create llm provider audit failed", zap.Error(auditErr))
+	}
 	s.reloadAIRegistries(ctx)
 	return c.JSON(http.StatusCreated, map[string]any{"provider": serializeProvider(created)})
 }
 
 func (s *Server) handleUpdateLLMProvider(c echo.Context) error {
+	admin, _ := currentAdmin(c)
 	key := strings.TrimSpace(c.Param("key"))
 	if key == "" {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "provider key required"})
@@ -170,11 +182,23 @@ func (s *Server) handleUpdateLLMProvider(c echo.Context) error {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "load provider failed"})
 	}
 
+	nextBaseURL := existing.BaseURL
+	if rawBaseURL := strings.TrimSpace(p.BaseURL); rawBaseURL != "" {
+		validatedURL, urlErr := ai.ValidateProviderBaseURL(rawBaseURL)
+		if urlErr != nil {
+			return c.JSON(http.StatusBadRequest, map[string]string{"error": redact.ErrorString(urlErr)})
+		}
+		if !ai.SameProviderBaseURL(validatedURL, existing.BaseURL) && strings.TrimSpace(p.APIKey) == "" {
+			return c.JSON(http.StatusBadRequest, map[string]string{"error": "修改 Base URL 时必须重新填写 API Key"})
+		}
+		nextBaseURL = validatedURL
+	}
+
 	params := store.UpdateProviderParams{
 		Key:          key,
 		Label:        strings.TrimSpace(firstNonEmpty(p.Label, existing.Label)),
 		Type:         strings.TrimSpace(firstNonEmpty(p.Type, existing.Type)),
-		BaseUrl:      strings.TrimSpace(firstNonEmpty(p.BaseURL, existing.BaseURL)),
+		BaseUrl:      nextBaseURL,
 		ApiKeyEnc:    existing.ApiKeyEnc,
 		TimeoutMs:    existing.TimeoutMs,
 		ExtraHeaders: existing.ExtraHeaders,
@@ -184,36 +208,52 @@ func (s *Server) handleUpdateLLMProvider(c echo.Context) error {
 		params.TimeoutMs = p.TimeoutMs
 	}
 	if p.ExtraHeaders != nil {
-		params.ExtraHeaders = normalizeExtraHeaders(p.ExtraHeaders)
+		headersJSON, hdrErr := validateAndNormalizeExtraHeaders(p.ExtraHeaders)
+		if hdrErr != nil {
+			return c.JSON(http.StatusBadRequest, map[string]string{"error": redact.ErrorString(hdrErr)})
+		}
+		params.ExtraHeaders = headersJSON
 	}
 	if p.Enabled != nil {
 		params.Enabled = *p.Enabled
 	}
+	apiKeyRotated := false
 	if strings.TrimSpace(p.APIKey) != "" {
 		enc, err := ai.EncryptAPIKey(strings.TrimSpace(p.APIKey))
 		if err != nil {
 			return c.JSON(http.StatusInternalServerError, map[string]string{"error": "encrypt api key failed"})
 		}
 		params.ApiKeyEnc = enc
+		apiKeyRotated = true
 	}
 
 	updated, err := s.botService.Queries().UpdateProvider(ctx, params)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("update provider: %v", err)})
 	}
+	if auditErr := s.writeAudit(ctx, admin, "llm", nil, "update_llm_provider", mustRawJSON(auditSerializeProvider(existing, false)), mustRawJSON(auditSerializeProvider(updated, apiKeyRotated))); auditErr != nil {
+		s.logger.Warn("write update llm provider audit failed", zap.Error(auditErr))
+	}
 	s.reloadAIRegistries(ctx)
 	return c.JSON(http.StatusOK, map[string]any{"provider": serializeProvider(updated)})
 }
 
 func (s *Server) handleDeleteLLMProvider(c echo.Context) error {
+	admin, _ := currentAdmin(c)
 	key := strings.TrimSpace(c.Param("key"))
 	if key == "" {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "provider key required"})
 	}
 	ctx := c.Request().Context()
+	existing, existingErr := s.botService.Queries().GetProviderByKey(ctx, key)
 	// FK cascade deletes models.
 	if err := s.botService.Queries().DeleteProvider(ctx, key); err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("delete provider: %v", err)})
+	}
+	if existingErr == nil {
+		if auditErr := s.writeAudit(ctx, admin, "llm", nil, "delete_llm_provider", mustRawJSON(auditSerializeProvider(existing, false)), []byte("null")); auditErr != nil {
+			s.logger.Warn("write delete llm provider audit failed", zap.Error(auditErr))
+		}
 	}
 	s.reloadAIRegistries(ctx)
 	return c.JSON(http.StatusOK, map[string]any{"ok": true})
@@ -291,6 +331,7 @@ func (s *Server) handleListLLMModels(c echo.Context) error {
 }
 
 func (s *Server) handleCreateLLMModel(c echo.Context) error {
+	admin, _ := currentAdmin(c)
 	var p modelPayload
 	if err := c.Bind(&p); err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid json body"})
@@ -360,11 +401,15 @@ func (s *Server) handleCreateLLMModel(c echo.Context) error {
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("create model: %v", err)})
 	}
+	if auditErr := s.writeAudit(ctx, admin, "llm", nil, "create_llm_model", []byte("null"), mustRawJSON(serializeModel(created, provider.Key))); auditErr != nil {
+		s.logger.Warn("write create llm model audit failed", zap.Error(auditErr))
+	}
 	s.reloadAIRegistries(ctx)
 	return c.JSON(http.StatusCreated, map[string]any{"model": serializeModel(created, provider.Key)})
 }
 
 func (s *Server) handleUpdateLLMModel(c echo.Context) error {
+	admin, _ := currentAdmin(c)
 	providerKey := strings.TrimSpace(c.Param("provider"))
 	modelKey := strings.TrimSpace(c.Param("model"))
 	if providerKey == "" || modelKey == "" {
@@ -454,6 +499,9 @@ func (s *Server) handleUpdateLLMModel(c echo.Context) error {
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("update model: %v", err)})
 	}
+	if auditErr := s.writeAudit(ctx, admin, "llm", nil, "update_llm_model", mustRawJSON(serializeModel(existing, provider.Key)), mustRawJSON(serializeModel(updated, provider.Key))); auditErr != nil {
+		s.logger.Warn("write update llm model audit failed", zap.Error(auditErr))
+	}
 	s.reloadAIRegistries(ctx)
 	return c.JSON(http.StatusOK, map[string]any{"model": serializeModel(updated, provider.Key)})
 }
@@ -474,7 +522,8 @@ func (s *Server) handleDeleteLLMModel(c echo.Context) error {
 		}
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "load provider failed"})
 	}
-	if _, err := queries.GetModelByRef(ctx, providerKey, modelKey); err != nil {
+	existingModel, err := queries.GetModelByRef(ctx, providerKey, modelKey)
+	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return c.JSON(http.StatusNotFound, map[string]string{"error": "model not found"})
 		}
@@ -486,6 +535,27 @@ func (s *Server) handleDeleteLLMModel(c echo.Context) error {
 	if err := queries.Transact(ctx, func(tx *store.Queries) error {
 		if err := tx.DeleteModel(ctx, provider.ID, modelKey); err != nil {
 			return fmt.Errorf("delete model: %w", err)
+		}
+		beforeModel := store.LlmModel{
+			ID:                   existingModel.ID,
+			ProviderID:           existingModel.ProviderID,
+			ModelKey:             existingModel.ModelKey,
+			Label:                existingModel.Label,
+			ApiFormat:            existingModel.ApiFormat,
+			Enabled:              existingModel.Enabled,
+			SupportsVision:       existingModel.SupportsVision,
+			SupportsJson:         existingModel.SupportsJson,
+			SupportsTools:        existingModel.SupportsTools,
+			CapabilityTags:       existingModel.CapabilityTags,
+			Priority:             existingModel.Priority,
+			Meta:                 existingModel.Meta,
+			ProbeEnabled:         existingModel.ProbeEnabled,
+			ProbeIntervalSeconds: existingModel.ProbeIntervalSeconds,
+			CreatedAt:            existingModel.CreatedAt,
+			UpdatedAt:            existingModel.UpdatedAt,
+		}
+		if auditErr := writeAuditWithQueries(ctx, tx, admin, "llm", nil, "delete_llm_model", mustRawJSON(serializeModel(beforeModel, provider.Key)), []byte("null")); auditErr != nil {
+			s.logger.Warn("write delete llm model audit failed", zap.Error(auditErr))
 		}
 		var cleanupErr error
 		cleanup, cleanupErr = cleanupDeletedLLMModelReferences(ctx, tx, admin, target)
@@ -702,16 +772,60 @@ func boolPtrOr(p *bool, def bool) bool {
 	return def
 }
 
-func normalizeExtraHeaders(raw json.RawMessage) []byte {
-	if len(raw) == 0 {
-		return []byte("{}")
+func auditSerializeProvider(p store.LlmProvider, apiKeyRotated bool) map[string]any {
+	redactedHeaders := map[string]string{}
+	if len(p.ExtraHeaders) > 0 {
+		rawHeaders := map[string]string{}
+		if err := json.Unmarshal(p.ExtraHeaders, &rawHeaders); err == nil {
+			for k := range rawHeaders {
+				redactedHeaders[k] = "[REDACTED]"
+			}
+		}
+	}
+	return map[string]any{
+		"id":              p.ID,
+		"key":             p.Key,
+		"label":           p.Label,
+		"type":            p.Type,
+		"base_url":        p.BaseURL,
+		"api_key_set":     strings.TrimSpace(p.ApiKeyEnc) != "",
+		"api_key_hint":    hintFromCiphertext(p.ApiKeyEnc),
+		"api_key_rotated": apiKeyRotated,
+		"timeout_ms":      p.TimeoutMs,
+		"extra_headers":   redactedHeaders,
+		"enabled":         p.Enabled,
+	}
+}
+
+func validateAndNormalizeExtraHeaders(raw json.RawMessage) ([]byte, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return []byte("{}"), nil
 	}
 	m := map[string]string{}
 	if err := json.Unmarshal(raw, &m); err != nil {
-		return []byte("{}")
+		return nil, errors.New("extra_headers must be a JSON string map")
 	}
-	out, _ := json.Marshal(m)
-	return out
+	cleaned := make(map[string]string, len(m))
+	for k, v := range m {
+		k = strings.TrimSpace(k)
+		v = strings.TrimSpace(v)
+		if k == "" || v == "" {
+			continue
+		}
+		if strings.ContainsAny(k, "\r\n") || strings.ContainsAny(v, "\r\n") {
+			return nil, errors.New("extra_headers must not contain control newlines")
+		}
+		switch strings.ToLower(k) {
+		case "host", "content-length", "transfer-encoding", "connection":
+			return nil, fmt.Errorf("extra_headers cannot override %s", k)
+		}
+		cleaned[k] = v
+	}
+	out, err := json.Marshal(cleaned)
+	if err != nil {
+		return nil, errors.New("marshal extra_headers failed")
+	}
+	return out, nil
 }
 
 func normalizeMetaJSON(raw json.RawMessage) []byte {

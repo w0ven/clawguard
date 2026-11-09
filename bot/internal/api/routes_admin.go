@@ -1079,7 +1079,13 @@ func (s *Server) handleCreateAdmin(c echo.Context) error {
 		return c.JSON(http.StatusForbidden, map[string]string{"error": "group_scope out of scope"})
 	}
 
-	admin, err := s.botService.Queries().UpsertAdmin(c.Request().Context(), store.UpsertAdminParams{
+	ctx := c.Request().Context()
+	beforeJSON := []byte("null")
+	if prev, prevErr := s.botService.Queries().GetAdminByTelegramID(ctx, payload.TelegramID); prevErr == nil {
+		beforeJSON = mustRawJSON(serializeAdmin(prev))
+	}
+
+	admin, err := s.botService.Queries().UpsertAdmin(ctx, store.UpsertAdminParams{
 		TelegramID: payload.TelegramID,
 		Username:   trimStringPtr(payload.Username),
 		FirstName:  trimStringPtr(payload.FirstName),
@@ -1090,11 +1096,15 @@ func (s *Server) handleCreateAdmin(c echo.Context) error {
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "upsert admin failed"})
 	}
+	if auditErr := s.writeAudit(ctx, current, "admins", nil, "upsert_admin", beforeJSON, mustRawJSON(serializeAdmin(admin))); auditErr != nil {
+		s.logger.Warn("write upsert admin audit failed", zap.Error(auditErr))
+	}
 
 	return c.JSON(http.StatusOK, map[string]any{"admin": serializeAdmin(admin)})
 }
 
 func (s *Server) handleUpdateAdmin(c echo.Context) error {
+	current, _ := currentAdmin(c)
 	adminID, err := parseRequiredInt64(c.Param("id"))
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid id"})
@@ -1119,7 +1129,13 @@ func (s *Server) handleUpdateAdmin(c echo.Context) error {
 		groupScopeRaw = marshalGroupScope(*payload.GroupScope)
 	}
 
-	updated, err := s.botService.Queries().UpdateAdminDetails(c.Request().Context(), store.UpdateAdminDetailsParams{
+	ctx := c.Request().Context()
+	beforeJSON := []byte("null")
+	if prev, prevErr := s.botService.Queries().GetAdminByID(ctx, adminID); prevErr == nil {
+		beforeJSON = mustRawJSON(serializeAdmin(prev))
+	}
+
+	updated, err := s.botService.Queries().UpdateAdminDetails(ctx, store.UpdateAdminDetailsParams{
 		ID:         adminID,
 		Role:       role,
 		Notes:      trimStringPtr(payload.Notes),
@@ -1130,6 +1146,9 @@ func (s *Server) handleUpdateAdmin(c echo.Context) error {
 			return c.JSON(http.StatusNotFound, map[string]string{"error": "admin not found"})
 		}
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "update admin failed"})
+	}
+	if auditErr := s.writeAudit(ctx, current, "admins", nil, "update_admin", beforeJSON, mustRawJSON(serializeAdmin(updated))); auditErr != nil {
+		s.logger.Warn("write update admin audit failed", zap.Error(auditErr))
 	}
 
 	return c.JSON(http.StatusOK, map[string]any{"admin": serializeAdmin(updated)})
@@ -1144,8 +1163,16 @@ func (s *Server) handleDeleteAdmin(c echo.Context) error {
 	if current.ID == adminID {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "cannot delete yourself"})
 	}
-	if err := s.botService.Queries().DeleteAdmin(c.Request().Context(), adminID); err != nil {
+	ctx := c.Request().Context()
+	beforeJSON := []byte("null")
+	if prev, prevErr := s.botService.Queries().GetAdminByID(ctx, adminID); prevErr == nil {
+		beforeJSON = mustRawJSON(serializeAdmin(prev))
+	}
+	if err := s.botService.Queries().DeleteAdmin(ctx, adminID); err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "delete admin failed"})
+	}
+	if auditErr := s.writeAudit(ctx, current, "admins", nil, "delete_admin", beforeJSON, []byte("null")); auditErr != nil {
+		s.logger.Warn("write delete admin audit failed", zap.Error(auditErr))
 	}
 	return c.NoContent(http.StatusNoContent)
 }

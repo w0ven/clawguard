@@ -2,6 +2,9 @@ package config
 
 import (
 	"bufio"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -145,8 +148,35 @@ func (c Config) ListenAddr() string {
 	return fmt.Sprintf(":%d", c.HTTPPort)
 }
 
+func deriveWebhookToken(secret, domain string, bytesLen int) string {
+	secret = strings.TrimSpace(secret)
+	if secret == "" {
+		return ""
+	}
+	mac := hmac.New(sha256.New, []byte(secret))
+	_, _ = mac.Write([]byte(domain))
+	sum := mac.Sum(nil)
+	if bytesLen > 0 && bytesLen < len(sum) {
+		sum = sum[:bytesLen]
+	}
+	return hex.EncodeToString(sum)
+}
+
+// WebhookPathToken derives a one-way URL path token from WEBHOOK_SECRET so
+// Telegram's getWebhookInfo (accessible to anyone who steals BOT_TOKEN) never
+// reveals WEBHOOK_SECRET or the X-Telegram-Bot-Api-Secret-Token header value.
+func (c Config) WebhookPathToken() string {
+	return deriveWebhookToken(c.WebhookSecret, "clawguard:webhook:path:v1", 16)
+}
+
+// WebhookHeaderToken derives an independent X-Telegram-Bot-Api-Secret-Token
+// header secret that cannot be computed from WebhookPathToken() or BOT_TOKEN.
+func (c Config) WebhookHeaderToken() string {
+	return deriveWebhookToken(c.WebhookSecret, "clawguard:webhook:header:v1", 32)
+}
+
 func (c Config) WebhookURL() string {
-	return strings.TrimRight(c.PublicBaseURL, "/") + "/webhook/" + c.WebhookSecret
+	return strings.TrimRight(c.PublicBaseURL, "/") + "/webhook/" + c.WebhookPathToken()
 }
 
 func (c Config) AdminWebBaseURL() string {

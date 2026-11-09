@@ -427,6 +427,27 @@ function ProviderPanel({
   );
 }
 
+function normalizeProviderBaseURLForCompare(raw: string): string {
+  const trimmed = raw.trim();
+  if (!trimmed) return "";
+  try {
+    const parsed = new URL(trimmed);
+    const scheme = parsed.protocol.toLowerCase();
+    const host = parsed.hostname.toLowerCase();
+    let port = parsed.port;
+    if ((scheme === "http:" && port === "80") || (scheme === "https:" && port === "443")) {
+      port = "";
+    }
+    const hostPort = host.includes(":")
+      ? port ? `[${host}]:${port}` : `[${host}]`
+      : port ? `${host}:${port}` : host;
+    const path = parsed.pathname.replace(/\/+$/, "");
+    return `${scheme}//${hostPort}${path}`;
+  } catch {
+    return trimmed.replace(/\/+$/, "");
+  }
+}
+
 function ProviderForm({
   provider,
   onDone,
@@ -450,6 +471,10 @@ function ProviderForm({
   );
   const [enabled, setEnabled] = useState(provider?.enabled ?? true);
   const [saving, setSaving] = useState(false);
+  const baseURLChanged =
+    editing &&
+    normalizeProviderBaseURLForCompare(baseURL) !==
+      normalizeProviderBaseURLForCompare(provider?.base_url ?? "");
   const formDirty =
     key !== (provider?.key ?? "") ||
     label !== (provider?.label ?? "") ||
@@ -477,6 +502,10 @@ function ProviderForm({
   }, [provider]);
 
   async function submit() {
+    if (baseURLChanged && !apiKey.trim()) {
+      pushToast("修改 Base URL 时必须重新填写 API Key", "error");
+      return;
+    }
     setSaving(true);
     try {
       let parsedHeaders: Record<string, string> = {};
@@ -547,7 +576,20 @@ function ProviderForm({
             placeholder="https://llm.example.com/v1"
           />
         </Field>
-        <Field label={editing ? "API Key (留空 = 不修改)" : "API Key"}>
+        <Field
+          label={
+            editing
+              ? baseURLChanged
+                ? "API Key (Base URL 已变更，必须重填)"
+                : "API Key (留空 = 不修改)"
+              : "API Key"
+          }
+          hint={
+            baseURLChanged
+              ? "为防止修改接口地址套取旧密钥，变更 Base URL 时必须重新输入完整的 API Key。"
+              : undefined
+          }
+        >
           <Input
             value={apiKey}
             onChange={(e) => setApiKey(e.target.value)}

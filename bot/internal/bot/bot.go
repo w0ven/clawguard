@@ -284,7 +284,7 @@ func New(ctx context.Context, cfg config.Config, logger *zap.Logger, queries *st
 func (s *Service) RegisterWebhook(ctx context.Context) error {
 	if err := s.bot.SetWebhook(&tele.Webhook{
 		Endpoint:       &tele.WebhookEndpoint{PublicURL: s.cfg.WebhookURL()},
-		SecretToken:    s.cfg.WebhookSecret,
+		SecretToken:    s.cfg.WebhookHeaderToken(),
 		AllowedUpdates: []string{"message", "edited_message", "channel_post", "edited_channel_post", "callback_query", "chat_member", "my_chat_member"},
 	}); err != nil {
 		return fmt.Errorf("set webhook: %w", err)

@@ -17,7 +17,7 @@ func TestOpenAIResponseSizeBounded(t *testing.T) {
 		fmt.Fprint(w, `"}}]}`)
 	}))
 	defer server.Close()
-	client := NewOpenAICompatibleClient(server.URL, "", time.Second, nil)
+	client := newOpenAICompatibleClientWithHTTPClient(server.URL, "", time.Second, nil, server.Client())
 	for _, tc := range []struct {
 		name string
 		call func() error

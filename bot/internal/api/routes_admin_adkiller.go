@@ -57,17 +57,25 @@ func (s *Server) handleGetAdKillerSecret(c echo.Context) error {
 }
 
 func (s *Server) handlePutAdKillerSecret(c echo.Context) error {
+	admin, _ := currentAdmin(c)
 	var payload adkillerSecretPayload
 	if err := c.Bind(&payload); err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid json body"})
 	}
 
 	ctx := c.Request().Context()
+	beforeJSON := []byte("null")
+	if prev, prevErr := s.botService.Queries().GetAdkillerSecret(ctx); prevErr == nil {
+		beforeJSON = mustRawJSON(serializeAdKillerSecret(prev))
+	}
+
 	var (
 		updated store.AdkillerSecret
 		err     error
+		action  = "update_adkiller_secret"
 	)
 	if payload.Clear {
+		action = "clear_adkiller_secret"
 		updated, err = s.botService.Queries().ClearAdkillerSecret(ctx)
 	} else {
 		apiKey := strings.TrimSpace(payload.APIKey)
@@ -82,6 +90,9 @@ func (s *Server) handlePutAdKillerSecret(c echo.Context) error {
 	}
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "save adkiller secret failed"})
+	}
+	if auditErr := s.writeAudit(ctx, admin, "adkiller", nil, action, beforeJSON, mustRawJSON(serializeAdKillerSecret(updated))); auditErr != nil {
+		s.logger.Warn("write adkiller secret audit failed", zap.Error(auditErr))
 	}
 	if reloadErr := s.botService.ReloadAdKillerSecret(ctx); reloadErr != nil {
 		s.logger.Warn("reload adkiller secret failed", zap.Error(reloadErr))
