@@ -384,7 +384,31 @@ func TestBotTokenLeakCannotImpersonateAdminAndZeroTrustLoginAuditWorks(t *testin
 	}
 
 	// Real Owner approves via Telegram Mini App Ed25519 signature.
+	// First, verify a mistyped 6-char code returns 404 WITHOUT burning the session's initData signature,
+	// while an already-used initData from /api/auth/miniapp is still immediately rejected with 401.
+	replayedApproveBody, _ := json.Marshal(map[string]string{"code": "ZZZZZZ", "init_data": validMiniInit})
+	reqReplayedApprove := httptest.NewRequest(http.MethodPost, "/api/auth/web-approve", strings.NewReader(string(replayedApproveBody)))
+	reqReplayedApprove.Header.Set("Content-Type", "application/json")
+	recReplayedApprove := httptest.NewRecorder()
+	srv.ServeHTTP(recReplayedApprove, reqReplayedApprove)
+	if recReplayedApprove.Code != http.StatusUnauthorized {
+		t.Fatalf("replayed miniapp initData on web-approve status = %d, want 401", recReplayedApprove.Code)
+	}
+
 	ownerApproveInit := buildSignedInitDataForTest(t, srv.cfg.BotToken, telegramEdPriv, 6425070392, "approve-q1", now)
+	typoCode := "ZZZZZZ"
+	if chalResp.Code == typoCode {
+		typoCode = "YYYYYY"
+	}
+	typoApproveBody, _ := json.Marshal(map[string]string{"code": typoCode, "init_data": ownerApproveInit})
+	reqTypoApprove := httptest.NewRequest(http.MethodPost, "/api/auth/web-approve", strings.NewReader(string(typoApproveBody)))
+	reqTypoApprove.Header.Set("Content-Type", "application/json")
+	recTypoApprove := httptest.NewRecorder()
+	srv.ServeHTTP(recTypoApprove, reqTypoApprove)
+	if recTypoApprove.Code != http.StatusNotFound {
+		t.Fatalf("typo code web-approve status = %d, want 404", recTypoApprove.Code)
+	}
+
 	approveBody, _ := json.Marshal(map[string]string{"code": chalResp.Code, "init_data": ownerApproveInit})
 	reqApprove := httptest.NewRequest(http.MethodPost, "/api/auth/web-approve", strings.NewReader(string(approveBody)))
 	reqApprove.Header.Set("Content-Type", "application/json")
@@ -392,7 +416,16 @@ func TestBotTokenLeakCannotImpersonateAdminAndZeroTrustLoginAuditWorks(t *testin
 	recApprove := httptest.NewRecorder()
 	srv.ServeHTTP(recApprove, reqApprove)
 	if recApprove.Code != http.StatusOK {
-		t.Fatalf("owner web-approve status = %d; body=%s", recApprove.Code, recApprove.Body.String())
+		t.Fatalf("owner web-approve after typo correction status = %d; body=%s", recApprove.Code, recApprove.Body.String())
+	}
+
+	// Replaying ownerApproveInit after successful approval must fail with 401!
+	reqReplayApprove := httptest.NewRequest(http.MethodPost, "/api/auth/web-approve", strings.NewReader(string(approveBody)))
+	reqReplayApprove.Header.Set("Content-Type", "application/json")
+	recReplayApprove := httptest.NewRecorder()
+	srv.ServeHTTP(recReplayApprove, reqReplayApprove)
+	if recReplayApprove.Code != http.StatusUnauthorized {
+		t.Fatalf("replayed ownerApproveInit after approval status = %d, want 401", recReplayApprove.Code)
 	}
 
 	// Attacker who guesses challenge_id WITHOUT the browser's HttpOnly cg_login_poll cookie cannot steal the approved session!

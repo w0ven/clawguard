@@ -97,24 +97,24 @@ func (s *Server) handleTelegramLoginDisabled(c echo.Context) error {
 	})
 }
 
-func (s *Server) authenticateVerifiedMiniAppAdmin(ctx context.Context, rawInitData string) (store.Admin, error) {
+func (s *Server) verifyMiniAppAdminIdentity(ctx context.Context, rawInitData string) (telegramMiniAppUser, string, error) {
 	pubKey := s.webAppPubKey
 	if len(pubKey) != ed25519.PublicKeySize {
 		pubKey = defaultTelegramWebAppPublicKey()
 	}
 	user, sigDigest, err := validateTelegramMiniAppEd25519(rawInitData, s.cfg.BotToken, pubKey, time.Now())
 	if err != nil {
-		return store.Admin{}, &echo.HTTPError{Code: http.StatusUnauthorized, Message: "invalid mini app authorization"}
+		return telegramMiniAppUser{}, "", &echo.HTTPError{Code: http.StatusUnauthorized, Message: "invalid mini app authorization"}
 	}
-	if err := s.consumeMiniAppSignatureOnce(ctx, sigDigest); err != nil {
-		return store.Admin{}, err
-	}
-
 	queries := s.botService.Queries()
 	if _, err := queries.GetAdminByTelegramID(ctx, user.ID); err != nil {
-		return store.Admin{}, &echo.HTTPError{Code: http.StatusForbidden, Message: "admin not allowed"}
+		return telegramMiniAppUser{}, "", &echo.HTTPError{Code: http.StatusForbidden, Message: "admin not allowed"}
 	}
-	admin, err := queries.TouchAdminLogin(ctx, store.TouchAdminLoginParams{
+	return user, sigDigest, nil
+}
+
+func (s *Server) touchVerifiedMiniAppAdmin(ctx context.Context, user telegramMiniAppUser) (store.Admin, error) {
+	admin, err := s.botService.Queries().TouchAdminLogin(ctx, store.TouchAdminLoginParams{
 		TelegramID: user.ID,
 		Username:   stringPtr(user.Username),
 		FirstName:  stringPtr(strings.TrimSpace(user.FirstName + " " + user.LastName)),
@@ -124,6 +124,30 @@ func (s *Server) authenticateVerifiedMiniAppAdmin(ctx context.Context, rawInitDa
 		return store.Admin{}, &echo.HTTPError{Code: http.StatusInternalServerError, Message: "update admin failed"}
 	}
 	return admin, nil
+}
+
+func (s *Server) authenticateVerifiedMiniAppAdmin(ctx context.Context, rawInitData string) (store.Admin, error) {
+	user, sigDigest, err := s.verifyMiniAppAdminIdentity(ctx, rawInitData)
+	if err != nil {
+		return store.Admin{}, err
+	}
+	if err := s.consumeMiniAppSignatureOnce(ctx, sigDigest); err != nil {
+		return store.Admin{}, err
+	}
+	return s.touchVerifiedMiniAppAdmin(ctx, user)
+}
+
+func (s *Server) isMiniAppSignatureUsed(ctx context.Context, sigDigest string) (bool, error) {
+	rdb := s.redisClient()
+	if rdb == nil || sigDigest == "" {
+		return false, &echo.HTTPError{Code: http.StatusServiceUnavailable, Message: "authentication replay store unavailable"}
+	}
+	count, err := rdb.Exists(ctx, "clawguard:miniapp_sig:"+sigDigest).Result()
+	if err != nil {
+		s.logger.Warn("check miniapp signature replay key failed", zap.Error(err))
+		return false, &echo.HTTPError{Code: http.StatusServiceUnavailable, Message: "authentication check failed"}
+	}
+	return count > 0, nil
 }
 
 func (s *Server) consumeMiniAppSignatureOnce(ctx context.Context, sigDigest string) error {
@@ -260,9 +284,14 @@ func (s *Server) handleApproveWebLoginChallenge(c echo.Context) error {
 	}
 
 	ctx := c.Request().Context()
-	admin, err := s.authenticateVerifiedMiniAppAdmin(ctx, body.InitData)
+	user, sigDigest, err := s.verifyMiniAppAdminIdentity(ctx, body.InitData)
 	if err != nil {
 		return writeAuthHTTPError(c, err)
+	}
+	if used, err := s.isMiniAppSignatureUsed(ctx, sigDigest); err != nil {
+		return writeAuthHTTPError(c, err)
+	} else if used {
+		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "mini app authorization already used"})
 	}
 
 	challengeID, err := rdb.Get(ctx, webLoginCodeKey(code)).Result()
@@ -287,6 +316,14 @@ func (s *Server) handleApproveWebLoginChallenge(c echo.Context) error {
 	}
 	if rec.Status != "pending" {
 		return c.JSON(http.StatusConflict, map[string]string{"error": "该登录请求已被处理"})
+	}
+
+	if err := s.consumeMiniAppSignatureOnce(ctx, sigDigest); err != nil {
+		return writeAuthHTTPError(c, err)
+	}
+	admin, err := s.touchVerifiedMiniAppAdmin(ctx, user)
+	if err != nil {
+		return writeAuthHTTPError(c, err)
 	}
 
 	ttl, ttlErr := rdb.TTL(ctx, webLoginChallengeKey(challengeID)).Result()

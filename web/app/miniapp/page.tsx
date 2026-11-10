@@ -170,18 +170,11 @@ export default function MiniAppEntryPage() {
               <LoaderCircle className="h-4 w-4 animate-spin text-[var(--accent)]" />
               正在验证管理员身份
             </div>
-            <button
-              type="button"
-              onClick={() => setApproveMode(true)}
-              className="text-xs text-[var(--text-subtle)] underline hover:text-[var(--text)]"
-            >
-              改为批准电脑浏览器登录
-            </button>
           </div>
         ) : (
-          telegramWebApp()?.initData && (
-            <Button variant="secondary" size="sm" onClick={() => { setError(""); setApproveMode(true); }}>
-              批准电脑浏览器登录
+          telegramWebApp()?.close && (
+            <Button variant="secondary" size="sm" onClick={() => telegramWebApp()?.close?.()}>
+              关闭窗口
             </Button>
           )
         )}

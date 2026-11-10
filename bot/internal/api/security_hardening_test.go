@@ -70,3 +70,32 @@ func TestMagicExchangeIPRateLimitReturns429(t *testing.T) {
 		t.Fatal("missing Retry-After header")
 	}
 }
+
+func TestDecodedRouteParamHandlesSlashAndUnicodeSegments(t *testing.T) {
+	e := echo.New()
+	var gotProvider, gotModel string
+	e.POST("/api/admin/llm/models/:provider/:model/probe", func(c echo.Context) error {
+		gotProvider = decodedRouteParam(c, "provider")
+		gotModel = decodedRouteParam(c, "model")
+		return c.NoContent(http.StatusOK)
+	})
+
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/admin/llm/models/aw%E7%81%AB%E5%B1%B1/deepseek-ai%2FDeepSeek-V3/probe",
+		nil,
+	)
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if gotProvider != "aw火山" {
+		t.Fatalf("gotProvider = %q, want %q", gotProvider, "aw火山")
+	}
+	if gotModel != "deepseek-ai/DeepSeek-V3" {
+		t.Fatalf("gotModel = %q, want %q", gotModel, "deepseek-ai/DeepSeek-V3")
+	}
+}
+

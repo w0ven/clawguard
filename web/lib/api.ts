@@ -47,8 +47,15 @@ export async function apiFetch<T>(
   }
 
   if (response.status === 401) {
-    if (typeof window !== "undefined" && window.location.pathname !== "/") {
-      window.location.href = "/";
+    if (
+      typeof window !== "undefined" &&
+      window.location.pathname !== "/" &&
+      !window.location.pathname.startsWith("/miniapp") &&
+      !window.location.pathname.startsWith("/verify") &&
+      !window.location.pathname.startsWith("/appeal/mini")
+    ) {
+      window.sessionStorage.removeItem("cg_miniapp");
+      window.location.replace("/");
     }
     throw new ApiError("Unauthorized", response.status);
   }

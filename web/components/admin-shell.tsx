@@ -25,6 +25,7 @@ import {
 import { apiFetch } from "@/lib/api";
 import { useToast } from "@/components/providers";
 import { useTelegramMiniApp } from "@/components/telegram-miniapp-provider";
+import { telegramWebApp } from "@/lib/telegram";
 import { useDirtyNavigation } from "@/components/dirty-guard";
 import { ThemeSwitcher } from "@/components/theme-switcher";
 import { cn } from "@/lib/utils";
@@ -111,6 +112,7 @@ export function AdminShell({
 
   async function handleLogout() {
     if (!confirmNavigation("当前页面有未保存的修改，确定登出吗？")) return;
+    const wasMiniApp = miniApp;
     try {
       await apiFetch<void>("/api/auth/logout", { method: "POST" });
     } catch {
@@ -118,7 +120,10 @@ export function AdminShell({
     } finally {
       sessionStorage.removeItem("cg_miniapp");
       pushToast("已登出", "success");
-      window.location.href = miniApp ? "/miniapp" : "/";
+      if (wasMiniApp) {
+        telegramWebApp()?.close?.();
+      }
+      window.location.replace("/");
     }
   }
 

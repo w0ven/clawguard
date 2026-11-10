@@ -145,6 +145,10 @@ func (s *Service) AIModels() ai.ModelRegistry {
 	return s.aiModels
 }
 
+func (s *Service) AIResolver() *ai.Resolver {
+	return s.aiResolver
+}
+
 func (s *Service) AIModerator() *ai.Moderator {
 	return s.aiModerator
 }

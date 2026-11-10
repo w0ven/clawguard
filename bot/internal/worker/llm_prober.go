@@ -16,6 +16,7 @@ import (
 	"github.com/openclaw/clawguard/internal/ai"
 	"github.com/openclaw/clawguard/internal/bot"
 	"github.com/openclaw/clawguard/internal/config"
+	"github.com/openclaw/clawguard/internal/redact"
 	"github.com/openclaw/clawguard/internal/store"
 )
 
@@ -221,7 +222,7 @@ func (p *LLMProber) probeOne(ctx context.Context, model ai.Model) {
 		t := checkedAt
 		okAt = &t
 	} else {
-		errText = truncateError(probeErr.Error())
+		errText = truncateError(redact.ErrorString(probeErr))
 		if !healthy {
 			p.logger.Warn("llm probe failed consecutively",
 				zap.String("ref", string(ref)),

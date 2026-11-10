@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -165,7 +166,7 @@ func (s *Server) handleCreateLLMProvider(c echo.Context) error {
 
 func (s *Server) handleUpdateLLMProvider(c echo.Context) error {
 	admin, _ := currentAdmin(c)
-	key := strings.TrimSpace(c.Param("key"))
+	key := decodedRouteParam(c, "key")
 	if key == "" {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "provider key required"})
 	}
@@ -240,7 +241,7 @@ func (s *Server) handleUpdateLLMProvider(c echo.Context) error {
 
 func (s *Server) handleDeleteLLMProvider(c echo.Context) error {
 	admin, _ := currentAdmin(c)
-	key := strings.TrimSpace(c.Param("key"))
+	key := decodedRouteParam(c, "key")
 	if key == "" {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "provider key required"})
 	}
@@ -410,8 +411,8 @@ func (s *Server) handleCreateLLMModel(c echo.Context) error {
 
 func (s *Server) handleUpdateLLMModel(c echo.Context) error {
 	admin, _ := currentAdmin(c)
-	providerKey := strings.TrimSpace(c.Param("provider"))
-	modelKey := strings.TrimSpace(c.Param("model"))
+	providerKey := decodedRouteParam(c, "provider")
+	modelKey := decodedRouteParam(c, "model")
 	if providerKey == "" || modelKey == "" {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "provider and model required"})
 	}
@@ -508,8 +509,8 @@ func (s *Server) handleUpdateLLMModel(c echo.Context) error {
 
 func (s *Server) handleDeleteLLMModel(c echo.Context) error {
 	admin, _ := currentAdmin(c)
-	providerKey := strings.TrimSpace(c.Param("provider"))
-	modelKey := strings.TrimSpace(c.Param("model"))
+	providerKey := decodedRouteParam(c, "provider")
+	modelKey := decodedRouteParam(c, "model")
 	if providerKey == "" || modelKey == "" {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "provider and model required"})
 	}
@@ -612,8 +613,8 @@ func (s *Server) handleListLLMStats(c echo.Context) error {
 }
 
 func (s *Server) handleProbeLLMModel(c echo.Context) error {
-	providerKey := strings.TrimSpace(c.Param("provider"))
-	modelKey := strings.TrimSpace(c.Param("model"))
+	providerKey := decodedRouteParam(c, "provider")
+	modelKey := decodedRouteParam(c, "model")
 	if providerKey == "" || modelKey == "" {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "provider and model required"})
 	}
@@ -637,6 +638,7 @@ func (s *Server) handleProbeLLMModel(c echo.Context) error {
 			LastOkAt:    nil,
 			LastError:   redact.ErrorString(err),
 		})
+		s.refreshAIResolver(c.Request().Context())
 		return c.JSON(http.StatusOK, map[string]any{
 			"ok":         false,
 			"latency_ms": 0,
@@ -651,6 +653,7 @@ func (s *Server) handleProbeLLMModel(c echo.Context) error {
 		LastOkAt:    &okAt,
 		LastError:   "",
 	})
+	s.refreshAIResolver(c.Request().Context())
 	return c.JSON(http.StatusOK, map[string]any{
 		"ok":         true,
 		"latency_ms": latency,
@@ -668,8 +671,8 @@ type testLLMPayload struct {
 // with a minimal moderation-style prompt. Unlike /ai-test this bypasses the
 // resolver/fallback chain so operators can verify one model in isolation.
 func (s *Server) handleTestLLMModel(c echo.Context) error {
-	providerKey := strings.TrimSpace(c.Param("provider"))
-	modelKey := strings.TrimSpace(c.Param("model"))
+	providerKey := decodedRouteParam(c, "provider")
+	modelKey := decodedRouteParam(c, "model")
 	if providerKey == "" || modelKey == "" {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "provider and model required"})
 	}
@@ -717,6 +720,7 @@ func (s *Server) handleTestLLMModel(c echo.Context) error {
 			LastOkAt:    nil,
 			LastError:   redact.ErrorString(err),
 		})
+		s.refreshAIResolver(c.Request().Context())
 		return c.JSON(http.StatusOK, map[string]any{
 			"ok":    false,
 			"error": redact.ErrorString(err),
@@ -730,6 +734,7 @@ func (s *Server) handleTestLLMModel(c echo.Context) error {
 		LastOkAt:    &okAt,
 		LastError:   "",
 	})
+	s.refreshAIResolver(c.Request().Context())
 	return c.JSON(http.StatusOK, map[string]any{
 		"ok":                true,
 		"model":             result.Model,
@@ -756,6 +761,24 @@ func (s *Server) reloadAIRegistries(ctx context.Context) {
 			s.logger.Warn("reload model registry failed", zap.Error(err))
 		}
 	}
+	s.refreshAIResolver(ctx)
+}
+
+func (s *Server) refreshAIResolver(ctx context.Context) {
+	if s.botService == nil {
+		return
+	}
+	if resolver := s.botService.AIResolver(); resolver != nil {
+		resolver.Refresh(ctx)
+	}
+}
+
+func decodedRouteParam(c echo.Context, name string) string {
+	raw := c.Param(name)
+	if decoded, err := url.PathUnescape(raw); err == nil {
+		return strings.TrimSpace(decoded)
+	}
+	return strings.TrimSpace(raw)
 }
 
 func firstNonEmpty(a, b string) string {
