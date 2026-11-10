@@ -54,3 +54,43 @@ test("mini app shell exposes every management destination", async ({ page, conte
   }
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });
+
+test("web challenge polling survives countdown ticks and redirects to dashboard upon approval", async ({ page, context }) => {
+  let pollCalls = 0;
+
+  await page.route("**/api/auth/web-challenge", async (route) => {
+    await route.fulfill({
+      status: 200,
+      json: {
+        challenge_id: "0123456789abcdef0123456789abcdef",
+        code: "86Z9MS",
+        bot_username: "rfcguard_bot",
+        tg_deep_link: "https://t.me/rfcguard_bot?start=weblogin_86Z9MS",
+        expires_in: 300,
+      },
+    });
+  });
+
+  await page.route("**/api/auth/web-poll", async (route) => {
+    pollCalls += 1;
+    if (pollCalls === 1) {
+      await route.fulfill({ status: 200, json: { status: "pending" } });
+      return;
+    }
+    // Hold the second poll across a 1-second countdown tick to ensure countdown re-renders never cancel it.
+    await new Promise((resolve) => setTimeout(resolve, 1250));
+    await context.addCookies([{ name: "cg_admin", value: "fixture-approved", domain: "127.0.0.1", path: "/" }]);
+    await route.fulfill({
+      status: 200,
+      json: { status: "approved", redirect_to: "/dashboard" },
+    });
+  });
+
+  await page.goto("/");
+  await page.getByRole("button", { name: "通过 Telegram 客户端验证登录" }).click();
+  await expect(page.getByText("86Z9MS")).toBeVisible();
+
+  await expect(page).toHaveURL(/\/dashboard$/, { timeout: 10000 });
+  expect(pollCalls).toBeGreaterThanOrEqual(2);
+});
+

@@ -86,7 +86,7 @@ func (s *Server) registerAuthRoutes() {
 	s.echo.POST("/api/auth/miniapp", s.handleTelegramMiniApp, middleware.BodyLimit("64K"), s.apiRateLimit(s.ipRateLimitKey("auth:miniapp_ip"), telegramLoginIPLimit, apiRateLimitWindow))
 	s.echo.POST("/api/auth/web-challenge", s.handleCreateWebLoginChallenge, middleware.BodyLimit("4K"), s.apiRateLimit(s.ipRateLimitKey("auth:web_challenge_ip"), magicExchangeIPLimit, apiRateLimitWindow))
 	s.echo.POST("/api/auth/web-approve", s.handleApproveWebLoginChallenge, middleware.BodyLimit("64K"), s.apiRateLimit(s.ipRateLimitKey("auth:web_approve_ip"), telegramLoginIPLimit, apiRateLimitWindow))
-	s.echo.POST("/api/auth/web-poll", s.handlePollWebLoginChallenge, middleware.BodyLimit("4K"), s.apiRateLimit(s.ipRateLimitKey("auth:web_poll_ip"), logoutIPLimit, apiRateLimitWindow))
+	s.echo.POST("/api/auth/web-poll", s.handlePollWebLoginChallenge, middleware.BodyLimit("4K"), s.apiRateLimit(s.ipRateLimitKey("auth:web_poll_ip"), webPollIPLimit, apiRateLimitWindow))
 	s.echo.POST("/api/auth/logout", s.handleLogout, s.apiRateLimit(s.ipRateLimitKey("auth:logout_ip"), logoutIPLimit, apiRateLimitWindow))
 	s.echo.GET("/api/auth/me", s.requireAdminJWT(s.handleMe))
 }

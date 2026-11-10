@@ -1,12 +1,11 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
 import { ExternalLink, LoaderCircle, RefreshCw, Shield } from "lucide-react";
 import { apiFetch } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 
-type WebChallenge = {
+type WebChallengeResponse = {
   challenge_id: string;
   code: string;
   bot_username: string;
@@ -14,30 +13,49 @@ type WebChallenge = {
   expires_in: number;
 };
 
+type WebChallengeState = WebChallengeResponse & {
+  expiresAtMs: number;
+};
+
+function safeRedirectTarget(raw?: string): string {
+  const trimmed = (raw ?? "").trim();
+  if (!trimmed.startsWith("/") || trimmed.startsWith("//") || trimmed.includes("\\")) {
+    return "/dashboard";
+  }
+  return trimmed;
+}
+
 export default function HomePage() {
-  const router = useRouter();
   const [checking, setChecking] = useState(true);
-  const [challenge, setChallenge] = useState<WebChallenge | null>(null);
+  const [challenge, setChallenge] = useState<WebChallengeState | null>(null);
   const [starting, setStarting] = useState(false);
+  const [redirecting, setRedirecting] = useState(false);
   const [error, setError] = useState("");
   const [remainingSeconds, setRemainingSeconds] = useState(0);
 
   useEffect(() => {
     apiFetch<{ admin: unknown }>("/api/auth/me")
-      .then(() => router.replace("/dashboard"))
+      .then(() => {
+        window.location.replace("/dashboard");
+      })
       .catch(() => setChecking(false));
-  }, [router]);
+  }, []);
 
   const startChallenge = useCallback(async () => {
     setStarting(true);
     setError("");
     try {
-      const created = await apiFetch<WebChallenge>("/api/auth/web-challenge", {
+      const created = await apiFetch<WebChallengeResponse>("/api/auth/web-challenge", {
         method: "POST",
         body: "{}",
       });
-      setChallenge(created);
-      setRemainingSeconds(created.expires_in || 300);
+      const ttlSeconds = created.expires_in > 0 ? created.expires_in : 300;
+      const expiresAtMs = Date.now() + ttlSeconds * 1000;
+      setChallenge({
+        ...created,
+        expiresAtMs,
+      });
+      setRemainingSeconds(ttlSeconds);
     } catch (err) {
       setError(err instanceof Error ? err.message : "发起登录请求失败");
     } finally {
@@ -45,48 +63,154 @@ export default function HomePage() {
     }
   }, []);
 
+  // Countdown timer depends only on the challenge identity & deadline, never on remainingSeconds.
   useEffect(() => {
-    if (!challenge || remainingSeconds <= 0) return;
-    const timer = window.setInterval(() => {
-      setRemainingSeconds((prev) => (prev > 0 ? prev - 1 : 0));
-    }, 1000);
+    if (!challenge) return;
+    const challengeExpiresAt = challenge.expiresAtMs;
+
+    const updateRemaining = () => {
+      const left = Math.max(0, Math.ceil((challengeExpiresAt - Date.now()) / 1000));
+      setRemainingSeconds(left);
+    };
+
+    updateRemaining();
+    const timer = window.setInterval(updateRemaining, 1000);
     return () => window.clearInterval(timer);
-  }, [challenge, remainingSeconds]);
+  }, [challenge]);
 
+  // Poll loop is completely decoupled from remainingSeconds ticks so countdown updates never cancel in-flight polls.
   useEffect(() => {
-    if (!challenge || remainingSeconds <= 0) return;
-    let cancelled = false;
+    if (!challenge) return;
+    const challengeId = challenge.challenge_id;
+    const challengeExpiresAt = challenge.expiresAtMs;
 
-    const timer = window.setInterval(async () => {
+    let stopped = false;
+    let inFlight = false;
+    let timerId: number | undefined;
+
+    const clearScheduledTimer = () => {
+      if (timerId !== undefined) {
+        window.clearTimeout(timerId);
+        timerId = undefined;
+      }
+    };
+
+    const scheduleNext = (delayMs: number) => {
+      if (stopped) return;
+      clearScheduledTimer();
+      timerId = window.setTimeout(() => {
+        void pollOnce();
+      }, delayMs);
+    };
+
+    const verifyExistingSession = async (): Promise<boolean> => {
       try {
-        const res = await apiFetch<{ status: string; redirect_to?: string }>(
-          "/api/auth/web-poll",
-          {
-            method: "POST",
-            body: JSON.stringify({ challenge_id: challenge.challenge_id }),
-          },
-        );
-        if (!cancelled && res.status === "approved") {
-          router.replace(res.redirect_to || "/dashboard");
+        const meRes = await fetch("/api/auth/me", {
+          method: "GET",
+          credentials: "include",
+          cache: "no-store",
+        });
+        return meRes.ok;
+      } catch {
+        return false;
+      }
+    };
+
+    const navigateToConsole = (target?: string) => {
+      stopped = true;
+      clearScheduledTimer();
+      setRedirecting(true);
+      window.location.replace(safeRedirectTarget(target));
+    };
+
+    const pollOnce = async () => {
+      if (stopped || inFlight) return;
+      if (Date.now() >= challengeExpiresAt) {
+        stopped = true;
+        setRemainingSeconds(0);
+        return;
+      }
+
+      inFlight = true;
+      let nextDelayMs = 1500;
+      try {
+        const res = await fetch("/api/auth/web-poll", {
+          method: "POST",
+          credentials: "include",
+          cache: "no-store",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ challenge_id: challengeId }),
+        });
+
+        if (stopped) return;
+
+        if (res.ok) {
+          const payload = (await res.json().catch(() => ({}))) as {
+            status?: string;
+            redirect_to?: string;
+          };
+          if (stopped) return;
+          if (payload.status === "approved") {
+            navigateToConsole(payload.redirect_to);
+            return;
+          }
+        } else if (res.status === 401 || res.status === 410 || res.status === 403) {
+          // Recheck /api/auth/me first in case an earlier poll already minted cg_admin.
+          if (await verifyExistingSession()) {
+            navigateToConsole("/dashboard");
+            return;
+          }
+          const payload = (await res.json().catch(() => ({}))) as { error?: string };
+          if (!stopped) {
+            stopped = true;
+            clearScheduledTimer();
+            setChallenge(null);
+            setError(payload.error || "登录验证已失效，请重新发起");
+          }
+          return;
+        } else if (res.status === 429) {
+          nextDelayMs = 3000;
         }
-      } catch (err) {
-        if (!cancelled) {
-          setChallenge(null);
-          setError(err instanceof Error ? err.message : "登录验证已失效，请重新发起");
+      } catch {
+        // Transient network hiccup while switching apps should not wipe the active code.
+        nextDelayMs = 2000;
+      } finally {
+        inFlight = false;
+        if (!stopped && Date.now() < challengeExpiresAt) {
+          scheduleNext(nextDelayMs);
         }
       }
-    }, 2000);
+    };
+
+    const handleVisibilityOrFocus = () => {
+      if (stopped || document.visibilityState === "hidden") return;
+      const left = Math.max(0, Math.ceil((challengeExpiresAt - Date.now()) / 1000));
+      setRemainingSeconds(left);
+      if (left > 0 && !inFlight) {
+        clearScheduledTimer();
+        void pollOnce();
+      }
+    };
+
+    window.addEventListener("focus", handleVisibilityOrFocus);
+    document.addEventListener("visibilitychange", handleVisibilityOrFocus);
+    scheduleNext(1000);
 
     return () => {
-      cancelled = true;
-      window.clearInterval(timer);
+      stopped = true;
+      clearScheduledTimer();
+      window.removeEventListener("focus", handleVisibilityOrFocus);
+      document.removeEventListener("visibilitychange", handleVisibilityOrFocus);
     };
-  }, [challenge, remainingSeconds, router]);
+  }, [challenge]);
 
-  if (checking) {
+  if (checking || redirecting) {
     return (
       <main className="flex min-h-screen items-center justify-center">
-        <div className="text-sm text-[var(--text-muted)]">Loading…</div>
+        <div className="flex items-center gap-2 text-sm text-[var(--text-muted)]">
+          <LoaderCircle className="h-4 w-4 animate-spin text-[var(--accent)]" />
+          <span>{redirecting ? "验证已通过，正在进入控制台…" : "Loading…"}</span>
+        </div>
       </main>
     );
   }
