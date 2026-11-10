@@ -94,3 +94,75 @@ test("web challenge polling survives countdown ticks and redirects to dashboard 
   expect(pollCalls).toBeGreaterThanOrEqual(2);
 });
 
+test("refreshing verification code immediately halts stale polls during slow challenge creation and proxy ignores spoofed X-Forwarded-Host", async ({
+  page,
+  request,
+}) => {
+  // 1. Verify proxy redirect never echoes an untrusted X-Forwarded-Host header.
+  const spoofedRes = await request.get("/dashboard", {
+    maxRedirects: 0,
+    headers: {
+      "X-Forwarded-Proto": "https",
+      "X-Forwarded-Host": "evil.example.com",
+    },
+  });
+  expect(spoofedRes.status()).toBe(307);
+  const location = spoofedRes.headers()["location"] ?? "";
+  expect(location).not.toContain("evil.example.com");
+  expect(location === "/" || location.endsWith("127.0.0.1:3100/")).toBe(true);
+
+  // 2. Verify clicking "换一个核对码" immediately stops polling the old challenge even while the new web-challenge request is slow.
+  let challengeCount = 0;
+  const polledChallengeIds: string[] = [];
+
+  await page.route("**/api/auth/web-challenge", async (route) => {
+    challengeCount += 1;
+    if (challengeCount === 1) {
+      await route.fulfill({
+        status: 200,
+        json: {
+          challenge_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          code: "OLD222",
+          bot_username: "rfcguard_bot",
+          tg_deep_link: "https://t.me/rfcguard_bot?start=weblogin_OLD222",
+          expires_in: 300,
+        },
+      });
+      return;
+    }
+    // Simulate slow network (1.5s) while refreshing challenge code.
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    await route.fulfill({
+      status: 200,
+      json: {
+        challenge_id: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        code: "NEW999",
+        bot_username: "rfcguard_bot",
+        tg_deep_link: "https://t.me/rfcguard_bot?start=weblogin_NEW999",
+        expires_in: 300,
+      },
+    });
+  });
+
+  await page.route("**/api/auth/web-poll", async (route) => {
+    const body = route.request().postDataJSON() as { challenge_id: string };
+    polledChallengeIds.push(body.challenge_id);
+    if (body.challenge_id === "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa") {
+      // Even if a stale poll returned 401 right as user clicked refresh, it must be ignored.
+      await route.fulfill({ status: 401, json: { error: "stale cookie" } });
+      return;
+    }
+    await route.fulfill({ status: 200, json: { status: "pending" } });
+  });
+
+  await page.goto("/");
+  await page.getByRole("button", { name: "通过 Telegram 客户端验证登录" }).click();
+  await expect(page.getByText("OLD222")).toBeVisible();
+
+  // Click refresh immediately before the 1s first poll fires; during the 1.5s slow web-challenge, OLD222 must never be polled!
+  await page.getByRole("button", { name: "换一个核对码" }).click();
+  await expect(page.getByText("NEW999")).toBeVisible({ timeout: 5000 });
+  expect(polledChallengeIds).not.toContain("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+});
+
+

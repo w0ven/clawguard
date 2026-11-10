@@ -1,23 +1,8 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
+import { redirectToPublicPath } from "@/lib/safe-redirect";
 
 const publicPrefixes = ["/auth", "/verify", "/miniapp", "/api"];
-
-function publicOriginURL(path: string, request: NextRequest): URL {
-  const envBase = process.env.PUBLIC_BASE_URL || process.env.NEXT_PUBLIC_BASE_URL;
-  if (envBase) {
-    return new URL(path, envBase);
-  }
-  const proto =
-    request.headers.get("x-forwarded-proto") ||
-    request.nextUrl.protocol.replace(/:$/, "") ||
-    "https";
-  const host = request.headers.get("x-forwarded-host") || request.headers.get("host");
-  if (host) {
-    return new URL(path, `${proto}://${host}`);
-  }
-  return new URL(path, request.url);
-}
 
 export function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
@@ -35,7 +20,7 @@ export function proxy(request: NextRequest) {
 
   const token = request.cookies.get("cg_admin")?.value;
   if (!token) {
-    return NextResponse.redirect(publicOriginURL("/", request));
+    return redirectToPublicPath("/", request);
   }
 
   return NextResponse.next();

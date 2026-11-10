@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ExternalLink, LoaderCircle, RefreshCw, Shield } from "lucide-react";
 import { apiFetch } from "@/lib/api";
 import { Button } from "@/components/ui/button";
@@ -32,6 +32,8 @@ export default function HomePage() {
   const [redirecting, setRedirecting] = useState(false);
   const [error, setError] = useState("");
   const [remainingSeconds, setRemainingSeconds] = useState(0);
+  const pollEpochRef = useRef(0);
+  const pollAbortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     apiFetch<{ admin: unknown }>("/api/auth/me")
@@ -42,6 +44,9 @@ export default function HomePage() {
   }, []);
 
   const startChallenge = useCallback(async () => {
+    const epoch = ++pollEpochRef.current;
+    pollAbortRef.current?.abort();
+    pollAbortRef.current = null;
     setStarting(true);
     setError("");
     try {
@@ -49,6 +54,7 @@ export default function HomePage() {
         method: "POST",
         body: "{}",
       });
+      if (epoch !== pollEpochRef.current) return;
       const ttlSeconds = created.expires_in > 0 ? created.expires_in : 300;
       const expiresAtMs = Date.now() + ttlSeconds * 1000;
       setChallenge({
@@ -57,9 +63,12 @@ export default function HomePage() {
       });
       setRemainingSeconds(ttlSeconds);
     } catch (err) {
+      if (epoch !== pollEpochRef.current) return;
       setError(err instanceof Error ? err.message : "发起登录请求失败");
     } finally {
-      setStarting(false);
+      if (epoch === pollEpochRef.current) {
+        setStarting(false);
+      }
     }
   }, []);
 
@@ -83,10 +92,13 @@ export default function HomePage() {
     if (!challenge) return;
     const challengeId = challenge.challenge_id;
     const challengeExpiresAt = challenge.expiresAtMs;
+    const epoch = pollEpochRef.current;
 
     let stopped = false;
     let inFlight = false;
     let timerId: number | undefined;
+
+    const isStale = () => stopped || pollEpochRef.current !== epoch;
 
     const clearScheduledTimer = () => {
       if (timerId !== undefined) {
@@ -96,7 +108,7 @@ export default function HomePage() {
     };
 
     const scheduleNext = (delayMs: number) => {
-      if (stopped) return;
+      if (isStale()) return;
       clearScheduledTimer();
       timerId = window.setTimeout(() => {
         void pollOnce();
@@ -124,7 +136,7 @@ export default function HomePage() {
     };
 
     const pollOnce = async () => {
-      if (stopped || inFlight) return;
+      if (isStale() || inFlight) return;
       if (Date.now() >= challengeExpiresAt) {
         stopped = true;
         setRemainingSeconds(0);
@@ -133,6 +145,8 @@ export default function HomePage() {
 
       inFlight = true;
       let nextDelayMs = 1500;
+      const controller = new AbortController();
+      pollAbortRef.current = controller;
       try {
         const res = await fetch("/api/auth/web-poll", {
           method: "POST",
@@ -140,16 +154,17 @@ export default function HomePage() {
           cache: "no-store",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ challenge_id: challengeId }),
+          signal: controller.signal,
         });
 
-        if (stopped) return;
+        if (isStale()) return;
 
         if (res.ok) {
           const payload = (await res.json().catch(() => ({}))) as {
             status?: string;
             redirect_to?: string;
           };
-          if (stopped) return;
+          if (isStale()) return;
           if (payload.status === "approved") {
             navigateToConsole(payload.redirect_to);
             return;
@@ -157,11 +172,12 @@ export default function HomePage() {
         } else if (res.status === 401 || res.status === 410 || res.status === 403) {
           // Recheck /api/auth/me first in case an earlier poll already minted cg_admin.
           if (await verifyExistingSession()) {
+            if (isStale()) return;
             navigateToConsole("/dashboard");
             return;
           }
           const payload = (await res.json().catch(() => ({}))) as { error?: string };
-          if (!stopped) {
+          if (!isStale()) {
             stopped = true;
             clearScheduledTimer();
             setChallenge(null);
@@ -172,18 +188,21 @@ export default function HomePage() {
           nextDelayMs = 3000;
         }
       } catch {
-        // Transient network hiccup while switching apps should not wipe the active code.
+        // Aborted or transient network hiccup while switching apps should not wipe the active code.
         nextDelayMs = 2000;
       } finally {
+        if (pollAbortRef.current === controller) {
+          pollAbortRef.current = null;
+        }
         inFlight = false;
-        if (!stopped && Date.now() < challengeExpiresAt) {
+        if (!isStale() && Date.now() < challengeExpiresAt) {
           scheduleNext(nextDelayMs);
         }
       }
     };
 
     const handleVisibilityOrFocus = () => {
-      if (stopped || document.visibilityState === "hidden") return;
+      if (isStale() || document.visibilityState === "hidden") return;
       const left = Math.max(0, Math.ceil((challengeExpiresAt - Date.now()) / 1000));
       setRemainingSeconds(left);
       if (left > 0 && !inFlight) {
@@ -198,10 +217,16 @@ export default function HomePage() {
 
     return () => {
       stopped = true;
+      controllerAbortCleanup();
       clearScheduledTimer();
       window.removeEventListener("focus", handleVisibilityOrFocus);
       document.removeEventListener("visibilitychange", handleVisibilityOrFocus);
     };
+
+    function controllerAbortCleanup() {
+      pollAbortRef.current?.abort();
+      pollAbortRef.current = null;
+    }
   }, [challenge]);
 
   if (checking || redirecting) {
@@ -289,11 +314,12 @@ export default function HomePage() {
 
               <button
                 type="button"
+                disabled={starting}
                 onClick={() => void startChallenge()}
-                className="inline-flex items-center gap-1.5 text-xs text-[var(--text-subtle)] hover:text-[var(--text)]"
+                className="inline-flex items-center gap-1.5 text-xs text-[var(--text-subtle)] hover:text-[var(--text)] disabled:opacity-50"
               >
-                <RefreshCw className="h-3.5 w-3.5" />
-                换一个核对码
+                <RefreshCw className={`h-3.5 w-3.5${starting ? " animate-spin" : ""}`} />
+                {starting ? "正在更换核对码…" : "换一个核对码"}
               </button>
             </div>
           )}
