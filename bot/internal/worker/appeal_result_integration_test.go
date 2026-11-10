@@ -109,7 +109,7 @@ func TestAppealResultForbiddenIsTerminal(t *testing.T) {
 	}
 
 	// Verify approved + completed appeal through SQL QueueAppealResult + ClaimModerationNotifications attaches join link button and group title.
-	_, err = pool.Exec(ctx, `INSERT INTO groups(chat_id,title,enabled) VALUES(-44,'测试官方群',true) ON CONFLICT(chat_id) DO UPDATE SET title=EXCLUDED.title`)
+	_, err = pool.Exec(ctx, `INSERT INTO groups(chat_id,title,type,enabled) VALUES(-44,'测试官方群','supergroup',true) ON CONFLICT(chat_id) DO UPDATE SET title=EXCLUDED.title`)
 	if err != nil {
 		t.Fatal(err)
 	}
