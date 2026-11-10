@@ -113,11 +113,17 @@ func TestAppealResultForbiddenIsTerminal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = q.RecordPrivateStart(ctx, user); err != nil {
+	user2 := int64(88000002)
+	key2 := key + "-approved"
+	caseID2, err := q.RecordModerationCase(ctx, store.ModerationCaseInput{SourceKey: key2, SourceKind: "test", SourceID: key2, ChatID: -44, UserID: user2, Action: "ban", Result: "executed"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = q.RecordPrivateStart(ctx, user2); err != nil {
 		t.Fatal(err)
 	}
 	var approvedAppeal int64
-	err = pool.QueryRow(ctx, `INSERT INTO appeals(case_id,chat_id,user_id,reason,status,decision,public_note,execution_result,review_version) VALUES($1,-44,$2,'fixture2','completed','approve','管理员通过 Bot 私信审核通过','审核通过，原封禁已解除；如有已删除的消息，无法恢复',2) RETURNING id`, caseID, user).Scan(&approvedAppeal)
+	err = pool.QueryRow(ctx, `INSERT INTO appeals(case_id,chat_id,user_id,reason,status,decision,public_note,execution_result,review_version) VALUES($1,-44,$2,'fixture2','completed','approve','管理员通过 Bot 私信审核通过','审核通过，原封禁已解除；如有已删除的消息，无法恢复',2) RETURNING id`, caseID2, user2).Scan(&approvedAppeal)
 	if err != nil {
 		t.Fatal(err)
 	}
