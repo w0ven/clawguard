@@ -65,7 +65,14 @@ func (q *Queries) ConsumeAppealWarning(ctx context.Context, appeal, warning, cha
 func (q *Queries) QueueAppealResult(ctx context.Context, id int64) error {
 	_, err := q.db.Exec(ctx, `INSERT INTO moderation_notifications(case_id,chat_id,user_id,state,session_epoch,event_kind,appeal_id,event_version,event_text)
  SELECT a.case_id,a.chat_id,a.user_id,CASE WHEN s.is_reachable THEN 'pending' ELSE 'unreachable' END,s.notification_epoch,'appeal_result',a.id,a.review_version,
- '申诉审核结果 · APL-'||a.id::text||E'\n关联处理：CASE-'||a.case_id::text||E'\n审核结果：'||a.execution_result||E'\n处理说明：'||a.public_note
- FROM appeals a LEFT JOIN telegram_private_sessions s ON s.user_id=a.user_id WHERE a.id=$1 AND a.status IN ('upheld','completed','manual_review') ON CONFLICT DO NOTHING`, id)
+ (CASE WHEN a.decision='approve' AND a.status='completed' THEN '✅ 申诉审核通过 · APL-' WHEN a.decision='approve' THEN 'ℹ️ 申诉审核结果 · APL-' ELSE '申诉审核结果 · APL-' END)||a.id::text||
+ (CASE WHEN COALESCE(g.title,'')<>'' THEN E'\n群聊：'||g.title ELSE '' END)||
+ E'\n关联处理：CASE-'||a.case_id::text||
+ E'\n审核结果：'||a.execution_result||
+ E'\n处理说明：'||a.public_note
+ FROM appeals a
+ LEFT JOIN groups g ON g.chat_id=a.chat_id
+ LEFT JOIN telegram_private_sessions s ON s.user_id=a.user_id
+ WHERE a.id=$1 AND a.status IN ('upheld','completed','manual_review') ON CONFLICT DO NOTHING`, id)
 	return err
 }

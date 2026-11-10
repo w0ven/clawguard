@@ -111,7 +111,86 @@ func (w *ModerationNotifications) deliver(ctx context.Context, n store.Moderatio
 		w.logger.Warn("notification result not recorded; delivery may be uncertain", zap.Int64("notification_id", n.ID))
 	}
 }
+func isSafeTelegramJoinURL(raw string) bool {
+	s := strings.TrimSpace(raw)
+	return (strings.HasPrefix(s, "https://t.me/") || strings.HasPrefix(s, "https://telegram.me/")) && !strings.ContainsAny(s, " \t\r\n")
+}
+
+func (w *ModerationNotifications) resolveGroupJoinURL(parent context.Context, chatID, appealID int64) string {
+	if chatID == 0 || strings.TrimSpace(w.token) == "" || w.client == nil {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(parent, 3*time.Second)
+	defer cancel()
+
+	callTelegram := func(method string, reqBody map[string]any, out any) bool {
+		rawBody, err := json.Marshal(reqBody)
+		if err != nil {
+			return false
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.telegram.org/bot"+w.token+"/"+method, bytes.NewReader(rawBody))
+		if err != nil {
+			return false
+		}
+		req.Header.Set("Content-Type", "application/json")
+		res, err := w.client.Do(req)
+		if err != nil {
+			return false
+		}
+		defer res.Body.Close()
+		if res.StatusCode != http.StatusOK {
+			return false
+		}
+		data, err := io.ReadAll(io.LimitReader(res.Body, 8192))
+		if err != nil {
+			return false
+		}
+		return json.Unmarshal(data, out) == nil
+	}
+
+	var chatResp struct {
+		OK     bool `json:"ok"`
+		Result struct {
+			Username   string `json:"username"`
+			InviteLink string `json:"invite_link"`
+		} `json:"result"`
+	}
+	if callTelegram("getChat", map[string]any{"chat_id": chatID}, &chatResp) && chatResp.OK {
+		if u := strings.TrimPrefix(strings.TrimSpace(chatResp.Result.Username), "@"); u != "" && !strings.ContainsAny(u, "/?&# \t\r\n") {
+			return "https://t.me/" + u
+		}
+	}
+
+	name := "AppealRejoin"
+	if appealID > 0 {
+		name = fmt.Sprintf("APL-%d", appealID)
+	}
+	var inviteResp struct {
+		OK     bool `json:"ok"`
+		Result struct {
+			InviteLink string `json:"invite_link"`
+		} `json:"result"`
+	}
+	if callTelegram("createChatInviteLink", map[string]any{
+		"chat_id":      chatID,
+		"name":         name,
+		"member_limit": 1,
+		"expire_date":  time.Now().Add(7 * 24 * time.Hour).Unix(),
+	}, &inviteResp) && inviteResp.OK && isSafeTelegramJoinURL(inviteResp.Result.InviteLink) {
+		return strings.TrimSpace(inviteResp.Result.InviteLink)
+	}
+
+	if isSafeTelegramJoinURL(chatResp.Result.InviteLink) {
+		return strings.TrimSpace(chatResp.Result.InviteLink)
+	}
+	return ""
+}
+
 func (w *ModerationNotifications) send(parent context.Context, n store.ModerationNotification) (string, time.Duration) {
+	var appealJoinURL string
+	if n.EventKind == "appeal_result" && n.AppealDecision == "approve" && n.AppealStatus == "completed" {
+		appealJoinURL = w.resolveGroupJoinURL(parent, n.ChatID, n.AppealID)
+	}
 	ctx, cancel := context.WithTimeout(parent, 5*time.Second)
 	defer cancel()
 	// No user-supplied HTML or provider reason is interpreted as formatting.
@@ -141,10 +220,25 @@ func (w *ModerationNotifications) send(parent context.Context, n store.Moderatio
 	text += "\n如认为此处理有误，可发起申诉，管理员将进行复核。"
 	if n.EventKind == "appeal_result" {
 		text = n.EventText
+		if appealJoinURL != "" {
+			actLower := strings.ToLower(n.Action)
+			if strings.Contains(actLower, "ban") || strings.Contains(actLower, "kick") {
+				text += "\n\n您的群组限制已解除，点击下方按钮即可重新加入群聊。"
+			} else {
+				text += "\n\n您的群组限制已解除，点击下方按钮可进入群聊。"
+			}
+		}
 	}
 	payload := map[string]any{"chat_id": n.UserID, "text": text, "disable_web_page_preview": true}
 	if w.publicBaseURL != "" && n.EventKind != "appeal_result" {
 		payload["reply_markup"] = map[string]any{"inline_keyboard": [][]any{{map[string]any{"text": "申诉", "web_app": map[string]string{"url": fmt.Sprintf("%s/appeal/mini?case=%d", w.publicBaseURL, n.CaseID)}}}}}
+	} else if n.EventKind == "appeal_result" && appealJoinURL != "" {
+		btnText := "💬 进入群聊"
+		actLower := strings.ToLower(n.Action)
+		if strings.Contains(actLower, "ban") || strings.Contains(actLower, "kick") {
+			btnText = "🔗 重新加入群聊"
+		}
+		payload["reply_markup"] = map[string]any{"inline_keyboard": [][]any{{map[string]any{"text": btnText, "url": appealJoinURL}}}}
 	}
 	body, _ := json.Marshal(payload)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.telegram.org/bot"+w.token+"/sendMessage", bytes.NewReader(body))

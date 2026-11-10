@@ -107,4 +107,42 @@ func TestAppealResultForbiddenIsTerminal(t *testing.T) {
 	if calls != 1 {
 		t.Fatal("403 retried")
 	}
+
+	// Verify approved + completed appeal through SQL QueueAppealResult + ClaimModerationNotifications attaches join link button and group title.
+	_, err = pool.Exec(ctx, `INSERT INTO groups(chat_id,title,enabled) VALUES(-44,'测试官方群',true) ON CONFLICT(chat_id) DO UPDATE SET title=EXCLUDED.title`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = q.RecordPrivateStart(ctx, user); err != nil {
+		t.Fatal(err)
+	}
+	var approvedAppeal int64
+	err = pool.QueryRow(ctx, `INSERT INTO appeals(case_id,chat_id,user_id,reason,status,decision,public_note,execution_result,review_version) VALUES($1,-44,$2,'fixture2','completed','approve','管理员通过 Bot 私信审核通过','审核通过，原封禁已解除；如有已删除的消息，无法恢复',2) RETURNING id`, caseID, user).Scan(&approvedAppeal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = q.QueueAppealResult(ctx, approvedAppeal); err != nil {
+		t.Fatal(err)
+	}
+	var approvedText string
+	var approvedMarkup map[string]any
+	w.client = &http.Client{Transport: appealNotificationTransport(func(r *http.Request) (*http.Response, error) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/getChat"):
+			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"ok":true,"result":{"username":"rfchost"}}`))}, nil
+		case strings.HasSuffix(r.URL.Path, "/sendMessage"):
+			var p map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&p)
+			approvedText, _ = p["text"].(string)
+			approvedMarkup, _ = p["reply_markup"].(map[string]any)
+			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"ok":true}`))}, nil
+		default:
+			t.Fatalf("unexpected request %s", r.URL.Path)
+			return nil, nil
+		}
+	})}
+	w.process(ctx)
+	if !strings.Contains(approvedText, "✅ 申诉审核通过 · APL-") || !strings.Contains(approvedText, "群聊：测试官方群") || !strings.Contains(approvedText, "重新加入群聊") || approvedMarkup == nil {
+		t.Fatalf("approvedText=%q approvedMarkup=%+v", approvedText, approvedMarkup)
+	}
 }

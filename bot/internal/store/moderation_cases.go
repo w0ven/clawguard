@@ -25,6 +25,8 @@ type ModerationNotification struct {
 	ID, CaseID, UserID, ChatID                       int64
 	GroupTitle, Action, Result, Explanation, Summary string
 	EventKind, EventText                             string
+	AppealID                                         int64
+	AppealDecision, AppealStatus                     string
 	Attempts                                         int32
 	LeaseToken                                       string
 	ExpiresAt                                        time.Time
@@ -103,7 +105,7 @@ func (q *Queries) ClaimModerationNotifications(ctx context.Context, token string
  ORDER BY n.next_attempt_at,n.id LIMIT $2 FOR UPDATE OF n SKIP LOCKED
  ), claimed AS (
  UPDATE moderation_notifications n SET state='leased',lease_token=$1,lease_until=now()+interval '1 minute',updated_at=now() FROM picked p WHERE n.id=p.id RETURNING n.*
- ) SELECT n.id,n.case_id,n.user_id,c.chat_id,COALESCE(g.title,''),c.action,c.result,c.explanation,c.summary,n.attempts,n.lease_token,n.expires_at,n.event_kind,n.event_text FROM claimed n JOIN moderation_cases c ON c.id=n.case_id LEFT JOIN groups g ON g.chat_id=c.chat_id`, token, limit)
+ ) SELECT n.id,n.case_id,n.user_id,c.chat_id,COALESCE(g.title,''),c.action,c.result,c.explanation,c.summary,n.attempts,n.lease_token,n.expires_at,n.event_kind,n.event_text,COALESCE(n.appeal_id,0),COALESCE(a.decision,''),COALESCE(a.status,'') FROM claimed n JOIN moderation_cases c ON c.id=n.case_id LEFT JOIN groups g ON g.chat_id=c.chat_id LEFT JOIN appeals a ON a.id=n.appeal_id`, token, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -111,7 +113,7 @@ func (q *Queries) ClaimModerationNotifications(ctx context.Context, token string
 	var out []ModerationNotification
 	for rows.Next() {
 		var n ModerationNotification
-		if err = rows.Scan(&n.ID, &n.CaseID, &n.UserID, &n.ChatID, &n.GroupTitle, &n.Action, &n.Result, &n.Explanation, &n.Summary, &n.Attempts, &n.LeaseToken, &n.ExpiresAt, &n.EventKind, &n.EventText); err != nil {
+		if err = rows.Scan(&n.ID, &n.CaseID, &n.UserID, &n.ChatID, &n.GroupTitle, &n.Action, &n.Result, &n.Explanation, &n.Summary, &n.Attempts, &n.LeaseToken, &n.ExpiresAt, &n.EventKind, &n.EventText, &n.AppealID, &n.AppealDecision, &n.AppealStatus); err != nil {
 			return nil, err
 		}
 		out = append(out, n)
