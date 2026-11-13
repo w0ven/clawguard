@@ -57,6 +57,39 @@ func TestVerificationActualConnectFailureIsTyped(t *testing.T) {
 	}
 }
 
+func TestVerificationTLSHandshakeResetIsPreDispatch(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		conn, acceptErr := ln.Accept()
+		if acceptErr != nil {
+			return
+		}
+		buf := make([]byte, 64)
+		_, _ = conn.Read(buf)
+		if tcpConn, ok := conn.(*net.TCPConn); ok {
+			_ = tcpConn.SetLinger(0)
+		}
+		_ = conn.Close()
+	}()
+	b, err := tele.NewBot(tele.Settings{
+		Token:   "123:TEST",
+		URL:     "https://" + ln.Addr().String(),
+		Offline: true,
+		Client:  verificationStartHTTPClient(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = telegramConfirmedRestrict(b, &tele.Chat{ID: -1}, &tele.ChatMember{User: &tele.User{ID: 1}, Rights: tele.NoRights()})
+	if !verificationRequestNotSent(err) {
+		t.Fatalf("TLS handshake reset was not recognized as pre-dispatch: %T %v", err, err)
+	}
+}
+
 func TestVerificationNetworkRecovery(t *testing.T) {
 	reset := errors.New("telebot: Post: read: connection reset by peer")
 	for _, tc := range []struct {

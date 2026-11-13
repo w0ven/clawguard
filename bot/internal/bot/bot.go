@@ -30,22 +30,22 @@ import (
 )
 
 type Service struct {
-	cfg                config.Config
-	logger             *zap.Logger
-	queries            *store.Queries
-	redis              redis.Cmdable
-	casClient          *casclient.Client
-	aiProviders        ai.ProviderRegistry
-	aiModels           ai.ModelRegistry
-	aiResolver         *ai.Resolver
-	aiModerator        *ai.Moderator
-	adkiller           *adkiller.Client
-	bot                *tele.Bot
-	sender             telegramSender
-	sendLimiter        *SendLimiter
-	lifecycleCtx       context.Context
-	lifecycleCancel    context.CancelFunc
-	wg                 sync.WaitGroup
+	cfg                        config.Config
+	logger                     *zap.Logger
+	queries                    *store.Queries
+	redis                      redis.Cmdable
+	casClient                  *casclient.Client
+	aiProviders                ai.ProviderRegistry
+	aiModels                   ai.ModelRegistry
+	aiResolver                 *ai.Resolver
+	aiModerator                *ai.Moderator
+	adkiller                   *adkiller.Client
+	bot                        *tele.Bot
+	sender                     telegramSender
+	sendLimiter                *SendLimiter
+	lifecycleCtx               context.Context
+	lifecycleCancel            context.CancelFunc
+	wg                         sync.WaitGroup
 	verifyBtn                  tele.Btn
 	verifyMathBtn              tele.Btn
 	verifyRandBtn              tele.Btn
@@ -55,26 +55,26 @@ type Service struct {
 	appealDecisionHandler      func(ctx context.Context, adminTelegramID, appealID int64, action string) (*store.AppealReview, string, error)
 	requireUsernamePromptUntil sync.Map
 	startedAt                  time.Time
-	lastUpdateAt       atomic.Value
-	lastAIOKAt         atomic.Value
-	lastAIFailAt       atomic.Value
-	lastAIError        atomic.Value
-	bioCheckInFlight   sync.Map
-	userActionLocks    sync.Map
-	messageDeleteLocks sync.Map
-	joinEventLocks     sync.Map
-	updateExecutions   sync.Map
-	membershipSessions sync.Map
-	authorizedGroups   sync.Map
-	authorizedGroupAt  sync.Map
-	policySnapshots    sync.Map
-	policySnapshotAt   sync.Map
-	chatAdmins         sync.Map
-	systemState        atomic.Value
-	systemStateAt      atomic.Int64
-	runtimeGuardsOnce  sync.Once
-	joinProtector      *joinProtector
-	cleanupBreaker     *telegramCleanupBreaker
+	lastUpdateAt               atomic.Value
+	lastAIOKAt                 atomic.Value
+	lastAIFailAt               atomic.Value
+	lastAIError                atomic.Value
+	bioCheckInFlight           sync.Map
+	userActionLocks            sync.Map
+	messageDeleteLocks         sync.Map
+	joinEventLocks             sync.Map
+	updateExecutions           sync.Map
+	membershipSessions         sync.Map
+	authorizedGroups           sync.Map
+	authorizedGroupAt          sync.Map
+	policySnapshots            sync.Map
+	policySnapshotAt           sync.Map
+	chatAdmins                 sync.Map
+	systemState                atomic.Value
+	systemStateAt              atomic.Int64
+	runtimeGuardsOnce          sync.Once
+	joinProtector              *joinProtector
+	cleanupBreaker             *telegramCleanupBreaker
 
 	verificationStartBot *tele.Bot
 }
@@ -219,6 +219,7 @@ func New(ctx context.Context, cfg config.Config, logger *zap.Logger, queries *st
 	b, err := tele.NewBot(tele.Settings{
 		Token:       cfg.BotToken,
 		Synchronous: true,
+		Client:      telegramBotHTTPClient(),
 		OnError: func(err error, c tele.Context) {
 			if c != nil && c.Message() != nil && c.Message().Chat != nil {
 				logger.Error("telegram handler error", zap.Error(err), zap.Int64("chat_id", c.Message().Chat.ID), zap.Int("message_id", c.Message().ID))
@@ -241,16 +242,16 @@ func New(ctx context.Context, cfg config.Config, logger *zap.Logger, queries *st
 	lifecycleCtx, lifecycleCancel := context.WithCancel(context.Background())
 
 	svc := &Service{
-		cfg:             cfg,
-		logger:          logger,
-		queries:         queries,
-		redis:           rdb,
-		casClient:       casclient.New(nil, rdb, cfg.CASAPIKey),
-		bot:             b,
-		sender:          b,
-		sendLimiter:     NewSendLimiter(),
-		lifecycleCtx:    lifecycleCtx,
-		lifecycleCancel: lifecycleCancel,
+		cfg:                cfg,
+		logger:             logger,
+		queries:            queries,
+		redis:              rdb,
+		casClient:          casclient.New(nil, rdb, cfg.CASAPIKey),
+		bot:                b,
+		sender:             b,
+		sendLimiter:        NewSendLimiter(),
+		lifecycleCtx:       lifecycleCtx,
+		lifecycleCancel:    lifecycleCancel,
 		verifyBtn:          verifyBtn,
 		verifyMathBtn:      verifyMathBtn,
 		verifyRandBtn:      verifyRandBtn,
@@ -258,8 +259,8 @@ func New(ctx context.Context, cfg config.Config, logger *zap.Logger, queries *st
 		requireUsernameBtn: requireUsernameBtn,
 		appealAdminBtn:     appealAdminBtn,
 		joinProtector:      newJoinProtector(),
-		cleanupBreaker:  newTelegramCleanupBreaker(),
-		startedAt:       time.Now().UTC(),
+		cleanupBreaker:     newTelegramCleanupBreaker(),
+		startedAt:          time.Now().UTC(),
 
 		verificationStartBot: startBot,
 	}

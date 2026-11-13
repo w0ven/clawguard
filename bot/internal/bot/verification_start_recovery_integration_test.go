@@ -24,6 +24,7 @@ type verificationStartFaultTransport struct {
 	base          *telegramMockTransport
 	restrictCalls int
 	mode, role    string
+	inspectFail   bool
 	userID        int64
 	afterDial     func()
 	afterSuccess  func()
@@ -46,10 +47,10 @@ func (tr *verificationStartFaultTransport) RoundTrip(req *http.Request) (*http.R
 			time.Sleep(30 * time.Millisecond)
 			return nil, &net.OpError{Op: "dial", Net: "tcp", Err: context.DeadlineExceeded}
 		}
-		if mode == "read" || (mode == "dial-then-read" && call > 1) {
-			return nil, &net.OpError{Op: "read", Net: "tcp", Err: context.DeadlineExceeded}
+		if mode == "read" || (mode == "read-once" && call == 1) || (mode == "dial-then-read" && call > 1) {
+			return nil, &net.OpError{Op: "read", Net: "tcp", Err: errors.New("connection reset by peer")}
 		}
-		if mode == "eof" {
+		if mode == "eof" || (mode == "eof-once" && call == 1) {
 			return nil, io.EOF
 		}
 		if tr.afterSuccess != nil {
@@ -57,9 +58,16 @@ func (tr *verificationStartFaultTransport) RoundTrip(req *http.Request) (*http.R
 		}
 	}
 	if method == "getChatMember" {
+		if tr.inspectFail {
+			return nil, &net.OpError{Op: "read", Net: "tcp", Err: errors.New("connection reset by peer")}
+		}
 		role := tr.role
 		if role == "" {
 			role = "member"
+		}
+		if role == "verification-restricted" {
+			body := fmt.Sprintf(`{"ok":true,"result":{"user":{"id":%d,"is_bot":false,"first_name":"test"},"status":"restricted","is_member":true,"until_date":0,"can_send_messages":false,"can_send_media_messages":false,"can_send_audios":false,"can_send_documents":false,"can_send_photos":false,"can_send_videos":false,"can_send_video_notes":false,"can_send_voice_notes":false,"can_send_polls":false,"can_send_other_messages":false,"can_add_web_page_previews":false,"can_invite_users":false,"can_change_info":false,"can_pin_messages":false,"can_manage_topics":false}}`, tr.userID)
+			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
 		}
 		body := fmt.Sprintf(`{"ok":true,"result":{"user":{"id":%d,"is_bot":false,"first_name":"test"},"status":%q,"is_member":true}}`, tr.userID, role)
 		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
@@ -164,21 +172,68 @@ func TestVerificationStartDialProtectsStateIntegration(t *testing.T) {
 	}
 }
 
+func TestVerificationStartTransientReadRecoveryIntegration(t *testing.T) {
+	t.Run("read reset with member still unrestricted retries and succeeds", func(t *testing.T) {
+		ctx := context.Background()
+		s, q, tr, _ := setupStartRecovery(t, "read-once", "member", 231)
+		chat, user := &tele.Chat{ID: -90001}, &tele.User{ID: 231, FirstName: "test"}
+		if err := s.startVerificationAt(chat, user, nil, "u231", time.Time{}); err != nil {
+			t.Fatal(err)
+		}
+		if tr.calls() != 2 {
+			t.Fatalf("restrict calls=%d want 2", tr.calls())
+		}
+		state, result, err := q.CleanupDispatchState(ctx, membershipCleanupKey("verification_start", chat.ID, user.ID, "u231"))
+		if err != nil || state != "completed" || result != "restricted" {
+			t.Fatalf("dispatch %s %s %v", state, result, err)
+		}
+		if _, err := q.GetPendingVerification(ctx, store.GetPendingVerificationParams{ChatID: chat.ID, UserID: user.ID}); err != nil {
+			t.Fatalf("missing pending verification: %v", err)
+		}
+	})
+
+	t.Run("read reset when restriction already applied confirms without duplicate call", func(t *testing.T) {
+		ctx := context.Background()
+		s, q, tr, _ := setupStartRecovery(t, "read", "verification-restricted", 232)
+		chat, user := &tele.Chat{ID: -90001}, &tele.User{ID: 232, FirstName: "test"}
+		if err := s.startVerificationAt(chat, user, nil, "u232", time.Time{}); err != nil {
+			t.Fatal(err)
+		}
+		if tr.calls() != 1 {
+			t.Fatalf("restrict calls=%d want 1", tr.calls())
+		}
+		state, result, err := q.CleanupDispatchState(ctx, membershipCleanupKey("verification_start", chat.ID, user.ID, "u232"))
+		if err != nil || state != "completed" || result != "restricted" {
+			t.Fatalf("dispatch %s %s %v", state, result, err)
+		}
+		if _, err := q.GetPendingVerification(ctx, store.GetPendingVerificationParams{ChatID: chat.ID, UserID: user.ID}); err != nil {
+			t.Fatalf("missing pending verification: %v", err)
+		}
+	})
+}
+
 func TestVerificationStartUnknownNeverRetriesIntegration(t *testing.T) {
-	for _, mode := range []string{"read", "eof", "dial-then-read"} {
-		t.Run(mode, func(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		mode        string
+		inspectFail bool
+		wantCalls   int
+	}{
+		{"read_inspect_failed", "read", true, 1},
+		{"eof_inspect_failed", "eof", true, 1},
+		{"persistent_read_bounded", "read", false, 3},
+		{"dial_then_persistent_read", "dial-then-read", false, 3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
-			s, q, tr, base := setupStartRecovery(t, mode, "member", 204)
+			s, q, tr, base := setupStartRecovery(t, tc.mode, "member", 204)
+			tr.inspectFail = tc.inspectFail
 			chat, user := &tele.Chat{ID: -90001}, &tele.User{ID: 204}
 			if err := s.startVerificationAt(chat, user, nil, "u204", time.Time{}); err != nil {
 				t.Fatal(err)
 			}
-			wantCalls := 1
-			if mode == "dial-then-read" {
-				wantCalls = 2
-			}
-			if tr.calls() != wantCalls {
-				t.Fatalf("calls=%d", tr.calls())
+			if tr.calls() != tc.wantCalls {
+				t.Fatalf("calls=%d want %d", tr.calls(), tc.wantCalls)
 			}
 			state, _, err := q.CleanupDispatchState(ctx, membershipCleanupKey("verification_start", chat.ID, user.ID, "u204"))
 			if err != nil || state != "dispatched" {
@@ -192,7 +247,7 @@ func TestVerificationStartUnknownNeverRetriesIntegration(t *testing.T) {
 			if err := restarted.startVerificationAt(chat, user, nil, "u204", time.Time{}); err != nil {
 				t.Fatal(err)
 			}
-			if tr.calls() != wantCalls || countString(base.Methods(), "sendMessage") != 1 {
+			if tr.calls() != tc.wantCalls || countString(base.Methods(), "sendMessage") != 1 {
 				t.Fatalf("calls %d / %v", tr.calls(), base.Methods())
 			}
 		})

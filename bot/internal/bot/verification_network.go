@@ -2,6 +2,7 @@ package bot
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -17,29 +18,100 @@ import (
 	tele "gopkg.in/telebot.v3"
 )
 
-func verificationStartHTTPClient() *http.Client {
-	transport := &http.Transport{
-		Proxy:                 http.ProxyFromEnvironment,
-		ForceAttemptHTTP2:     true,
-		MaxIdleConns:          100,
-		IdleConnTimeout:       90 * time.Second,
-		TLSHandshakeTimeout:   10 * time.Second,
-		ExpectContinueTimeout: time.Second,
-	}
-	// The dialer's own deadline must expire before Client.Timeout; the latter
-	// can discard the typed net.OpError and would then be correctly treated as
-	// an unknown outcome rather than a proven pre-dispatch failure.
-	transport.DialContext = (&net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}).DialContext
-	return &http.Client{Transport: transport, Timeout: 8 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+type verificationPreDispatchError struct {
+	cause error
 }
 
-// The dedicated start client never follows redirects. A typed dial error on
-// that client therefore proves this POST did not reach Telegram. Timeouts,
-// EOF, TLS and read/write errors by themselves never establish this fact.
+func (e *verificationPreDispatchError) Error() string { return e.cause.Error() }
+func (e *verificationPreDispatchError) Unwrap() error { return e.cause }
+
+func newTelegramHTTPTransport(dialTimeout, tlsHandshakeTimeout, idleConnTimeout time.Duration) *http.Transport {
+	dialer := &net.Dialer{
+		Timeout:   dialTimeout,
+		KeepAlive: 30 * time.Second,
+	}
+	return &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		DialContext:           dialer.DialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   16,
+		IdleConnTimeout:       idleConnTimeout,
+		TLSHandshakeTimeout:   tlsHandshakeTimeout,
+		ExpectContinueTimeout: time.Second,
+		HTTP2: &http.HTTP2Config{
+			SendPingTimeout: 30 * time.Second,
+			PingTimeout:     10 * time.Second,
+		},
+	}
+}
+
+func telegramBotHTTPClient() *http.Client {
+	return &http.Client{
+		Transport: newTelegramHTTPTransport(10*time.Second, 10*time.Second, 5*time.Minute),
+		Timeout:   time.Minute,
+	}
+}
+
+func verificationStartHTTPClient() *http.Client {
+	dialer := &net.Dialer{
+		Timeout:   5 * time.Second,
+		KeepAlive: 30 * time.Second,
+	}
+	transport := newTelegramHTTPTransport(5*time.Second, 5*time.Second, 5*time.Minute)
+	// Wrap both TCP dial and TLS handshake inside DialTLSContext: any reset,
+	// EOF, or timeout before HandshakeContext completes is guaranteed to have
+	// occurred before a single HTTP request byte was transmitted.
+	transport.DialTLSContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		rawConn, err := dialer.DialContext(ctx, network, addr)
+		if err != nil {
+			return nil, &verificationPreDispatchError{cause: err}
+		}
+		host, _, splitErr := net.SplitHostPort(addr)
+		if splitErr != nil {
+			host = addr
+		}
+		tlsCfg := &tls.Config{
+			ServerName: host,
+			NextProtos: []string{"h2", "http/1.1"},
+		}
+		if transport.TLSClientConfig != nil {
+			tlsCfg = transport.TLSClientConfig.Clone()
+			if tlsCfg.ServerName == "" {
+				tlsCfg.ServerName = host
+			}
+			if len(tlsCfg.NextProtos) == 0 {
+				tlsCfg.NextProtos = []string{"h2", "http/1.1"}
+			}
+		}
+		tlsConn := tls.Client(rawConn, tlsCfg)
+		hsCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		if err := tlsConn.HandshakeContext(hsCtx); err != nil {
+			_ = rawConn.Close()
+			return nil, &verificationPreDispatchError{cause: err}
+		}
+		return tlsConn, nil
+	}
+	return &http.Client{
+		Transport:     transport,
+		Timeout:       8 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
+}
+
+// The dedicated start client never follows redirects. A typed pre-dispatch error
+// (TCP dial or TLS handshake failure) on that client proves this POST did not
+// reach Telegram. Post-handshake read/write timeouts and resets are handled via
+// explicit getChatMember state inspection instead.
 func verificationRequestNotSent(err error) bool {
 	var u *url.Error
 	if !errors.As(err, &u) || errors.Is(err, context.Canceled) {
 		return false
+	}
+	var pre *verificationPreDispatchError
+	if errors.As(u.Err, &pre) {
+		return true
 	}
 	var op *net.OpError
 	return errors.As(u.Err, &op) && op.Op == "dial" && (op.Net == "tcp" || op.Net == "tcp4" || op.Net == "tcp6")
@@ -72,7 +144,7 @@ func (s *Service) verificationStartRecoveryAllowed(ctx context.Context, chatID, 
 
 // Only a newly claimed verification_start calls this function. Old dispatched
 // records never enter it. Each dedicated HTTP call is bounded to eight seconds,
-// with at most three restrict calls and two reads; no new call is begun after
+// with at most three restrict calls and three reads; no new call is begun after
 // 35 seconds, so the transport bounds the total to at most 43 seconds plus DB.
 func (s *Service) restrictVerificationStartWithRecovery(ctx context.Context, chat *tele.Chat, user *tele.User, member *tele.ChatMember, generation string) error {
 	b := s.verificationStartBot
@@ -87,37 +159,80 @@ func (s *Service) restrictVerificationStartWithRecovery(ctx context.Context, cha
 	var last error
 	for attempt := 0; attempt < 3; attempt++ {
 		last = telegramConfirmedRestrict(b, chat, member)
-		if last == nil || !verificationRequestNotSent(last) {
+		if last == nil {
+			return nil
+		}
+		preDispatch := verificationRequestNotSent(last)
+		if !preDispatch && !transientVerificationNetworkError(last) {
 			return last
 		}
-		if attempt == 2 || generation == "" || time.Since(started) >= 35*time.Second {
+		if generation == "" || time.Since(started) >= 35*time.Second {
+			if preDispatch {
+				return &verificationStartNotSentError{last}
+			}
+			return last
+		}
+		if preDispatch && attempt == 2 {
 			break
 		}
 		if err := waitVerificationRetry(ctx, time.Duration(attempt+1)*300*time.Millisecond); err != nil {
-			return &verificationStartNotSentError{errors.Join(last, err)}
+			if preDispatch {
+				return &verificationStartNotSentError{errors.Join(last, err)}
+			}
+			return errors.Join(last, err)
 		}
 		if time.Since(started) >= 35*time.Second {
-			break
+			if preDispatch {
+				break
+			}
+			return last
 		}
 		current, err := s.membershipSessionCurrent(ctx, chat.ID, user.ID, generation)
 		if err != nil || !current {
-			return &verificationStartNotSentError{errors.Join(last, errors.New("membership changed"), err)}
+			if preDispatch {
+				return &verificationStartNotSentError{errors.Join(last, errors.New("membership changed"), err)}
+			}
+			return errors.Join(last, errors.New("membership changed"), err)
 		}
 		allowed, err := s.verificationStartRecoveryAllowed(ctx, chat.ID, user.ID)
 		if err != nil || !allowed {
-			return &verificationStartNotSentError{errors.Join(last, errors.New("action, exemption or independent punishment state"), err)}
+			if preDispatch {
+				return &verificationStartNotSentError{errors.Join(last, errors.New("action, exemption or independent punishment state"), err)}
+			}
+			return errors.Join(last, errors.New("action, exemption or independent punishment state"), err)
 		}
 		actual, err := b.ChatMemberOf(chat, user)
-		if err != nil || actual == nil || actual.User == nil || actual.User.ID != user.ID || actual.Role != tele.Member {
-			return &verificationStartNotSentError{errors.Join(last, errors.New("member absent, privileged, restricted, or unavailable"), err)}
+		if err != nil || actual == nil || actual.User == nil || actual.User.ID != user.ID {
+			if preDispatch {
+				return &verificationStartNotSentError{errors.Join(last, errors.New("member absent, privileged, restricted, or unavailable"), err)}
+			}
+			return errors.Join(last, errors.New("member unavailable after transient network error"), err)
 		}
 		allowed, err = s.verificationStartRecoveryAllowed(ctx, chat.ID, user.ID)
 		if err != nil || !allowed || ctx.Err() != nil {
-			return &verificationStartNotSentError{errors.Join(last, errors.New("action, exemption or independent punishment state"), err, ctx.Err())}
+			if preDispatch {
+				return &verificationStartNotSentError{errors.Join(last, errors.New("action, exemption or independent punishment state"), err, ctx.Err())}
+			}
+			return errors.Join(last, errors.New("action, exemption or independent punishment state"), err, ctx.Err())
 		}
 		current, err = s.membershipSessionCurrent(ctx, chat.ID, user.ID, generation)
 		if err != nil || !current || time.Since(started) >= 35*time.Second {
-			return &verificationStartNotSentError{errors.Join(last, errors.New("membership or action state changed"), err)}
+			if preDispatch {
+				return &verificationStartNotSentError{errors.Join(last, errors.New("membership or action state changed"), err)}
+			}
+			return errors.Join(last, errors.New("membership or action state changed"), err)
+		}
+		if !preDispatch && verificationRestrictionApplied(actual) {
+			return nil
+		}
+		if actual.Role != tele.Member {
+			if preDispatch {
+				return &verificationStartNotSentError{errors.Join(last, errors.New("member absent, privileged, restricted, or unavailable"))}
+			}
+			return errors.Join(last, errors.New("member absent, privileged, or independently restricted"))
+		}
+		if attempt == 2 {
+			return last
 		}
 	}
 	return &verificationStartNotSentError{last}
