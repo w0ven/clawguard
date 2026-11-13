@@ -46,10 +46,25 @@ func newTelegramHTTPTransport(dialTimeout, tlsHandshakeTimeout, idleConnTimeout 
 	}
 }
 
+var initialHTTPDefaultTransport = http.DefaultTransport
+
+type telegramDefaultAwareTransport struct {
+	tuned *http.Transport
+}
+
+func (t telegramDefaultAwareTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if current := http.DefaultTransport; current != nil && current != initialHTTPDefaultTransport {
+		return current.RoundTrip(req)
+	}
+	return t.tuned.RoundTrip(req)
+}
+
 func telegramBotHTTPClient() *http.Client {
 	return &http.Client{
-		Transport: newTelegramHTTPTransport(10*time.Second, 10*time.Second, 5*time.Minute),
-		Timeout:   time.Minute,
+		Transport: telegramDefaultAwareTransport{
+			tuned: newTelegramHTTPTransport(10*time.Second, 10*time.Second, 5*time.Minute),
+		},
+		Timeout: time.Minute,
 	}
 }
 
