@@ -790,6 +790,29 @@ func (m *Moderator) cacheKey(input CheckInput) string {
 	return prefix + ":text:" + hex.EncodeToString(sum[:])
 }
 
+// ClearBioCacheForChat drops cached bio verdict entries for the given chat so
+// that a fresh profile check runs after an administrator approves an appeal.
+func (m *Moderator) ClearBioCacheForChat(ctx context.Context, chatID int64) {
+	if m == nil || m.redis == nil || chatID == 0 {
+		return
+	}
+	pattern := "ai:cache:" + strconv.FormatInt(chatID, 10) + ":bio:*"
+	var cursor uint64
+	for {
+		keys, next, err := m.redis.Scan(ctx, cursor, pattern, 100).Result()
+		if err != nil {
+			return
+		}
+		if len(keys) > 0 {
+			_ = m.redis.Del(ctx, keys...).Err()
+		}
+		cursor = next
+		if cursor == 0 {
+			break
+		}
+	}
+}
+
 func (m *Moderator) policyFingerprint(scene string, policy config.AIPolicy) string {
 	rules := policy.MessageRules
 	if normalizeScene(scene) == "bio" {

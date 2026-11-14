@@ -23,6 +23,7 @@ type ModerationCaseInput struct {
 
 type ModerationNotification struct {
 	ID, CaseID, UserID, ChatID                       int64
+	SourceKind                                       string
 	GroupTitle, Action, Result, Explanation, Summary string
 	EventKind, EventText                             string
 	AppealID                                         int64
@@ -35,14 +36,12 @@ type ModerationNotification struct {
 var caseEmail = regexp.MustCompile(`(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b`)
 var casePhone = regexp.MustCompile(`\b\+?[0-9][0-9 -]{7,}[0-9]\b`)
 var caseURLQuery = regexp.MustCompile(`(https?://[^\s?#]+)[?#][^\s]*`)
-var caseMention = regexp.MustCompile(`@[A-Za-z0-9_]{5,}`)
 
 func caseSummary(s string, limit int) string {
 	s = redact.Text(strings.Join(strings.Fields(s), " "))
 	s = caseEmail.ReplaceAllString(s, "[邮箱]")
 	s = casePhone.ReplaceAllString(s, "[号码]")
 	s = caseURLQuery.ReplaceAllString(s, "$1")
-	s = caseMention.ReplaceAllString(s, "[用户]")
 	if utf8.RuneCountInString(s) > limit {
 		s = string([]rune(s)[:limit]) + "…"
 	}
@@ -79,7 +78,7 @@ func (q *Queries) RecordModerationCase(ctx context.Context, v ModerationCaseInpu
  ), notification AS (
   INSERT INTO moderation_notifications(case_id,chat_id,user_id,state,session_epoch)
   SELECT inserted.id,inserted.chat_id,inserted.user_id,CASE WHEN s.is_reachable THEN 'pending' ELSE 'unreachable' END,s.notification_epoch FROM inserted LEFT JOIN telegram_private_sessions s ON s.user_id=inserted.user_id
- ) SELECT id FROM inserted`, v.SourceKey, v.SourceKind, v.SourceID, v.ChatID, v.UserID, v.Action, v.Result, caseSummary(v.Explanation, 160), caseSummary(v.Summary, 240), []byte(v.Ownership)).Scan(&id)
+ ) SELECT id FROM inserted`, v.SourceKey, v.SourceKind, v.SourceID, v.ChatID, v.UserID, v.Action, v.Result, caseSummary(v.Explanation, 240), caseSummary(v.Summary, 400), []byte(v.Ownership)).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return 0, nil
 	}
@@ -105,7 +104,7 @@ func (q *Queries) ClaimModerationNotifications(ctx context.Context, token string
  ORDER BY n.next_attempt_at,n.id LIMIT $2 FOR UPDATE OF n SKIP LOCKED
  ), claimed AS (
  UPDATE moderation_notifications n SET state='leased',lease_token=$1,lease_until=now()+interval '1 minute',updated_at=now() FROM picked p WHERE n.id=p.id RETURNING n.*
- ) SELECT n.id,n.case_id,n.user_id,c.chat_id,COALESCE(g.title,''),c.action,c.result,c.explanation,c.summary,n.attempts,n.lease_token,n.expires_at,n.event_kind,n.event_text,COALESCE(n.appeal_id,0),COALESCE(a.decision,''),COALESCE(a.status,'') FROM claimed n JOIN moderation_cases c ON c.id=n.case_id LEFT JOIN groups g ON g.chat_id=c.chat_id LEFT JOIN appeals a ON a.id=n.appeal_id`, token, limit)
+ ) SELECT n.id,n.case_id,n.user_id,c.chat_id,c.source_kind,COALESCE(g.title,''),c.action,c.result,c.explanation,c.summary,n.attempts,n.lease_token,n.expires_at,n.event_kind,n.event_text,COALESCE(n.appeal_id,0),COALESCE(a.decision,''),COALESCE(a.status,'') FROM claimed n JOIN moderation_cases c ON c.id=n.case_id LEFT JOIN groups g ON g.chat_id=c.chat_id LEFT JOIN appeals a ON a.id=n.appeal_id`, token, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -113,7 +112,7 @@ func (q *Queries) ClaimModerationNotifications(ctx context.Context, token string
 	var out []ModerationNotification
 	for rows.Next() {
 		var n ModerationNotification
-		if err = rows.Scan(&n.ID, &n.CaseID, &n.UserID, &n.ChatID, &n.GroupTitle, &n.Action, &n.Result, &n.Explanation, &n.Summary, &n.Attempts, &n.LeaseToken, &n.ExpiresAt, &n.EventKind, &n.EventText, &n.AppealID, &n.AppealDecision, &n.AppealStatus); err != nil {
+		if err = rows.Scan(&n.ID, &n.CaseID, &n.UserID, &n.ChatID, &n.SourceKind, &n.GroupTitle, &n.Action, &n.Result, &n.Explanation, &n.Summary, &n.Attempts, &n.LeaseToken, &n.ExpiresAt, &n.EventKind, &n.EventText, &n.AppealID, &n.AppealDecision, &n.AppealStatus); err != nil {
 			return nil, err
 		}
 		out = append(out, n)

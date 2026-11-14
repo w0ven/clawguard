@@ -7,7 +7,12 @@ import { Card, CardBody, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { apiFetch } from "@/lib/api";
 
-type Review = { id: number; case_id: number; chat_id: number; user_id: number; group_title: string; status: string; decision: string | null; public_note: string; execution_result: string; reason: string; reference_url: string; turnstile_verified: boolean; hcaptcha_verified: boolean; action: string; case_result: string; explanation: string; summary: string; created_at: string; case_notification_state: string; result_notification_state: string };
+type Review = { id: number; case_id: number; chat_id: number; user_id: number; username?: string; first_name?: string; last_name?: string; group_title: string; status: string; decision: string | null; public_note: string; execution_result: string; reason: string; reference_url: string; turnstile_verified: boolean; hcaptcha_verified: boolean; source_kind?: string; action: string; case_result: string; explanation: string; summary: string; created_at: string; case_notification_state: string; result_notification_state: string };
+
+function cleanTelegramUsername(raw?: string) {
+  const s = (raw || "").trim().replace(/^@+/, "");
+  return /^[A-Za-z0-9_]{4,64}$/.test(s) ? s : "";
+}
 type Group = { chat_id: number; title: string };
 const status: Record<string, string> = { pending: "待审核", upheld: "维持原处理", executing: "处理中", failed: "处理失败，可重试", manual_review: "通过，需人工核查", completed: "处理完成" };
 const actions: Record<string, string> = { ban: "封禁", mute: "禁言", mute_5m: "禁言", mute_1h: "禁言", kick: "移出群聊", warn: "警告", delete: "删除消息", delete_warn: "删除消息并警告", delete_and_warn: "删除消息并警告", delete_mute: "删除消息并禁言", delete_ban: "删除消息并封禁", unban: "解封请求", unmute: "解除禁言" };
@@ -123,7 +128,7 @@ export default function AppealsPage() {
                 </Badge>
               </div>
               <p className="mt-1 text-xs text-[var(--text)]">
-                CASE-{r.case_id} · {status[r.status] || r.status} · {new Date(r.created_at).toLocaleString("zh-CN")}
+                CASE-{r.case_id} · {[r.first_name, r.last_name].filter(Boolean).join(" ") || `ID ${r.user_id}`}{cleanTelegramUsername(r.username) ? ` (@${cleanTelegramUsername(r.username)})` : ""} · {status[r.status] || r.status} · {new Date(r.created_at).toLocaleString("zh-CN")}
               </p>
               <p className="mt-1 text-xs text-[var(--text-muted)]">
                 处理通知：{delivery[r.case_notification_state] || "无"} · 结果通知：{delivery[r.result_notification_state] || "尚无"}
@@ -152,14 +157,31 @@ export default function AppealsPage() {
             </CardHeader>
             <CardBody className="space-y-3 text-sm">
               <div className="grid gap-1.5 rounded-2xl bg-[var(--surface-2)] p-4 text-xs sm:grid-cols-2">
-                <p>群：{item.group_title} ({item.chat_id}) · 用户：{item.user_id} · CASE-{item.case_id}</p>
+                <p>
+                  群：{item.group_title} ({item.chat_id}) · CASE-{item.case_id}
+                </p>
+                <p className="flex flex-wrap items-center gap-1.5">
+                  <span>
+                    申诉人：{[item.first_name, item.last_name].filter(Boolean).join(" ") || "未记录昵称"} ({item.user_id})
+                  </span>
+                  {cleanTelegramUsername(item.username) && (
+                    <a
+                      href={`https://t.me/${cleanTelegramUsername(item.username)}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="font-medium text-[var(--accent)] underline"
+                    >
+                      @{cleanTelegramUsername(item.username)}（查看资料）
+                    </a>
+                  )}
+                </p>
                 <p>原拟处理：{actions[item.action] || "群规则处理"} · 实际结果：{caseResults[item.case_result] || "待确认"}</p>
-                <p>处理说明：{item.explanation || "无"}</p>
                 <p>两项安全验证：{item.turnstile_verified && item.hcaptcha_verified ? "均已通过" : "未全部通过"}</p>
-                <p>处理通知：{delivery[item.case_notification_state] || "无"} · 结果通知：{delivery[item.result_notification_state] || "尚无"}</p>
+                <p className="sm:col-span-2">处理说明：{item.explanation || "无"}</p>
+                <p className="sm:col-span-2">处理通知：{delivery[item.case_notification_state] || "无"} · 结果通知：{delivery[item.result_notification_state] || "尚无"}</p>
               </div>
               <p className="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-3 font-mono text-xs whitespace-pre-wrap">
-                消息摘要：{item.summary || "无"}
+                {item.source_kind === "join_check" || item.source_kind === "profile_event" || item.summary.startsWith("个人简介：") ? "触发简介/原文" : "消息摘要"}：{item.summary || "无"}
               </p>
               <p className="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-3 text-xs whitespace-pre-wrap">
                 用户理由：{item.reason}

@@ -211,7 +211,7 @@ export default function AppealMiniPage() {
             )}
             {item.summary && (
               <p className="rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3 py-2 font-mono text-xs whitespace-pre-wrap">
-                原消息摘要：{item.summary}
+                {item.summary.startsWith("个人简介：") ? "触发简介/内容" : "原消息摘要"}：{item.summary}
               </p>
             )}
           </section>

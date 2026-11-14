@@ -57,6 +57,10 @@ func (s *Service) recordMessageModerationCase(ctx context.Context, msg *tele.Mes
 	if decisionID > 0 {
 		ownership["ai_decision_id"] = decisionID
 	}
+	customSummary := ""
+	if len(warningEvent) > 1 {
+		customSummary = warningEvent[1]
+	}
 	if len(warningEvent) > 0 && warningEvent[0] != "" {
 		id, err := s.queries.WarningForModerationEvent(ctx, warningEvent[0]+":warning", msg.Chat.ID, msg.Sender.ID)
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
@@ -71,6 +75,9 @@ func (s *Service) recordMessageModerationCase(ctx context.Context, msg *tele.Mes
 	// A forwarded message or quote can contain another person's private text.
 	if msg.Origin != nil || msg.OriginalSender != nil || msg.OriginalChat != nil || msg.OriginalSenderName != "" || msg.OriginalUnixtime != 0 || msg.ExternalReplyInfo != nil || msg.ReplyTo != nil {
 		summary = ""
+	}
+	if customSummary != "" {
+		summary = customSummary
 	}
 	_, err := s.queries.RecordModerationCase(ctx, store.ModerationCaseInput{SourceKey: fmt.Sprintf("%s:%s", sourceKind, sourceID), SourceKind: sourceKind, SourceID: sourceID, ChatID: msg.Chat.ID, UserID: msg.Sender.ID, Action: action, Result: result, Explanation: explanation, Summary: summary, Ownership: raw})
 	if err != nil && s.logger != nil {

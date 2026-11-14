@@ -14,6 +14,9 @@ type AppealReview struct {
 	CaseID                  int64           `json:"case_id"`
 	ChatID                  int64           `json:"chat_id"`
 	UserID                  int64           `json:"user_id"`
+	Username                string          `json:"username,omitempty"`
+	FirstName               string          `json:"first_name,omitempty"`
+	LastName                string          `json:"last_name,omitempty"`
 	GroupTitle              string          `json:"group_title"`
 	Status                  string          `json:"status"`
 	Decision                *string         `json:"decision"`
@@ -26,6 +29,7 @@ type AppealReview struct {
 	ReferenceURL            string          `json:"reference_url"`
 	TurnstileVerified       bool            `json:"turnstile_verified"`
 	HcaptchaVerified        bool            `json:"hcaptcha_verified"`
+	SourceKind              string          `json:"source_kind"`
 	Action                  string          `json:"action"`
 	CaseResult              string          `json:"case_result"`
 	Explanation             string          `json:"explanation"`
@@ -36,10 +40,10 @@ type AppealReview struct {
 	Version                 int             `json:"version"`
 }
 
-const appealReviewSelect = `SELECT a.id,a.case_id,a.chat_id,a.user_id,COALESCE(g.title,''),a.status,a.decision,a.public_note,a.execution_result,a.reviewer_id,a.reason,a.reference_url,a.turnstile_verified,a.hcaptcha_verified,c.action,c.result,c.explanation,c.summary,c.ownership,a.created_at,a.updated_at,a.review_version,COALESCE((SELECT n.state FROM moderation_notifications n WHERE n.case_id=a.case_id AND n.event_kind='moderation_case' LIMIT 1),''),COALESCE((SELECT n.state FROM moderation_notifications n WHERE n.appeal_id=a.id AND n.event_kind='appeal_result' ORDER BY n.event_version DESC LIMIT 1),'') FROM appeals a JOIN moderation_cases c ON c.id=a.case_id LEFT JOIN groups g ON g.chat_id=a.chat_id `
+const appealReviewSelect = `SELECT a.id,a.case_id,a.chat_id,a.user_id,COALESCE(ut.username,(SELECT ltrim(p.username,'@') FROM profile_check_logs p WHERE p.user_id=a.user_id AND COALESCE(p.username,'')<>'' ORDER BY p.id DESC LIMIT 1),''),COALESCE(ut.first_name,(SELECT p.user_name FROM profile_check_logs p WHERE p.user_id=a.user_id AND COALESCE(p.user_name,'')<>'' ORDER BY p.id DESC LIMIT 1),''),COALESCE(ut.last_name,''),COALESCE(g.title,''),a.status,a.decision,a.public_note,a.execution_result,a.reviewer_id,a.reason,a.reference_url,a.turnstile_verified,a.hcaptcha_verified,c.source_kind,c.action,c.result,c.explanation,c.summary,c.ownership,a.created_at,a.updated_at,a.review_version,COALESCE((SELECT n.state FROM moderation_notifications n WHERE n.case_id=a.case_id AND n.event_kind='moderation_case' LIMIT 1),''),COALESCE((SELECT n.state FROM moderation_notifications n WHERE n.appeal_id=a.id AND n.event_kind='appeal_result' ORDER BY n.event_version DESC LIMIT 1),'') FROM appeals a JOIN moderation_cases c ON c.id=a.case_id LEFT JOIN groups g ON g.chat_id=a.chat_id LEFT JOIN user_trust ut ON ut.chat_id=a.chat_id AND ut.user_id=a.user_id `
 
 func scanAppealReview(r pgx.Row) (v AppealReview, err error) {
-	err = r.Scan(&v.ID, &v.CaseID, &v.ChatID, &v.UserID, &v.GroupTitle, &v.Status, &v.Decision, &v.PublicNote, &v.ExecutionResult, &v.ReviewerID, &v.Reason, &v.ReferenceURL, &v.TurnstileVerified, &v.HcaptchaVerified, &v.Action, &v.CaseResult, &v.Explanation, &v.Summary, &v.Ownership, &v.CreatedAt, &v.UpdatedAt, &v.Version, &v.CaseNotificationState, &v.ResultNotificationState)
+	err = r.Scan(&v.ID, &v.CaseID, &v.ChatID, &v.UserID, &v.Username, &v.FirstName, &v.LastName, &v.GroupTitle, &v.Status, &v.Decision, &v.PublicNote, &v.ExecutionResult, &v.ReviewerID, &v.Reason, &v.ReferenceURL, &v.TurnstileVerified, &v.HcaptchaVerified, &v.SourceKind, &v.Action, &v.CaseResult, &v.Explanation, &v.Summary, &v.Ownership, &v.CreatedAt, &v.UpdatedAt, &v.Version, &v.CaseNotificationState, &v.ResultNotificationState)
 	return
 }
 func (q *Queries) GetAppealReview(ctx context.Context, id int64, global bool, scope []int64) (AppealReview, error) {

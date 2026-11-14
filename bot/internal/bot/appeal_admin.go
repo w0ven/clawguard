@@ -19,29 +19,56 @@ func (s *Service) SetAppealDecisionHandler(fn func(ctx context.Context, adminTel
 	s.appealDecisionHandler = fn
 }
 
+func formatAppealUserSummaryHTML(v store.AppealReview) (string, string) {
+	fullName := strings.TrimSpace(strings.Join([]string{strings.TrimSpace(v.FirstName), strings.TrimSpace(v.LastName)}, " "))
+	uname := strings.TrimPrefix(strings.TrimSpace(v.Username), "@")
+	cleanUname := ""
+	if uname != "" && !strings.ContainsAny(uname, "/?&# \t\r\n<>\"'") {
+		cleanUname = uname
+	}
+	var parts []string
+	if fullName != "" {
+		parts = append(parts, fmt.Sprintf("<a href=\"tg://user?id=%d\">%s</a>", v.UserID, htmlEscape(fullName)))
+	} else {
+		parts = append(parts, fmt.Sprintf("<a href=\"tg://user?id=%d\">点击打开主页</a>", v.UserID))
+	}
+	if cleanUname != "" {
+		parts = append(parts, fmt.Sprintf("<a href=\"https://t.me/%s\">@%s</a>", htmlEscape(cleanUname), htmlEscape(cleanUname)))
+	}
+	parts = append(parts, fmt.Sprintf("ID: <code>%d</code>", v.UserID))
+	return strings.Join(parts, " · "), cleanUname
+}
+
 func formatAppealAdminCardHTML(v store.AppealReview, publicBaseURL string) string {
 	groupLabel := strings.TrimSpace(v.GroupTitle)
 	if groupLabel == "" {
 		groupLabel = fmt.Sprintf("群组 %d", v.ChatID)
 	}
+	userHTML, _ := formatAppealUserSummaryHTML(v)
+	isProfileCase := v.SourceKind == "join_check" || v.SourceKind == "profile_event" || strings.HasPrefix(strings.TrimSpace(v.Summary), "个人简介：")
+
 	var b strings.Builder
 	fmt.Fprintf(&b, "📨 <b>新申诉待处理 · APL-%d</b>\n", v.ID)
-	fmt.Fprintf(&b, "群组：%s (<code>%d</code>)\n", htmlEscape(groupLabel), v.ChatID)
-	fmt.Fprintf(&b, "用户 ID：<code>%d</code>\n", v.UserID)
-	fmt.Fprintf(&b, "关联案件：<code>CASE-%d</code>（%s / %s）\n", v.CaseID, htmlEscape(v.Action), htmlEscape(v.CaseResult))
+	fmt.Fprintf(&b, "👥 <b>群组：</b>%s (<code>%d</code>)\n", htmlEscape(groupLabel), v.ChatID)
+	fmt.Fprintf(&b, "👤 <b>申诉人：</b>%s\n", userHTML)
+	fmt.Fprintf(&b, "🗂 <b>关联案件：</b><code>CASE-%d</code>（%s / %s）\n", v.CaseID, htmlEscape(v.Action), htmlEscape(v.CaseResult))
 	if strings.TrimSpace(v.Explanation) != "" {
-		fmt.Fprintf(&b, "原处理说明：%s\n", htmlEscape(v.Explanation))
+		fmt.Fprintf(&b, "⚖️ <b>被封/处理原因：</b>%s\n", htmlEscape(v.Explanation))
 	}
 	if strings.TrimSpace(v.Summary) != "" {
-		fmt.Fprintf(&b, "原消息摘要：%s\n", htmlEscape(truncateString(v.Summary, 200)))
+		label := "触发原文"
+		if isProfileCase {
+			label = "触发简介/原文"
+		}
+		fmt.Fprintf(&b, "📄 <b>%s：</b>\n<blockquote>%s</blockquote>\n", label, htmlEscape(truncateString(v.Summary, 360)))
 	}
-	fmt.Fprintf(&b, "\n📝 <b>申诉理由：</b>\n%s\n", htmlEscape(truncateString(v.Reason, 600)))
+	fmt.Fprintf(&b, "\n📝 <b>用户申诉理由：</b>\n<blockquote>%s</blockquote>\n", htmlEscape(truncateString(v.Reason, 600)))
 	if strings.TrimSpace(v.ReferenceURL) != "" {
-		fmt.Fprintf(&b, "🔗 补充链接：%s\n", htmlEscape(v.ReferenceURL))
+		fmt.Fprintf(&b, "🔗 <b>补充链接：</b>%s\n", htmlEscape(v.ReferenceURL))
 	}
 
 	if v.Status == "pending" {
-		b.WriteString("\n⏳ 状态：<b>待审核</b>（可直接点击下方按钮处理）")
+		b.WriteString("\n⏳ <b>状态：</b>待审核（可直接点击上方用户名查看资料，或点击下方按钮处理）")
 		return b.String()
 	}
 
@@ -55,7 +82,7 @@ func formatAppealAdminCardHTML(v store.AppealReview, publicBaseURL string) strin
 		fmt.Fprintf(&b, "💬 <b>处理说明：</b>%s\n", htmlEscape(v.PublicNote))
 	}
 	if v.ReviewerID != nil && *v.ReviewerID > 0 {
-		fmt.Fprintf(&b, "👤 审核管理员 ID：<code>%d</code>", *v.ReviewerID)
+		fmt.Fprintf(&b, "👤 <b>审核管理员 ID：</b><code>%d</code>", *v.ReviewerID)
 	}
 	return b.String()
 }
@@ -75,9 +102,15 @@ func (s *Service) appealAdminMarkup(v store.AppealReview) *tele.ReplyMarkup {
 		retryBtn := markup.Data("🔄 重试执行解除", unique, fmt.Sprintf("%d|retry", v.ID))
 		rows = append(rows, markup.Row(retryBtn))
 	}
+	var actionBtns []tele.Btn
+	if _, cleanUname := formatAppealUserSummaryHTML(v); cleanUname != "" {
+		actionBtns = append(actionBtns, markup.URL("👤 查看 @"+cleanUname, "https://t.me/"+cleanUname))
+	}
 	if base := strings.TrimRight(strings.TrimSpace(s.cfg.AdminWebBaseURL()), "/"); base != "" && strings.HasPrefix(base, "https://") {
-		urlBtn := markup.URL("🌐 后台查看详情", fmt.Sprintf("%s/appeals", base))
-		rows = append(rows, markup.Row(urlBtn))
+		actionBtns = append(actionBtns, markup.URL("🌐 后台查看详情", fmt.Sprintf("%s/appeals", base)))
+	}
+	if len(actionBtns) > 0 {
+		rows = append(rows, markup.Row(actionBtns...))
 	}
 	if len(rows) == 0 {
 		return &tele.ReplyMarkup{}

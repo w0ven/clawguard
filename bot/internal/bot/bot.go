@@ -1385,7 +1385,7 @@ func (s *Service) startAsyncVerificationChecks(chat *tele.Chat, user *tele.User,
 		profileStartedAt := time.Now()
 		profileCtx, profileCancel := context.WithTimeout(ctx, computeProfileCheckTimeout(policy))
 		profileCtx = context.WithValue(profileCtx, adKillerParentContextKey{}, parent)
-		matched, aiOutput, err := s.checkProfile(profileCtx, chat, user, policy)
+		matched, bioText, aiOutput, err := s.checkProfileWithBio(profileCtx, chat, user, policy)
 		profileCancel()
 		s.logger.Info("verification step completed",
 			zap.Int64("chat_id", chat.ID),
@@ -1407,13 +1407,17 @@ func (s *Service) startAsyncVerificationChecks(chat *tele.Chat, user *tele.User,
 					return
 				}
 			}
-			payload, _ := json.Marshal(map[string]string{"matched": matched})
+			payload, _ := json.Marshal(map[string]string{"matched": matched, "bio": bioText})
 			decisionMode := "join_keyword"
 			if strings.EqualFold(strings.TrimSpace(policy.Verify.ProfileCheckMode), "ai") {
 				decisionMode = "join_ai"
 			}
 			if aiOutput != nil && isAdKillerTextModel(aiOutput.Model) {
 				decisionMode = "join_adkiller_text_fallback"
+			}
+			caseSummaryText := ""
+			if strings.TrimSpace(bioText) != "" {
+				caseSummaryText = "个人简介：" + strings.TrimSpace(bioText)
 			}
 			if err := s.handleAsyncVerificationMatch(actionCtx, asyncVerificationMatch{
 				chat:                 chat,
@@ -1428,6 +1432,8 @@ func (s *Service) startAsyncVerificationChecks(chat *tele.Chat, user *tele.User,
 				aiOutput:             aiOutput,
 				decisionMode:         decisionMode,
 				membershipGeneration: membershipGeneration,
+				caseExplanation:      buildProfileCaseExplanation("入群资料检查", matched, aiOutput),
+				caseSummary:          caseSummaryText,
 			}); err != nil {
 				s.logger.Error("handle profile match failed", zap.Error(err), zap.Int64("chat_id", chat.ID), zap.Int64("user_id", user.ID))
 			}
@@ -1514,6 +1520,8 @@ type asyncVerificationMatch struct {
 	aiOutput             *ai.CheckOutput
 	decisionMode         string
 	membershipGeneration string
+	caseExplanation      string
+	caseSummary          string
 }
 
 type asyncVerificationMatchOps struct {
@@ -1600,7 +1608,17 @@ func (s *Service) handleAsyncVerificationMatch(ctx context.Context, match asyncV
 	}
 	key := fmt.Sprintf("%d:%d:%s:%s", match.chat.ID, match.user.ID, match.membershipGeneration, match.rule)
 	ownership, _ := json.Marshal(map[string]any{"membership_generation": match.membershipGeneration, "rule": match.rule, "ai_decision_id": profileDecisionID, "automatic_reversal": "manual_review"})
-	_, caseErr := s.queries.RecordModerationCase(ctx, store.ModerationCaseInput{SourceKey: "join_check:" + key, SourceKind: "join_check", SourceID: key, ChatID: match.chat.ID, UserID: match.user.ID, Action: "ban", Result: "executed", Explanation: "入群资料检查", Ownership: ownership})
+	explanation := strings.TrimSpace(match.caseExplanation)
+	if explanation == "" {
+		if match.rule == "cas_banned" {
+			explanation = "入群检查：命中 CAS 全局反垃圾黑名单"
+		} else if match.matched != nil && strings.TrimSpace(*match.matched) != "" {
+			explanation = "入群资料检查（" + strings.TrimSpace(*match.matched) + "）"
+		} else {
+			explanation = "入群资料检查"
+		}
+	}
+	_, caseErr := s.queries.RecordModerationCase(ctx, store.ModerationCaseInput{SourceKey: "join_check:" + key, SourceKind: "join_check", SourceID: key, ChatID: match.chat.ID, UserID: match.user.ID, Action: "ban", Result: "executed", Explanation: explanation, Summary: strings.TrimSpace(match.caseSummary), Ownership: ownership})
 	return caseErr
 }
 

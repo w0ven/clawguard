@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"net/http"
 	"strconv"
@@ -186,6 +187,35 @@ func (w *ModerationNotifications) resolveGroupJoinURL(parent context.Context, ch
 	return ""
 }
 
+func isProfileRelatedNotification(n store.ModerationNotification) bool {
+	if n.SourceKind == "join_check" || n.SourceKind == "profile_event" {
+		return strings.Contains(n.Explanation, "资料") || strings.Contains(n.Explanation, "简介") || strings.HasPrefix(strings.TrimSpace(n.Summary), "个人简介：")
+	}
+	return strings.HasPrefix(strings.TrimSpace(n.Summary), "个人简介：") || strings.Contains(n.Explanation, "个人资料") || strings.Contains(n.Explanation, "资料检查")
+}
+
+func formatEventTextHTML(raw string) string {
+	lines := strings.Split(strings.TrimSpace(raw), "\n")
+	var out []string
+	for i, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			out = append(out, "")
+			continue
+		}
+		if i == 0 {
+			out = append(out, "<b>"+html.EscapeString(line)+"</b>")
+			continue
+		}
+		if k, v, ok := strings.Cut(line, "："); ok {
+			out = append(out, fmt.Sprintf("<b>%s：</b>%s", html.EscapeString(k), html.EscapeString(v)))
+			continue
+		}
+		out = append(out, html.EscapeString(line))
+	}
+	return strings.Join(out, "\n")
+}
+
 func (w *ModerationNotifications) send(parent context.Context, n store.ModerationNotification) (string, time.Duration) {
 	var appealJoinURL string
 	if n.EventKind == "appeal_result" && n.AppealDecision == "approve" && n.AppealStatus == "completed" {
@@ -193,7 +223,7 @@ func (w *ModerationNotifications) send(parent context.Context, n store.Moderatio
 	}
 	ctx, cancel := context.WithTimeout(parent, 5*time.Second)
 	defer cancel()
-	// No user-supplied HTML or provider reason is interpreted as formatting.
+	// All user/provider strings are HTML-escaped before formatting.
 	result := map[string]string{"executed": "已执行", "partial": "部分执行", "failed": "未确认", "reversed": "已撤销"}[n.Result]
 	action := map[string]string{"delete": "删除消息", "delete_warn": "删除消息并警告", "delete_and_warn": "删除消息并警告", "warn": "警告", "mute": "禁言", "mute_5m": "禁言", "mute_1h": "禁言", "delete_mute": "删除消息并禁言", "delete_ban": "删除消息并封禁", "ban": "封禁", "kick": "移出群聊", "unban": "解除封禁", "unmute": "解除禁言"}[n.Action]
 	if action == "" {
@@ -205,31 +235,51 @@ func (w *ModerationNotifications) send(parent context.Context, n store.Moderatio
 	if n.Action == "unban" && n.Result == "partial" {
 		action, result = "解封请求", "状态待确认"
 	}
-	text := fmt.Sprintf("群规则处理通知 · CASE-%d\n群聊：%s\n处理：%s（%s）", n.CaseID, n.GroupTitle, action, result)
+	isProfileCase := isProfileRelatedNotification(n)
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "⚠️ <b>群规则处理通知 · CASE-%d</b>\n", n.CaseID)
+	fmt.Fprintf(&b, "<b>群聊：</b>%s\n", html.EscapeString(n.GroupTitle))
+	fmt.Fprintf(&b, "<b>处理：</b>%s（%s）", html.EscapeString(action), html.EscapeString(result))
 	if w.queries != nil {
 		if item, err := w.queries.AppealCaseForUser(ctx, n.CaseID, n.UserID); err == nil {
-			text += "\n记录时间：" + item.CreatedAt.UTC().Format("2006-01-02 15:04 UTC")
+			fmt.Fprintf(&b, "\n<b>记录时间：</b><code>%s</code>", html.EscapeString(item.CreatedAt.UTC().Format("2006-01-02 15:04 UTC")))
 		}
 	}
 	if n.Explanation != "" {
-		text += "\n说明：" + n.Explanation
+		fmt.Fprintf(&b, "\n<b>处理原因：</b>%s", html.EscapeString(n.Explanation))
 	}
 	if n.Summary != "" {
-		text += "\n消息摘要：" + n.Summary
+		summaryLabel := "触发内容"
+		if isProfileCase {
+			summaryLabel = "触发简介/内容"
+		}
+		fmt.Fprintf(&b, "\n<b>%s：</b>\n<blockquote>%s</blockquote>", summaryLabel, html.EscapeString(n.Summary))
 	}
-	text += "\n如认为此处理有误，可发起申诉，管理员将进行复核。"
+	if isProfileCase {
+		b.WriteString("\n💡 <i>提示：入群及发言前会检查个人简介；如简介含频道、外链或引流联系方式，请先修改后再申请解除或重新加群。</i>")
+	}
+	b.WriteString("\n\n如认为此处理有误，可点击下方按钮发起申诉，管理员将进行复核。")
+	text := b.String()
+
 	if n.EventKind == "appeal_result" {
-		text = n.EventText
+		text = formatEventTextHTML(n.EventText)
+		if n.AppealDecision == "approve" && isProfileCase {
+			if strings.TrimSpace(n.Summary) != "" {
+				text += "\n<b>原触发简介：</b>\n<blockquote>" + html.EscapeString(n.Summary) + "</blockquote>"
+			}
+			text += "\n\n⚠️ <b>重要提醒：</b>本次因<b>个人简介/资料</b>触发规则。系统已为您清除资料缓存，<b>重新入群前请先修改或清空个人简介中的频道、链接或联系方式</b>，否则入群自动检查仍会再次拦截封禁！"
+		}
 		if appealJoinURL != "" {
 			actLower := strings.ToLower(n.Action)
 			if strings.Contains(actLower, "ban") || strings.Contains(actLower, "kick") {
-				text += "\n\n您的群组限制已解除，点击下方按钮即可重新加入群聊。"
+				text += "\n\n您的群组限制已解除，确认个人资料合规后点击下方按钮即可重新加入群聊。"
 			} else {
 				text += "\n\n您的群组限制已解除，点击下方按钮可进入群聊。"
 			}
 		}
 	}
-	payload := map[string]any{"chat_id": n.UserID, "text": text, "disable_web_page_preview": true}
+	payload := map[string]any{"chat_id": n.UserID, "text": text, "parse_mode": "HTML", "disable_web_page_preview": true}
 	if w.publicBaseURL != "" && n.EventKind != "appeal_result" {
 		payload["reply_markup"] = map[string]any{"inline_keyboard": [][]any{{map[string]any{"text": "申诉", "web_app": map[string]string{"url": fmt.Sprintf("%s/appeal/mini?case=%d", w.publicBaseURL, n.CaseID)}}}}}
 	} else if n.EventKind == "appeal_result" && appealJoinURL != "" {

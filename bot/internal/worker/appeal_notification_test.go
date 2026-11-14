@@ -199,4 +199,46 @@ func TestAppealResultJoinButtonForApprovedCompleted(t *testing.T) {
 			t.Fatalf("state=%s payload=%+v", state, rawPayload)
 		}
 	})
+
+	t.Run("approved profile check appeal includes bio reminder and HTML formatting", func(t *testing.T) {
+		var sentPayload struct {
+			Text      string `json:"text"`
+			ParseMode string `json:"parse_mode"`
+		}
+		w := NewModerationNotifications(zap.NewNop(), nil, "fake")
+		w.client = &http.Client{Transport: appealNotificationTransport(func(r *http.Request) (*http.Response, error) {
+			switch {
+			case strings.HasSuffix(r.URL.Path, "/getChat"):
+				return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"ok":true,"result":{"username":"rfchost"}}`))}, nil
+			case strings.HasSuffix(r.URL.Path, "/sendMessage"):
+				_ = json.NewDecoder(r.Body).Decode(&sentPayload)
+				return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"ok":true}`))}, nil
+			default:
+				t.Fatalf("unexpected method %s", r.URL.Path)
+				return nil, nil
+			}
+		})}
+		state, _ := w.send(context.Background(), store.ModerationNotification{
+			CaseID:         2849,
+			UserID:         8258749205,
+			ChatID:         -1002699516772,
+			SourceKind:     "join_check",
+			Action:         "ban",
+			Explanation:    "入群资料检查（ad@引流）：简介引导频道私信",
+			Summary:        "个人简介：Channel DM / 有事频道私信 https://t.me/zyh099 <tag>",
+			EventKind:      "appeal_result",
+			EventText:      "✅ 申诉审核通过 · APL-10\n群聊：RFCHOST官方群组\n关联处理：CASE-2849\n审核结果：审核通过，原封禁已解除\n处理说明：管理员通过 Bot 私信审核通过",
+			AppealID:       10,
+			AppealDecision: "approve",
+			AppealStatus:   "completed",
+		})
+		if state != "sent" || sentPayload.ParseMode != "HTML" {
+			t.Fatalf("state=%s parse_mode=%q", state, sentPayload.ParseMode)
+		}
+		for _, want := range []string{"重要提醒", "重新入群前请先修改或清空个人简介", "<blockquote>个人简介：Channel DM", "&lt;tag&gt;"} {
+			if !strings.Contains(sentPayload.Text, want) {
+				t.Fatalf("missing %q in %s", want, sentPayload.Text)
+			}
+		}
+	})
 }

@@ -148,7 +148,7 @@ func TestAppealResultForbiddenIsTerminal(t *testing.T) {
 		}
 	})}
 	w.process(ctx)
-	if !strings.Contains(approvedText, "✅ 申诉审核通过 · APL-") || !strings.Contains(approvedText, "群聊：测试官方群") || !strings.Contains(approvedText, "重新加入群聊") || approvedMarkup == nil {
+	if !strings.Contains(approvedText, "✅ 申诉审核通过 · APL-") || !strings.Contains(approvedText, "<b>群聊：</b>测试官方群") || !strings.Contains(approvedText, "重新加入群聊") || approvedMarkup == nil {
 		t.Fatalf("approvedText=%q approvedMarkup=%+v", approvedText, approvedMarkup)
 	}
 }

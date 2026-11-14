@@ -151,11 +151,15 @@ func (s *Server) executeAppealLocked(ctx context.Context, v store.AppealReview) 
 		return "manual_review", "审核通过，重新入群限制需管理员核查；系统不会自动将用户拉回"
 	}
 	var owner struct {
-		AIDecisionID int64 `json:"ai_decision_id"`
-		WarningID    int64 `json:"warning_id"`
+		AIDecisionID int64  `json:"ai_decision_id"`
+		WarningID    int64  `json:"warning_id"`
+		Rule         string `json:"rule"`
 	}
 	if json.Unmarshal(v.Ownership, &owner) != nil {
 		return "manual_review", "审核通过，处理归属不明，现有限制未自动解除"
+	}
+	if s.botService != nil && (v.SourceKind == "join_check" || v.SourceKind == "profile_event" || strings.Contains(owner.Rule, "profile")) {
+		s.botService.ClearUserBioCheckCache(ctx, v.ChatID, v.UserID)
 	}
 	if (action == "warn" || action == "delete_warn" || action == "delete_and_warn") && owner.WarningID > 0 {
 		err := s.botService.Queries().ConsumeAppealWarning(ctx, v.ID, owner.WarningID, v.ChatID, v.UserID)
