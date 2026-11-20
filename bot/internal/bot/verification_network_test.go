@@ -2,11 +2,13 @@ package bot
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	tele "gopkg.in/telebot.v3"
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
@@ -90,6 +92,32 @@ func TestVerificationTLSHandshakeResetIsPreDispatch(t *testing.T) {
 	}
 }
 
+func TestVerificationStartHTTPClientNegotiatesHTTP2(t *testing.T) {
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(r.Proto))
+	}))
+	srv.EnableHTTP2 = true
+	srv.StartTLS()
+	defer srv.Close()
+
+	client := verificationStartHTTPClient()
+	tr := client.Transport.(*http.Transport)
+	tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+
+	resp, err := client.Get(srv.URL)
+	if err != nil {
+		t.Fatalf("GET failed: %v", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if resp.Proto != "HTTP/2.0" || string(body) != "HTTP/2.0" {
+		t.Fatalf("expected HTTP/2.0, got resp.Proto=%q serverSaw=%q", resp.Proto, string(body))
+	}
+}
+
 func TestVerificationNetworkRecovery(t *testing.T) {
 	reset := errors.New("telebot: Post: read: connection reset by peer")
 	for _, tc := range []struct {
@@ -138,6 +166,10 @@ func TestVerificationFailureNotice(t *testing.T) {
 	network := verificationStartFailureNotice(normalizeTelegramActionError("restrict", errors.New("connection reset by peer")))
 	if strings.Contains(network, "请检查 bot 是否拥有") || !strings.Contains(network, "网络异常") {
 		t.Fatal(network)
+	}
+	replayedNetwork := verificationStartFailureNotice(normalizeTelegramActionError("restrict", errors.Join(errVerificationStartNetworkNotSent, errCleanupNotDispatched, errCleanupManualReview)))
+	if !strings.Contains(replayedNetwork, "网络异常") {
+		t.Fatalf("replayed network failure notice lost network classification: %s", replayedNetwork)
 	}
 	permission := verificationStartFailureNotice(normalizeTelegramActionError("restrict", errors.New("not enough rights")))
 	if !strings.Contains(permission, "请检查 bot 是否拥有") {

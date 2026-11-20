@@ -18,6 +18,8 @@ import (
 	tele "gopkg.in/telebot.v3"
 )
 
+var errVerificationStartNetworkNotSent = errors.New("Telegram 网络异常，未发送验证限制")
+
 type verificationPreDispatchError struct {
 	cause error
 }
@@ -30,17 +32,21 @@ func newTelegramHTTPTransport(dialTimeout, tlsHandshakeTimeout, idleConnTimeout 
 		Timeout:   dialTimeout,
 		KeepAlive: 30 * time.Second,
 	}
+	var protocols http.Protocols
+	protocols.SetHTTP1(true)
+	protocols.SetHTTP2(true)
 	return &http.Transport{
 		Proxy:                 http.ProxyFromEnvironment,
 		DialContext:           dialer.DialContext,
 		ForceAttemptHTTP2:     true,
+		Protocols:             &protocols,
 		MaxIdleConns:          100,
 		MaxIdleConnsPerHost:   16,
 		IdleConnTimeout:       idleConnTimeout,
 		TLSHandshakeTimeout:   tlsHandshakeTimeout,
 		ExpectContinueTimeout: time.Second,
 		HTTP2: &http.HTTP2Config{
-			SendPingTimeout: 30 * time.Second,
+			SendPingTimeout: 20 * time.Second,
 			PingTimeout:     10 * time.Second,
 		},
 	}
@@ -159,8 +165,35 @@ func (s *Service) verificationStartRecoveryAllowed(ctx context.Context, chatID, 
 
 // Only a newly claimed verification_start calls this function. Old dispatched
 // records never enter it. Each dedicated HTTP call is bounded to eight seconds,
-// with at most three restrict calls and three reads; no new call is begun after
-// 35 seconds, so the transport bounds the total to at most 43 seconds plus DB.
+// with at most three restrict calls and bounded getChatMember probes; no new
+// call is begun after 35 seconds, so the transport bounds the total to at most
+// 43 seconds plus DB.
+func (s *Service) inspectVerificationMemberWithRetry(ctx context.Context, b *tele.Bot, chat *tele.Chat, user *tele.User, started time.Time, maxProbes int) (*tele.ChatMember, error) {
+	var lastErr error
+	for probe := 0; probe < maxProbes; probe++ {
+		if probe > 0 {
+			if err := waitVerificationRetry(ctx, time.Duration(probe)*500*time.Millisecond); err != nil {
+				return nil, errors.Join(lastErr, err)
+			}
+		}
+		if time.Since(started) >= 35*time.Second {
+			if lastErr != nil {
+				return nil, lastErr
+			}
+			return nil, context.DeadlineExceeded
+		}
+		actual, err := b.ChatMemberOf(chat, user)
+		if err == nil {
+			return actual, nil
+		}
+		lastErr = err
+		if !verificationRequestNotSent(err) && !transientVerificationNetworkError(err) {
+			return nil, err
+		}
+	}
+	return nil, lastErr
+}
+
 func (s *Service) restrictVerificationStartWithRecovery(ctx context.Context, chat *tele.Chat, user *tele.User, member *tele.ChatMember, generation string) error {
 	b := s.verificationStartBot
 	if b == nil {
@@ -172,17 +205,21 @@ func (s *Service) restrictVerificationStartWithRecovery(ctx context.Context, cha
 	defer cancel()
 	started := time.Now()
 	var last error
+	allPreDispatch := true
 	for attempt := 0; attempt < 3; attempt++ {
 		last = telegramConfirmedRestrict(b, chat, member)
 		if last == nil {
 			return nil
 		}
 		preDispatch := verificationRequestNotSent(last)
+		if !preDispatch {
+			allPreDispatch = false
+		}
 		if !preDispatch && !transientVerificationNetworkError(last) {
 			return last
 		}
 		if generation == "" || time.Since(started) >= 35*time.Second {
-			if preDispatch {
+			if allPreDispatch {
 				return &verificationStartNotSentError{last}
 			}
 			return last
@@ -190,49 +227,64 @@ func (s *Service) restrictVerificationStartWithRecovery(ctx context.Context, cha
 		if preDispatch && attempt == 2 {
 			break
 		}
-		if err := waitVerificationRetry(ctx, time.Duration(attempt+1)*300*time.Millisecond); err != nil {
-			if preDispatch {
+		if err := waitVerificationRetry(ctx, time.Duration(attempt+1)*400*time.Millisecond); err != nil {
+			if allPreDispatch {
 				return &verificationStartNotSentError{errors.Join(last, err)}
 			}
 			return errors.Join(last, err)
 		}
 		if time.Since(started) >= 35*time.Second {
-			if preDispatch {
+			if allPreDispatch {
 				break
 			}
 			return last
 		}
 		current, err := s.membershipSessionCurrent(ctx, chat.ID, user.ID, generation)
 		if err != nil || !current {
-			if preDispatch {
+			if allPreDispatch {
 				return &verificationStartNotSentError{errors.Join(last, errors.New("membership changed"), err)}
 			}
 			return errors.Join(last, errors.New("membership changed"), err)
 		}
 		allowed, err := s.verificationStartRecoveryAllowed(ctx, chat.ID, user.ID)
 		if err != nil || !allowed {
-			if preDispatch {
+			if allPreDispatch {
 				return &verificationStartNotSentError{errors.Join(last, errors.New("action, exemption or independent punishment state"), err)}
 			}
 			return errors.Join(last, errors.New("action, exemption or independent punishment state"), err)
 		}
-		actual, err := b.ChatMemberOf(chat, user)
-		if err != nil || actual == nil || actual.User == nil || actual.User.ID != user.ID {
-			if preDispatch {
+		actual, err := s.inspectVerificationMemberWithRetry(ctx, b, chat, user, started, 2)
+		if err != nil {
+			if preDispatch && (verificationRequestNotSent(err) || transientVerificationNetworkError(err)) {
+				// The prior restrict POST never left the host, and getChatMember failed
+				// only due to a transient network glitch; keep retrying within budget
+				// instead of abandoning after a single failed attempt.
+				last = errors.Join(last, err)
+				if attempt < 2 && time.Since(started) < 35*time.Second {
+					continue
+				}
+			}
+			if allPreDispatch {
 				return &verificationStartNotSentError{errors.Join(last, errors.New("member absent, privileged, restricted, or unavailable"), err)}
 			}
 			return errors.Join(last, errors.New("member unavailable after transient network error"), err)
 		}
+		if actual == nil || actual.User == nil || actual.User.ID != user.ID {
+			if allPreDispatch {
+				return &verificationStartNotSentError{errors.Join(last, errors.New("member absent, privileged, restricted, or unavailable"))}
+			}
+			return errors.Join(last, errors.New("member unavailable after transient network error"))
+		}
 		allowed, err = s.verificationStartRecoveryAllowed(ctx, chat.ID, user.ID)
 		if err != nil || !allowed || ctx.Err() != nil {
-			if preDispatch {
+			if allPreDispatch {
 				return &verificationStartNotSentError{errors.Join(last, errors.New("action, exemption or independent punishment state"), err, ctx.Err())}
 			}
 			return errors.Join(last, errors.New("action, exemption or independent punishment state"), err, ctx.Err())
 		}
 		current, err = s.membershipSessionCurrent(ctx, chat.ID, user.ID, generation)
 		if err != nil || !current || time.Since(started) >= 35*time.Second {
-			if preDispatch {
+			if allPreDispatch {
 				return &verificationStartNotSentError{errors.Join(last, errors.New("membership or action state changed"), err)}
 			}
 			return errors.Join(last, errors.New("membership or action state changed"), err)
@@ -241,7 +293,7 @@ func (s *Service) restrictVerificationStartWithRecovery(ctx context.Context, cha
 			return nil
 		}
 		if actual.Role != tele.Member {
-			if preDispatch {
+			if allPreDispatch {
 				return &verificationStartNotSentError{errors.Join(last, errors.New("member absent, privileged, restricted, or unavailable"))}
 			}
 			return errors.Join(last, errors.New("member absent, privileged, or independently restricted"))
@@ -330,7 +382,18 @@ func waitVerificationRetry(ctx context.Context, d time.Duration) error {
 func (s *Service) sendVerificationStartFailureNotice(ctx context.Context, chat *tele.Chat, user *tele.User, generation string, cause error) error {
 	message := fmt.Sprintf("%s 成员 ID：<code>%d</code>；请管理员核查成员状态并处理验证。", verificationStartFailureNotice(cause), user.ID)
 	send := func() error {
-		_, err := s.sendThrottled(ctx, chat, message, &tele.SendOptions{ParseMode: tele.ModeHTML, DisableWebPagePreview: true})
+		var err error
+		for attempt := 0; attempt < 2; attempt++ {
+			_, err = s.sendThrottled(ctx, chat, message, &tele.SendOptions{ParseMode: tele.ModeHTML, DisableWebPagePreview: true})
+			if err == nil || !transientVerificationNetworkError(err) {
+				return err
+			}
+			if attempt == 0 {
+				if waitErr := waitVerificationRetry(ctx, 400*time.Millisecond); waitErr != nil {
+					return errors.Join(err, waitErr)
+				}
+			}
+		}
 		return err
 	}
 	key := membershipCleanupKey("verification_start_notice", chat.ID, user.ID, generation)
@@ -358,7 +421,7 @@ func (s *Service) sendVerificationStartFailureNotice(ctx context.Context, chat *
 func verificationStartFailureNotice(err error) string {
 	text := strings.ToLower(redact.ErrorString(err))
 	suffix := "请检查 Telegram 返回错误及成员状态。"
-	if transientVerificationNetworkError(err) || strings.Contains(text, "网络异常") {
+	if errors.Is(err, errVerificationStartNetworkNotSent) || transientVerificationNetworkError(err) || strings.Contains(text, "网络异常") {
 		suffix = "连接 Telegram 时发生网络异常，无法确认验证限制已生效；不代表 bot 缺少权限。"
 	} else if strings.Contains(text, "缺 ban/禁言权限") || strings.Contains(text, "not enough rights") || strings.Contains(text, "administrator rights") {
 		suffix = "请检查 bot 是否拥有封禁/禁言成员权限。"

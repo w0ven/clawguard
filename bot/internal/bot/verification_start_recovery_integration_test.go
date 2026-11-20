@@ -20,14 +20,16 @@ import (
 )
 
 type verificationStartFaultTransport struct {
-	mu            sync.Mutex
-	base          *telegramMockTransport
-	restrictCalls int
-	mode, role    string
-	inspectFail   bool
-	userID        int64
-	afterDial     func()
-	afterSuccess  func()
+	mu                sync.Mutex
+	base              *telegramMockTransport
+	restrictCalls     int
+	inspectCalls      int
+	mode, role        string
+	inspectFail       bool
+	inspectFailBudget int
+	userID            int64
+	afterDial         func()
+	afterSuccess      func()
 }
 
 func (tr *verificationStartFaultTransport) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -58,7 +60,12 @@ func (tr *verificationStartFaultTransport) RoundTrip(req *http.Request) (*http.R
 		}
 	}
 	if method == "getChatMember" {
-		if tr.inspectFail {
+		tr.mu.Lock()
+		tr.inspectCalls++
+		ic := tr.inspectCalls
+		failBudget := tr.inspectFailBudget
+		tr.mu.Unlock()
+		if tr.inspectFail || (failBudget > 0 && ic <= failBudget) {
 			return nil, &net.OpError{Op: "read", Net: "tcp", Err: errors.New("connection reset by peer")}
 		}
 		role := tr.role
@@ -156,7 +163,7 @@ func TestVerificationStartDialProtectsStateIntegration(t *testing.T) {
 				t.Fatalf("unexpected repeat: %d", tr.calls())
 			}
 			state, result, err := q.CleanupDispatchState(ctx, membershipCleanupKey("verification_start", chat.ID, user.ID, "u202"))
-			if err != nil || state != "completed" || result != verificationStartNotSentResult {
+			if err != nil || state != "completed" || result != verificationStartNetworkNotSentResult {
 				t.Fatalf("dispatch %s %s %v", state, result, err)
 			}
 			if _, err = q.GetPendingVerification(ctx, store.GetPendingVerificationParams{ChatID: chat.ID, UserID: user.ID}); err == nil {
@@ -353,7 +360,7 @@ func TestVerificationStartDialTimeoutBoundedIntegration(t *testing.T) {
 		t.Fatalf("unbounded retries: %v", elapsed)
 	}
 	state, result, err := q.CleanupDispatchState(ctx, membershipCleanupKey("verification_start", chat.ID, user.ID, "u209"))
-	if err != nil || state != "completed" || result != verificationStartNotSentResult || tr.calls() != 3 {
+	if err != nil || state != "completed" || result != verificationStartNetworkNotSentResult || tr.calls() != 3 {
 		t.Fatalf("state %s %s %v calls %d", state, result, err, tr.calls())
 	}
 }
@@ -370,10 +377,10 @@ func TestVerificationStartDialExhaustionIsTerminalIntegration(t *testing.T) {
 	}
 	key := membershipCleanupKey("verification_start", chat.ID, user.ID, "u205")
 	state, result, err := q.CleanupDispatchState(ctx, key)
-	if err != nil || state != "completed" || result != verificationStartNotSentResult {
+	if err != nil || state != "completed" || result != verificationStartNetworkNotSentResult {
 		t.Fatalf("dispatch %s %s %v", state, result, err)
 	}
-	if _, err := s.guardedCleanup(ctx, key, chat.ID, user.ID, "verification_start", func() (string, error) { t.Fatal("replayed"); return "", nil }); !errors.Is(err, errCleanupManualReview) || !errors.Is(err, errCleanupNotDispatched) {
+	if _, err := s.guardedCleanup(ctx, key, chat.ID, user.ID, "verification_start", func() (string, error) { t.Fatal("replayed"); return "", nil }); !errors.Is(err, errCleanupManualReview) || !errors.Is(err, errCleanupNotDispatched) || !errors.Is(err, errVerificationStartNetworkNotSent) {
 		t.Fatalf("terminal result %v", err)
 	}
 	if err := s.startVerificationAt(chat, user, nil, "u205", time.Time{}); err != nil {
@@ -381,5 +388,45 @@ func TestVerificationStartDialExhaustionIsTerminalIntegration(t *testing.T) {
 	}
 	if tr.calls() != 3 || countString(base.Methods(), "sendMessage") != 1 {
 		t.Fatalf("calls %d / %v", tr.calls(), base.Methods())
+	}
+}
+
+func TestVerificationStartPreDispatchInspectGlitchRecoversIntegration(t *testing.T) {
+	ctx := context.Background()
+	s, q, tr, _ := setupStartRecovery(t, "dial", "member", 241)
+	tr.inspectFailBudget = 2
+	chat, user := &tele.Chat{ID: -90001}, &tele.User{ID: 241, FirstName: "test"}
+	if err := s.startVerificationAt(chat, user, nil, "u241", time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	if tr.calls() != 2 {
+		t.Fatalf("expected second restrict attempt after transient inspect failure, got calls=%d", tr.calls())
+	}
+	state, result, err := q.CleanupDispatchState(ctx, membershipCleanupKey("verification_start", chat.ID, user.ID, "u241"))
+	if err != nil || state != "completed" || result != "restricted" {
+		t.Fatalf("dispatch %s %s %v", state, result, err)
+	}
+	if _, err := q.GetPendingVerification(ctx, store.GetPendingVerificationParams{ChatID: chat.ID, UserID: user.ID}); err != nil {
+		t.Fatalf("missing pending verification: %v", err)
+	}
+}
+
+func TestVerificationStartPostDispatchInspectGlitchRecoversIntegration(t *testing.T) {
+	ctx := context.Background()
+	s, q, tr, _ := setupStartRecovery(t, "read", "verification-restricted", 242)
+	tr.inspectFailBudget = 1
+	chat, user := &tele.Chat{ID: -90001}, &tele.User{ID: 242, FirstName: "test"}
+	if err := s.startVerificationAt(chat, user, nil, "u242", time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	if tr.calls() != 1 {
+		t.Fatalf("expected single restrict confirmed by second getChatMember probe, got calls=%d", tr.calls())
+	}
+	state, result, err := q.CleanupDispatchState(ctx, membershipCleanupKey("verification_start", chat.ID, user.ID, "u242"))
+	if err != nil || state != "completed" || result != "restricted" {
+		t.Fatalf("dispatch %s %s %v", state, result, err)
+	}
+	if _, err := q.GetPendingVerification(ctx, store.GetPendingVerificationParams{ChatID: chat.ID, UserID: user.ID}); err != nil {
+		t.Fatalf("missing pending verification: %v", err)
 	}
 }

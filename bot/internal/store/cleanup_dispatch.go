@@ -52,7 +52,7 @@ RETURNING state`, key, chatID, userID).Scan(&state)
 
 func (q *Queries) HasPendingVerificationStartDispatch(ctx context.Context, key string, chatID, userID int64) (bool, error) {
 	var exists bool
-	err := q.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM verification_cleanup_dispatch WHERE operation_key=$1 AND chat_id=$2 AND user_id=$3 AND action='verification_start' AND (state='dispatched' OR (state='completed' AND result IN ('verification_start_not_sent_manual','verification_start_membership_changed_manual'))))`, key, chatID, userID).Scan(&exists)
+	err := q.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM verification_cleanup_dispatch WHERE operation_key=$1 AND chat_id=$2 AND user_id=$3 AND action='verification_start' AND (state='dispatched' OR (state='completed' AND result IN ('verification_start_not_sent_manual','verification_start_network_not_sent_manual','verification_start_membership_changed_manual'))))`, key, chatID, userID).Scan(&exists)
 	return exists, err
 }
 

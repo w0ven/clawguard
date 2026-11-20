@@ -12,6 +12,7 @@ var errCleanupManualReview = errors.New("Telegram 清理结果不明，请管理
 var errCleanupNotDispatched = errors.New("cleanup dispatch not sent")
 
 const verificationStartNotSentResult = "verification_start_not_sent_manual"
+const verificationStartNetworkNotSentResult = "verification_start_network_not_sent_manual"
 const verificationStartOwnershipUnknownResult = "verification_start_membership_changed_manual"
 
 func membershipCleanupKey(kind string, chatID, userID int64, generation string) string {
@@ -36,6 +37,9 @@ func (s *Service) guardedCleanup(ctx context.Context, key string, chatID, userID
 		return "", errors.Join(err, errCleanupNotDispatched)
 	}
 	if !claimed {
+		if action == "verification_start" && result == verificationStartNetworkNotSentResult {
+			return "", errors.Join(errVerificationStartNetworkNotSent, errCleanupNotDispatched, errCleanupManualReview)
+		}
 		if action == "verification_start" && result == verificationStartNotSentResult {
 			return "", errors.Join(errCleanupNotDispatched, errCleanupManualReview)
 		}
@@ -50,7 +54,11 @@ func (s *Service) guardedCleanup(ctx context.Context, key string, chatID, userID
 	result, err = execute()
 	var notSent *verificationStartNotSentError
 	if action == "verification_start" && errors.As(err, &notSent) {
-		if e := s.queries.CompleteCleanupDispatch(ctx, key, verificationStartNotSentResult); e != nil {
+		storedResult := verificationStartNotSentResult
+		if transientVerificationNetworkError(err) || verificationRequestNotSent(err) {
+			storedResult = verificationStartNetworkNotSentResult
+		}
+		if e := s.queries.CompleteCleanupDispatch(ctx, key, storedResult); e != nil {
 			return "", errors.Join(err, e, errCleanupManualReview)
 		}
 		return "", errors.Join(err, errCleanupNotDispatched, errCleanupManualReview)
