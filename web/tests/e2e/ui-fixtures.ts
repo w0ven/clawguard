@@ -15,6 +15,7 @@ export const test = base.extend<{mock:Mock}>({mock:[async({page},use,testInfo)=>
  await page.route('**/*',async route=>{
   const req=route.request(),url=new URL(req.url()),p=url.pathname;
   if(url.hostname!=='127.0.0.1') {mock.external.push('intercepted '+req.url());return route.fulfill({contentType:'application/javascript',body:''});}
+  if(p==='/vendor/telegram-web-app.js') return route.fulfill({contentType:'application/javascript',body:''});
   if(!p.startsWith('/api/'))return route.continue();
   let data:any;
   if(p==='/api/auth/me' && !(await page.context().cookies()).some(c=>c.name==='cg_admin'))return route.fulfill({status:401,json:{error:'Fixture unauthenticated'}});

@@ -105,3 +105,16 @@ test('verification rejects server-reported replay without falsely showing succes
  await page.route('**/api/verify/mini/**',route=>route.request().url().endsWith('/config')?route.fulfill({json:{turnstile_sitekey:'cf',hcaptcha_sitekey:'hc',group_title:'测试群',user_id:123,remaining_ms:120000}}):route.fulfill({status:409,json:{error:'验证已使用，请重新打开'}}));
  await page.goto(`/verify/mini?task=${token}${telegramFragment('signed')}`);await expect.poll(()=>page.evaluate(()=>!!((window as any).cf&&(window as any).h))).toBe(true);await page.evaluate(()=>{(window as any).cf.callback('cf');(window as any).h.callback('hc')});await page.getByRole('button',{name:'提交验证'}).click();await expect(page.getByText('验证已使用，请重新打开')).toBeVisible();await expect(page.getByText('入群验证已完成')).toHaveCount(0);
 });
+
+test('self-hosted Telegram WebApp SDK initializes verification without external telegram.org dependency', async ({ page, mock }) => {
+  await page.route('**/vendor/telegram-web-app.js*', route => route.continue());
+  let receivedInitData = '';
+  await page.route('**/api/verify/mini/config', route => {
+    receivedInitData = route.request().postDataJSON()?.init_data ?? '';
+    return route.fulfill({ json: { group_title: '自托管测试群', user_id: 456, remaining_ms: 90000, recovery_pending: true } });
+  });
+  await page.goto(`/verify/mini?task=${token}${telegramFragment('self-hosted-signed')}`);
+  await expect(page.getByText('自托管测试群')).toBeVisible();
+  expect(receivedInitData).toBe('self-hosted-signed');
+  expect(mock.external.some(entry => entry.includes('telegram.org') || entry.includes('fonts.googleapis.com'))).toBe(false);
+});
