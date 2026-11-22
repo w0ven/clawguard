@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -20,15 +21,24 @@ type telegramMenuResponse struct {
 	Description string `json:"description"`
 }
 
-func setDefaultMiniAppMenuButton(ctx context.Context, botToken, miniAppURL string) error {
+func setDefaultMiniAppMenuButton(ctx context.Context, botToken, text, miniAppURL string) error {
 	endpoint := "https://api.telegram.org/bot" + botToken + "/setChatMenuButton"
-	return postDefaultMiniAppMenuButton(ctx, telegramMenuHTTPClient, endpoint, miniAppURL)
+	return postMiniAppMenuButton(ctx, telegramMenuHTTPClient, endpoint, 0, text, miniAppURL)
+}
+
+func setChatMiniAppMenuButton(ctx context.Context, botToken string, chatID int64, text, miniAppURL string) error {
+	endpoint := "https://api.telegram.org/bot" + botToken + "/setChatMenuButton"
+	return postMiniAppMenuButton(ctx, telegramMenuHTTPClient, endpoint, chatID, text, miniAppURL)
 }
 
 func postDefaultMiniAppMenuButton(ctx context.Context, client *http.Client, endpoint, miniAppURL string) error {
+	return postMiniAppMenuButton(ctx, client, endpoint, 0, "管理面板", miniAppURL)
+}
+
+func postMiniAppMenuButton(ctx context.Context, client *http.Client, endpoint string, chatID int64, text, miniAppURL string) error {
 	menuButton, err := json.Marshal(map[string]any{
 		"type":    "web_app",
-		"text":    "管理面板",
+		"text":    text,
 		"web_app": map[string]string{"url": miniAppURL},
 	})
 	if err != nil {
@@ -36,6 +46,9 @@ func postDefaultMiniAppMenuButton(ctx context.Context, client *http.Client, endp
 	}
 
 	form := url.Values{"menu_button": {string(menuButton)}}
+	if chatID != 0 {
+		form.Set("chat_id", strconv.FormatInt(chatID, 10))
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode()))
 	if err != nil {
 		return fmt.Errorf("create Telegram menu request: %w", err)

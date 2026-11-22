@@ -56,3 +56,35 @@ func TestPostDefaultMiniAppMenuButtonRejectsTelegramError(t *testing.T) {
 		t.Fatalf("error = %v, want Telegram rejection", err)
 	}
 }
+
+func TestPostMiniAppMenuButtonPerChat(t *testing.T) {
+	const targetURL = "https://example.com/appeal/mini"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Fatalf("parse form: %v", err)
+		}
+		if got := r.FormValue("chat_id"); got != "123456" {
+			t.Fatalf("chat_id = %q, want 123456", got)
+		}
+		var button struct {
+			Type   string `json:"type"`
+			Text   string `json:"text"`
+			WebApp struct {
+				URL string `json:"url"`
+			} `json:"web_app"`
+		}
+		if err := json.Unmarshal([]byte(r.FormValue("menu_button")), &button); err != nil {
+			t.Fatalf("decode menu_button: %v", err)
+		}
+		if button.Type != "web_app" || button.Text != "我的处理记录" || button.WebApp.URL != targetURL {
+			t.Fatalf("unexpected menu button: %+v", button)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true,"result":true}`))
+	}))
+	defer server.Close()
+
+	if err := postMiniAppMenuButton(context.Background(), server.Client(), server.URL, 123456, "我的处理记录", targetURL); err != nil {
+		t.Fatalf("post per-chat menu button: %v", err)
+	}
+}

@@ -17,7 +17,7 @@ test('Mini App identifies the user, tracks original deadline and submits both ch
     w.turnstile = { render: (_node: unknown, options: any) => { w.cf = options; return 'cf'; }, remove: () => {} };
     w.hcaptcha = { render: (_node: unknown, options: any) => { w.h = options; return 'h'; }, remove: () => {} };
   });
-  await page.route('https://telegram.org/js/telegram-web-app.js*', route => route.fulfill({ contentType: 'application/javascript', body: telegramSDKFixture }));
+  await page.route('**/vendor/telegram-web-app.js*', route => route.fulfill({ contentType: 'application/javascript', body: telegramSDKFixture }));
   await page.route('**/api/verify/mini/**', async route => {
     requests.push(route.request().postDataJSON());
     if (route.request().url().endsWith('/config')) return route.fulfill({ json: { turnstile_sitekey: 'cf', hcaptcha_sitekey: 'h', group_title: '测试群', user_id: 123, username: 'alice', remaining_ms: 120000 } });
@@ -48,7 +48,7 @@ test('Mini App stops submission when the original deadline expires', async ({ pa
     w.turnstile = { render: (_node: unknown, opts: any) => { w.cf = opts; return 'cf'; }, remove: () => {} };
     w.hcaptcha = { render: (_node: unknown, opts: any) => { w.h = opts; return 'h'; }, remove: () => {} };
   });
-  await page.route('https://telegram.org/js/telegram-web-app.js*', route => route.fulfill({ contentType: 'application/javascript', body: telegramSDKFixture }));
+  await page.route('**/vendor/telegram-web-app.js*', route => route.fulfill({ contentType: 'application/javascript', body: telegramSDKFixture }));
   await page.route('**/api/verify/mini/config', route => route.fulfill({ json: { turnstile_sitekey: 'cf', hcaptcha_sitekey: 'h', group_title: '测试群', user_id: 123, remaining_ms: 0 } }));
   await page.goto(`/verify/mini?task=${token}${telegramFragment('signed')}`);
   await expect(page.getByText('入群验证已超时，本次验证已关闭。')).toBeVisible();
@@ -58,7 +58,7 @@ test('Mini App stops submission when the original deadline expires', async ({ pa
 });
 
 test('Mini App without Telegram identity refuses verification', async ({ page }) => {
-  await page.route('https://telegram.org/js/telegram-web-app.js*', route => route.fulfill({ contentType: 'application/javascript', body: telegramSDKFixture }));
+  await page.route('**/vendor/telegram-web-app.js*', route => route.fulfill({ contentType: 'application/javascript', body: telegramSDKFixture }));
   await page.goto(`/verify/mini?task=${token}#tgWebAppVersion=8.0`);
   await expect(page.locator('main[role=alert]')).toContainText('请本人从机器人私聊打开');
 });
@@ -75,7 +75,7 @@ test('Mini App frame policy is scoped to the verification page', async ({ reques
 
 test('verified task resumes without loading challenge scripts and ignores device clock offset', async ({ page }) => {
   await page.addInitScript(() => { Date.now = () => 1; });
-  await page.route('https://telegram.org/js/telegram-web-app.js*', route => route.fulfill({ contentType: 'application/javascript', body: telegramSDKFixture }));
+  await page.route('**/vendor/telegram-web-app.js*', route => route.fulfill({ contentType: 'application/javascript', body: telegramSDKFixture }));
   let challengeRequests = 0;
   await page.route(/challenges\.cloudflare\.com|js\.hcaptcha\.com/, route => { challengeRequests++; return route.abort(); });
   await page.route('**/api/verify/mini/**', route => {
@@ -94,14 +94,14 @@ test('verified task resumes without loading challenge scripts and ignores device
 
 test('Telegram-shaped launch preserves full init data through config and fails closed for expired identity', async ({page}) => {
  const init = new URLSearchParams({query_id:'AAFixture',user:JSON.stringify({id:123,first_name:'测试',username:'fixture'}),auth_date:'1793430000',hash:'a'.repeat(64),signature:'fixture-signature'}).toString();
- await page.route('https://telegram.org/js/telegram-web-app.js*', route => route.fulfill({contentType:'application/javascript',body:telegramSDKFixture}));
+ await page.route('**/vendor/telegram-web-app.js*', route => route.fulfill({contentType:'application/javascript',body:telegramSDKFixture}));
  let calls=0;await page.route('**/api/verify/mini/**',route=>{calls++;expect(route.request().postDataJSON()).toEqual({token,init_data:init});return route.fulfill({status:401,json:{error:'身份已过期，请重新从私聊打开'}})});
  await page.goto(`/verify/mini?task=${token}${telegramFragment(init)}`);await expect(page.getByText('身份已过期，请重新从私聊打开')).toBeVisible();await expect(page.getByRole('button',{name:'提交验证'})).toHaveCount(0);expect(calls).toBeGreaterThan(0);
 });
 
 test('verification rejects server-reported replay without falsely showing success', async ({page}) => {
  await page.addInitScript(()=>{const w=window as any;w.turnstile={render:(_:unknown,o:any)=>{w.cf=o;return 'cf'},remove:()=>{}};w.hcaptcha={render:(_:unknown,o:any)=>{w.h=o;return 'hc'},remove:()=>{}}});
- await page.route('https://telegram.org/js/telegram-web-app.js*',route=>route.fulfill({contentType:'application/javascript',body:telegramSDKFixture}));
+ await page.route('**/vendor/telegram-web-app.js*',route=>route.fulfill({contentType:'application/javascript',body:telegramSDKFixture}));
  await page.route('**/api/verify/mini/**',route=>route.request().url().endsWith('/config')?route.fulfill({json:{turnstile_sitekey:'cf',hcaptcha_sitekey:'hc',group_title:'测试群',user_id:123,remaining_ms:120000}}):route.fulfill({status:409,json:{error:'验证已使用，请重新打开'}}));
  await page.goto(`/verify/mini?task=${token}${telegramFragment('signed')}`);await expect.poll(()=>page.evaluate(()=>!!((window as any).cf&&(window as any).h))).toBe(true);await page.evaluate(()=>{(window as any).cf.callback('cf');(window as any).h.callback('hc')});await page.getByRole('button',{name:'提交验证'}).click();await expect(page.getByText('验证已使用，请重新打开')).toBeVisible();await expect(page.getByText('入群验证已完成')).toHaveCount(0);
 });

@@ -125,9 +125,16 @@ export default function MiniAppEntryPage() {
         </div>
 
         {error && (
-          <div className="flex w-full items-start justify-center gap-2 rounded-2xl bg-[var(--danger-soft)] px-4 py-3 text-sm text-[var(--danger)]">
-            <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0" />
-            <span>{error}</span>
+          <div className="flex w-full flex-col gap-2 rounded-2xl bg-[var(--danger-soft)] px-4 py-3 text-sm text-[var(--danger)]">
+            <div className="flex items-start justify-center gap-2">
+              <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0" />
+              <span>{error}</span>
+            </div>
+            {error === "请从 Telegram Bot 内打开此管理面板" && (
+              <p className="text-xs leading-relaxed text-[var(--text-muted)]">
+                此处为管理员后台入口；如需完成入群验证，请点击机器人私聊消息中的「打开验证」按钮，并确保设备网络可访问验证服务。
+              </p>
+            )}
           </div>
         )}
 

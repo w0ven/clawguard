@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Shield, ChevronRight, CheckCircle2, FileText, ArrowLeft } from "lucide-react";
 import { loadTurnstile, loadHCaptcha } from "@/components/dual-captcha-verify-client";
-import { telegramWebApp } from "@/lib/telegram";
+import { ensureTelegramWebApp } from "@/lib/telegram";
 
 type Case = { id: number; group_title: string; action: string; result: string; explanation: string; summary: string; created_at: string; appeal_status: string | null };
 type Appeal = { id: number; case_id: number; status: string; reason: string; reference_url: string; created_at: string; public_note?: string; execution_result?: string };
@@ -29,15 +29,14 @@ export default function AppealMiniPage() {
     if (id && /^[1-9]\d*$/.test(id) && Number.isSafeInteger(Number(id))) startCase.current = Number(id);
     u.searchParams.delete("case"); window.history.replaceState(window.history.state, "", u.pathname + u.search + u.hash);
     let disposed = false; let cleanup = () => {};
-    const script = document.createElement("script"); script.src = "https://telegram.org/js/telegram-web-app.js";
-    script.onload = () => {
-      if (disposed) return; const app = telegramWebApp(); if (!app?.initData) { setError("无法验证当前账号，请本人从机器人私聊打开。"); return; }
-      const update = () => { document.documentElement.style.setProperty("--mini-safe-top", `${Math.max(0, app.safeAreaInset?.top ?? 0) + Math.max(0, app.contentSafeAreaInset?.top ?? 0)}px`); document.documentElement.style.setProperty("--mini-safe-bottom", `${Math.max(0, app.safeAreaInset?.bottom ?? 0) + Math.max(0, app.contentSafeAreaInset?.bottom ?? 0)}px`); };
-      app.onEvent?.("safeAreaChanged", update); app.onEvent?.("contentSafeAreaChanged", update); cleanup = () => { app.offEvent?.("safeAreaChanged", update); app.offEvent?.("contentSafeAreaChanged", update); }; app.ready(); app.expand(); update(); setInit(app.initData); setCaseID(startCase.current);
-    };
-    script.onerror = () => { if (!disposed) setError("页面加载失败，请返回私聊重试。"); };
-    document.head.appendChild(script);
-    return () => { disposed = true; cleanup(); script.remove(); document.documentElement.style.removeProperty("--mini-safe-top"); document.documentElement.style.removeProperty("--mini-safe-bottom"); };
+    void ensureTelegramWebApp()
+      .then((app) => {
+        if (disposed) return; if (!app?.initData) { setError("无法验证当前账号，请本人从机器人私聊打开。"); return; }
+        const update = () => { document.documentElement.style.setProperty("--mini-safe-top", `${Math.max(0, app.safeAreaInset?.top ?? 0) + Math.max(0, app.contentSafeAreaInset?.top ?? 0)}px`); document.documentElement.style.setProperty("--mini-safe-bottom", `${Math.max(0, app.safeAreaInset?.bottom ?? 0) + Math.max(0, app.contentSafeAreaInset?.bottom ?? 0)}px`); };
+        app.onEvent?.("safeAreaChanged", update); app.onEvent?.("contentSafeAreaChanged", update); cleanup = () => { app.offEvent?.("safeAreaChanged", update); app.offEvent?.("contentSafeAreaChanged", update); }; app.ready(); app.expand(); update(); setInit(app.initData); setCaseID(startCase.current);
+      })
+      .catch(() => { if (!disposed) setError("页面加载失败，请返回私聊重试。"); });
+    return () => { disposed = true; cleanup(); document.documentElement.style.removeProperty("--mini-safe-top"); document.documentElement.style.removeProperty("--mini-safe-bottom"); };
   }, []);
 
   useEffect(() => {

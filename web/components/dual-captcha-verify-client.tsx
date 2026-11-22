@@ -30,12 +30,12 @@ type SiteKeys = { turnstile_sitekey: string; hcaptcha_sitekey: string; group_tit
 function loadScript(url: string): Promise<void> {
   return new Promise((resolve, reject) => {
     const script = document.createElement("script");
-    const timeout = window.setTimeout(() => { script.remove(); reject(new Error("验证组件加载超时")); }, 15000);
+    const timeout = window.setTimeout(() => { script.remove(); reject(new Error("验证组件加载超时，请确认设备已开启系统/全局代理后点击刷新重试")); }, 15000);
     script.src = url;
     script.async = true;
     script.defer = true;
     script.onload = () => { window.clearTimeout(timeout); resolve(); };
-    script.onerror = () => { window.clearTimeout(timeout); script.remove(); reject(new Error("验证组件加载失败")); };
+    script.onerror = () => { window.clearTimeout(timeout); script.remove(); reject(new Error("验证组件加载失败，请确认设备已开启系统/全局代理后点击刷新重试")); };
     document.head.appendChild(script);
   });
 }
@@ -55,7 +55,7 @@ export function loadHCaptcha(): Promise<void> {
     const timeout = window.setTimeout(() => {
       script.remove();
       delete window.__clawguardHcaptchaOnload;
-      reject(new Error("hCaptcha 组件加载超时"));
+      reject(new Error("hCaptcha 组件加载超时，请确认设备已开启系统/全局代理后点击刷新重试"));
     }, 15000);
     window.__clawguardHcaptchaOnload = () => {
       window.clearTimeout(timeout);
@@ -69,7 +69,7 @@ export function loadHCaptcha(): Promise<void> {
       window.clearTimeout(timeout);
       delete window.__clawguardHcaptchaOnload;
       script.remove();
-      reject(new Error("hCaptcha 组件加载失败"));
+      reject(new Error("hCaptcha 组件加载失败，请确认设备已开启系统/全局代理后点击刷新重试"));
     };
     document.head.appendChild(script);
   }).catch((error) => { hCaptchaLoading = null; throw error; });

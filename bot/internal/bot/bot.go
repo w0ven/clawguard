@@ -335,8 +335,25 @@ func (s *Service) setupCommandMenu(ctx context.Context) error {
 	}); err != nil {
 		return fmt.Errorf("set private commands: %w", err)
 	}
-	if err := setDefaultMiniAppMenuButton(ctx, s.cfg.BotToken, strings.TrimRight(s.cfg.PublicBaseURL, "/")+"/miniapp"); err != nil {
-		return fmt.Errorf("set mini app menu button: %w", err)
+	baseURL := strings.TrimRight(s.cfg.PublicBaseURL, "/")
+	if err := setDefaultMiniAppMenuButton(ctx, s.cfg.BotToken, "我的处理记录", baseURL+"/appeal/mini"); err != nil {
+		return fmt.Errorf("set default mini app menu button: %w", err)
+	}
+	if s.queries != nil {
+		admins, err := s.queries.ListAdmins(ctx)
+		if err != nil {
+			s.logger.Warn("list admins for menu button failed", zap.Error(err))
+		} else {
+			miniAppURL := baseURL + "/miniapp"
+			for _, admin := range admins {
+				if admin.TelegramID <= 0 {
+					continue
+				}
+				if err := setChatMiniAppMenuButton(ctx, s.cfg.BotToken, admin.TelegramID, "管理面板", miniAppURL); err != nil {
+					s.logger.Warn("set admin mini app menu button failed", zap.Int64("telegram_id", admin.TelegramID), zap.Error(err))
+				}
+			}
+		}
 	}
 	return nil
 }

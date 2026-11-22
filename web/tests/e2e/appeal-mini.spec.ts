@@ -7,7 +7,7 @@ test('record to verified appeal and receipt, preserving form on refresh', async 
  let challengeCount=0; let submitted: any;
  await page.route('**/*', route => new URL(route.request().url()).hostname === '127.0.0.1' ? route.continue() : route.abort());
  await page.addInitScript(() => { const w=window as any; w.turnstile={render: (_: unknown, o: any)=>{w.cf=o; return 'cf'},remove:()=>{}};w.hcaptcha={render:(_: unknown,o:any)=>{w.hc=o;return 'hc'},remove:()=>{}}; });
- await page.route('https://telegram.org/js/telegram-web-app.js*', r=>r.fulfill({contentType:'application/javascript',body:`window.Telegram={WebApp:{initData:'signed',ready(){},expand(){},BackButton:{onClick(){},offClick(){},show(){},hide(){}},safeAreaInset:{top:10,bottom:0},contentSafeAreaInset:{top:20,bottom:0}}}` }));
+ await page.route('**/vendor/telegram-web-app.js*', r=>r.fulfill({contentType:'application/javascript',body:`window.Telegram={WebApp:{initData:'signed',ready(){},expand(){},BackButton:{onClick(){},offClick(){},show(){},hide(){}},safeAreaInset:{top:10,bottom:0},contentSafeAreaInset:{top:20,bottom:0}}}` }));
  await page.route('**/api/appeal/mini/**',r=>{
   const p=r.request().postDataJSON(); expect(p.init_data).toBe('signed');
   const url=r.request().url();
@@ -34,7 +34,7 @@ test('record to verified appeal and receipt, preserving form on refresh', async 
 
 test('direct case link preserves Telegram fragment and security headers are scoped',async ({page,request})=>{
  await page.route('**/*', route => new URL(route.request().url()).hostname === '127.0.0.1' ? route.continue() : route.abort());
- await page.route('https://telegram.org/js/telegram-web-app.js*',r=>r.fulfill({contentType:'application/javascript',body:`window.Telegram={WebApp:{initData:'signed',ready(){},expand(){},BackButton:{onClick(){},offClick(){},show(){},hide(){}}}}`}));
+ await page.route('**/vendor/telegram-web-app.js*',r=>r.fulfill({contentType:'application/javascript',body:`window.Telegram={WebApp:{initData:'signed',ready(){},expand(){},BackButton:{onClick(){},offClick(){},show(){},hide(){}}}}`}));
  await page.route('**/api/appeal/mini/case',r=>r.fulfill({json:{case:{...item,action:'ban',result:'partial',explanation:'仅删除消息'},appeal:receipt}}));
  await page.goto('/appeal/mini?case=42#tgWebAppData=signed');
  await expect(page.getByText('申诉编号：APL-7')).toBeVisible();
@@ -47,7 +47,7 @@ test('direct case link preserves Telegram fragment and security headers are scop
 
 test('draft exit is confirmed and pending challenge cannot switch cases', async ({page}) => {
  await page.route('**/*', r=>new URL(r.request().url()).hostname==='127.0.0.1'?r.continue():r.abort());
- await page.route('https://telegram.org/js/telegram-web-app.js*',r=>r.fulfill({contentType:'application/javascript',body:`window.Telegram={WebApp:{initData:'signed',ready(){},expand(){},BackButton:{onClick(){},offClick(){},show(){},hide(){}}}}`}));
+ await page.route('**/vendor/telegram-web-app.js*',r=>r.fulfill({contentType:'application/javascript',body:`window.Telegram={WebApp:{initData:'signed',ready(){},expand(){},BackButton:{onClick(){},offClick(){},show(){},hide(){}}}}`}));
  let release!:()=>void; const pending=new Promise<void>(resolve=>{release=resolve}); let challenges=0;
  await page.route('**/api/appeal/mini/**',async r=>{const path=new URL(r.request().url()).pathname;if(path.endsWith('/list'))return r.fulfill({json:{cases:[item],has_more:false}});if(path.endsWith('/case'))return r.fulfill({json:{case:item,appeal:null}});if(path.endsWith('/challenge')){challenges++;await pending;return r.fulfill({status:503,json:{error:'暂不可用'}})}return r.abort()});
  await page.goto('/appeal/mini'); await page.getByRole('button',{name:/CASE-42/}).click(); await page.getByLabel('申诉理由（必填）').fill('草稿');

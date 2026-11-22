@@ -26,6 +26,28 @@ declare global {
   }
 }
 
+export const TELEGRAM_WEB_APP_SCRIPT_SRC = "/vendor/telegram-web-app.js?59";
+
 export function telegramWebApp() {
   return typeof window === "undefined" ? undefined : window.Telegram?.WebApp;
+}
+
+export function ensureTelegramWebApp(): Promise<TelegramWebApp | undefined> {
+  if (typeof window === "undefined") {
+    return Promise.resolve(undefined);
+  }
+  const existing = window.Telegram?.WebApp;
+  if (existing) {
+    return Promise.resolve(existing);
+  }
+  return new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = TELEGRAM_WEB_APP_SCRIPT_SRC;
+    script.onload = () => resolve(window.Telegram?.WebApp);
+    script.onerror = () => {
+      script.remove();
+      reject(new Error("telegram sdk load failed"));
+    };
+    document.head.appendChild(script);
+  });
 }

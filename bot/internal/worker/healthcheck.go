@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"html"
 	"strings"
 	"time"
 
@@ -67,10 +68,19 @@ func (w *Healthcheck) checkOnce(ctx context.Context) {
 	if len(alerts) == 0 {
 		return
 	}
-	message := "<b>ClawGuard operations alert</b><br>" + strings.Join(alerts, "<br>")
+	message := formatOperationsAlertHTML(alerts)
 	if err := w.sendAlert(ctx, message); err != nil {
 		w.logger.Warn("send healthcheck alert failed", zap.Error(err))
 	}
+}
+
+func formatOperationsAlertHTML(alerts []string) string {
+	lines := make([]string, 0, len(alerts)+1)
+	lines = append(lines, "<b>ClawGuard operations alert</b>")
+	for _, alert := range alerts {
+		lines = append(lines, "• "+html.EscapeString(alert))
+	}
+	return strings.Join(lines, "\n")
 }
 
 type operationsStatus struct {

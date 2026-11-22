@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/openclaw/clawguard/internal/bot"
@@ -39,5 +40,16 @@ func TestOperationsAlertsReportsMissingBackup(t *testing.T) {
 	alerts := operationsAlerts(operationsStatus{})
 	if len(alerts) != 1 || alerts[0] != "No successful database backup has been recorded" {
 		t.Fatalf("operationsAlerts() = %v, want missing backup alert", alerts)
+	}
+}
+
+func TestFormatOperationsAlertHTMLUsesTelegramNewlines(t *testing.T) {
+	msg := formatOperationsAlertHTML([]string{"Backup <stale> & missing", "Queue > 100"})
+	if strings.Contains(msg, "<br") {
+		t.Fatalf("Telegram HTML must not contain <br>: %s", msg)
+	}
+	want := "<b>ClawGuard operations alert</b>\n• Backup &lt;stale&gt; &amp; missing\n• Queue &gt; 100"
+	if msg != want {
+		t.Fatalf("formatOperationsAlertHTML() = %q, want %q", msg, want)
 	}
 }
